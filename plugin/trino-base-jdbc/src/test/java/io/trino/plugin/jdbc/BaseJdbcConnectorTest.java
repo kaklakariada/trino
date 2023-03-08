@@ -161,6 +161,7 @@ public abstract class BaseJdbcConnectorTest
     @Test
     public void testInsertInPresenceOfNotSupportedColumn()
     {
+        skipTestUnless(hasBehavior(SUPPORTS_INSERT));
         try (TestTable testTable = createTableWithUnsupportedColumn()) {
             String unqualifiedTableName = testTable.getName().replaceAll("^\\w+\\.", "");
             // Check that column 'two' is not supported.
@@ -325,6 +326,8 @@ public abstract class BaseJdbcConnectorTest
             // Covered by testAggregationPushdown
             return;
         }
+
+        skipTestUnless(hasBehavior(SUPPORTS_INSERT));
 
         boolean supportsPushdownWithVarcharInequality = hasBehavior(SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY);
         boolean supportsCountDistinctPushdown = hasBehavior(SUPPORTS_AGGREGATION_PUSHDOWN_COUNT_DISTINCT);
@@ -1231,6 +1234,8 @@ public abstract class BaseJdbcConnectorTest
             return;
         }
 
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
+
         // Disable DF here for the sake of negative test cases' expected plan. With DF enabled, some operators return in DF's FilterNode and some do not.
         Session withoutDynamicFiltering = Session.builder(session)
                 .setSystemProperty("enable_dynamic_filtering", "false")
@@ -1529,7 +1534,7 @@ public abstract class BaseJdbcConnectorTest
     @Test
     public void testDeleteWithBigintEqualityPredicate()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
         // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_bigint", "AS SELECT * FROM region")) {
             assertUpdate("DELETE FROM " + table.getName() + " WHERE regionkey = 1", 1);
@@ -1546,7 +1551,7 @@ public abstract class BaseJdbcConnectorTest
     @Test
     public void testDeleteWithVarcharEqualityPredicate()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_INSERT) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
         // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_varchar", "(col varchar(1))", ImmutableList.of("'a'", "'A'", "null"))) {
             if (!hasBehavior(SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY)) {
@@ -1597,7 +1602,7 @@ public abstract class BaseJdbcConnectorTest
     @Override
     public void testDeleteWithComplexPredicate()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
         if (hasBehavior(SUPPORTS_MERGE)) {
             super.testDeleteWithComplexPredicate();
             return;
@@ -1609,7 +1614,7 @@ public abstract class BaseJdbcConnectorTest
     @Override
     public void testDeleteWithSubquery()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
         if (hasBehavior(SUPPORTS_MERGE)) {
             super.testDeleteWithSubquery();
             return;
@@ -1621,7 +1626,7 @@ public abstract class BaseJdbcConnectorTest
     @Override
     public void testExplainAnalyzeWithDeleteWithSubquery()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
         if (hasBehavior(SUPPORTS_MERGE)) {
             super.testExplainAnalyzeWithDeleteWithSubquery();
             return;
@@ -1633,7 +1638,7 @@ public abstract class BaseJdbcConnectorTest
     @Override
     public void testDeleteWithSemiJoin()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
         if (hasBehavior(SUPPORTS_MERGE)) {
             super.testDeleteWithSemiJoin();
             return;
@@ -1654,6 +1659,7 @@ public abstract class BaseJdbcConnectorTest
         if (!hasBehavior(SUPPORTS_CREATE_TABLE)) {
             throw new SkipException("CREATE TABLE is required for testing non-transactional write support");
         }
+        skipTestUnless(hasBehavior(SUPPORTS_INSERT));
         Session session = Session.builder(getSession())
                 .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "non_transactional_insert", "false")
                 .build();
@@ -1672,7 +1678,7 @@ public abstract class BaseJdbcConnectorTest
     @Test(dataProvider = "batchSizeAndTotalNumberOfRowsToInsertDataProvider")
     public void testWriteBatchSizeSessionProperty(Integer batchSize, Integer numberOfRows)
     {
-        if (!hasBehavior(SUPPORTS_CREATE_TABLE)) {
+        if (!hasBehavior(SUPPORTS_CREATE_TABLE) || !hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) || !hasBehavior(SUPPORTS_INSERT)) {
             throw new SkipException("CREATE TABLE is required for write_batch_size test but is not supported");
         }
         Session session = Session.builder(getSession())
@@ -1692,8 +1698,8 @@ public abstract class BaseJdbcConnectorTest
     @Test(dataProvider = "writeTaskParallelismDataProvider")
     public void testWriteTaskParallelismSessionProperty(int parallelism, int numberOfRows)
     {
-        if (!hasBehavior(SUPPORTS_CREATE_TABLE)) {
-            throw new SkipException("CREATE TABLE is required for write_parallelism test but is not supported");
+        if (!hasBehavior(SUPPORTS_CREATE_TABLE) || !hasBehavior(SUPPORTS_INSERT)) {
+            throw new SkipException("CREATE TABLE and INSERT is required for write_parallelism test but is not supported");
         }
 
         Session session = Session.builder(getSession())

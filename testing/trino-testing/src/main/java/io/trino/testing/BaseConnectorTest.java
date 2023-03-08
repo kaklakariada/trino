@@ -348,7 +348,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testCharVarcharComparison()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         try (TestTable table = new TestTable(
                 getQueryRunner()::execute,
@@ -382,7 +382,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testVarcharCharComparison()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         try (TestTable table = new TestTable(
                 getQueryRunner()::execute,
@@ -2449,6 +2449,7 @@ public abstract class BaseConnectorTest
             assertQueryFails("ALTER TABLE nation ADD COLUMN test_add_column bigint", "This connector does not support adding columns");
             return;
         }
+        skipTestUnless(hasBehavior(SUPPORTS_INSERT));
 
         String tableName;
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_add_column_", tableDefinitionForAddColumn())) {
@@ -2522,7 +2523,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testAddNotNullColumnToEmptyTable()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_ADD_COLUMN));
+        skipTestUnless(hasBehavior(SUPPORTS_ADD_COLUMN) && hasBehavior(SUPPORTS_INSERT));
 
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_add_nn_to_empty", "(a_varchar varchar)")) {
             String tableName = table.getName();
@@ -2549,7 +2550,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testAddNotNullColumn()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT)); // covered by testAddNotNullColumnToEmptyTable
+        skipTestUnless(hasBehavior(SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT) && hasBehavior(SUPPORTS_INSERT)); // covered by testAddNotNullColumnToEmptyTable
 
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_add_nn_col", "(a_varchar varchar)")) {
             String tableName = table.getName();
@@ -2635,7 +2636,7 @@ public abstract class BaseConnectorTest
             return;
         }
 
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         String tableName;
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_drop_column_", "AS SELECT 123 x, 456 y, 111 a")) {
@@ -2773,7 +2774,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testDropAndAddColumnWithSameName()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_DROP_COLUMN) && hasBehavior(SUPPORTS_ADD_COLUMN));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_DROP_COLUMN) && hasBehavior(SUPPORTS_ADD_COLUMN));
 
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_drop_add_column", "AS SELECT 1 x, 2 y, 3 z")) {
             assertUpdate("ALTER TABLE " + table.getName() + " DROP COLUMN y");
@@ -2792,7 +2793,7 @@ public abstract class BaseConnectorTest
             return;
         }
 
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         String tableName;
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_rename_column_", "AS SELECT 'some value' x")) {
@@ -3006,6 +3007,12 @@ public abstract class BaseConnectorTest
         }
 
         public SetColumnTypeSetup withNewValueLiteral(String newValueLiteral)
+        {
+            checkState(!unsupportedType);
+            return new SetColumnTypeSetup(sourceColumnType, sourceValueLiteral, newColumnType, newValueLiteral, unsupportedType);
+        }
+
+        public SetColumnTypeSetup withNewColumnType(String newColumnType)
         {
             checkState(!unsupportedType);
             return new SetColumnTypeSetup(sourceColumnType, sourceValueLiteral, newColumnType, newValueLiteral, unsupportedType);
@@ -3408,7 +3415,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testRenameTableToLongTableName()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_RENAME_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_RENAME_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         String sourceTableName = "test_rename_source_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + sourceTableName + " AS SELECT 123 x", 1);
@@ -3484,7 +3491,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testAlterTableAddLongColumnName()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_ADD_COLUMN));
+        skipTestUnless(hasBehavior(SUPPORTS_ADD_COLUMN) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         String tableName = "test_long_column" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " AS SELECT 123 x", 1);
@@ -3514,7 +3521,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testAlterTableRenameColumnToLongName()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_RENAME_COLUMN));
+        skipTestUnless(hasBehavior(SUPPORTS_RENAME_COLUMN) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         String tableName = "test_long_column" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " AS SELECT 123 x", 1);
@@ -3726,7 +3733,7 @@ public abstract class BaseConnectorTest
     public void testCreateTableAsSelectWithUnicode()
     {
         // Covered by testCreateTableAsSelect
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
         assertCreateTableAsSelect(
                 "SELECT '\u2603' unicode",
                 "SELECT 1");
@@ -3785,7 +3792,7 @@ public abstract class BaseConnectorTest
     public void testRenameTable()
             throws Exception
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
         String tableName = "test_rename_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " AS SELECT 123 x", 1);
 
@@ -3876,7 +3883,7 @@ public abstract class BaseConnectorTest
     public void testRenameTableToUnqualifiedPreservesSchema()
             throws Exception
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_SCHEMA) && hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_RENAME_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_SCHEMA) && hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_RENAME_TABLE));
 
         String sourceSchemaName = "test_source_schema_" + randomNameSuffix();
         assertUpdate(createSchemaSql(sourceSchemaName));
@@ -4283,7 +4290,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testInsertIntoNotNullColumn()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         if (!hasBehavior(SUPPORTS_NOT_NULL_CONSTRAINT)) {
             assertQueryFails(
@@ -4406,7 +4413,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testDelete()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_DELETE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         // delete successive parts of the table
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_", "AS SELECT * FROM orders")) {
@@ -4450,7 +4457,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testDeleteWithLike()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_DELETE));
 
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_with_like_", "AS SELECT * FROM nation")) {
             assertUpdate("DELETE FROM " + table.getName() + " WHERE name LIKE '%a%'", "VALUES 0");
@@ -4608,7 +4615,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testDeleteAllDataFromTable()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_DELETE));
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_all_data", "AS SELECT * FROM region")) {
             // not using assertUpdate as some connectors provide update count and some not
             getQueryRunner().execute("DELETE FROM " + table.getName());
@@ -4619,7 +4626,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testRowLevelDelete()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
         // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_row_delete", "AS SELECT * FROM region")) {
             assertUpdate("DELETE FROM " + table.getName() + " WHERE regionkey = 2", 1);
@@ -4963,7 +4970,7 @@ public abstract class BaseConnectorTest
             return;
         }
 
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_truncate", "AS SELECT * FROM region")) {
             assertUpdate("TRUNCATE TABLE " + table.getName());
@@ -5044,7 +5051,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testSymbolAliasing()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         String tableName = "test_symbol_aliasing" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " AS SELECT 1 foo_1, 2 foo_2_4", 1);
@@ -5113,7 +5120,7 @@ public abstract class BaseConnectorTest
     @Test(dataProvider = "testColumnNameDataProvider")
     public void testColumnName(String columnName)
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_INSERT));
 
         if (!requiresDelimiting(columnName)) {
             testColumnName(columnName, false);
@@ -5394,7 +5401,7 @@ public abstract class BaseConnectorTest
 
     private void testDataMapping(DataMappingTestSetup dataMappingTestSetup)
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         String trinoTypeName = dataMappingTestSetup.getTrinoTypeName();
         String sampleValueLiteral = dataMappingTestSetup.getSampleValueLiteral();

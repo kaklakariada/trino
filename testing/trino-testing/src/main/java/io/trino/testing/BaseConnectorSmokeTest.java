@@ -227,7 +227,7 @@ public abstract class BaseConnectorSmokeTest
     @Test
     public void testDeleteAllDataFromTable()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_DELETE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_all_data", "AS SELECT * FROM region")) {
             // not using assertUpdate as some connectors provide update count and some do not
             getQueryRunner().execute("DELETE FROM " + table.getName());
@@ -238,7 +238,7 @@ public abstract class BaseConnectorSmokeTest
     @Test
     public void testRowLevelDelete()
     {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
         // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_row_delete", "AS SELECT * FROM region")) {
             assertUpdate("DELETE FROM " + table.getName() + " WHERE regionkey = 2", 1);
@@ -258,7 +258,7 @@ public abstract class BaseConnectorSmokeTest
             return;
         }
 
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
 
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_truncate", "AS SELECT * FROM region")) {
             assertUpdate("TRUNCATE TABLE " + table.getName());
