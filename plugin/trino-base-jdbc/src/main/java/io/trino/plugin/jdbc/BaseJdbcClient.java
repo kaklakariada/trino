@@ -1516,6 +1516,7 @@ public abstract class BaseJdbcClient
     public PreparedStatement getPreparedStatement(Connection connection, String sql, Optional<Integer> columnCount)
             throws SQLException
     {
+        System.out.println("Creating prepared statement: "+sql);
         return connection.prepareStatement(sql);
     }
 

@@ -15,6 +15,7 @@ package io.trino.plugin.exasol;
 
 import com.exasol.jdbc.EXADriver;
 import com.google.inject.Binder;
+import com.google.inject.Key;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
@@ -24,15 +25,18 @@ import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.ForBaseJdbc;
+import io.trino.plugin.jdbc.ForJdbcDynamicFiltering;
 import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.ptf.Query;
+import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.function.table.ConnectorTableFunction;
 
 import java.util.Properties;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
+import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 
 public class ExasolClientModule
@@ -44,6 +48,12 @@ public class ExasolClientModule
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(ExasolClient.class).in(Scopes.SINGLETON);
         configBinder(binder).bindConfig(JdbcStatisticsConfig.class);
         newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Query.class).in(Scopes.SINGLETON);
+        //newOptionalBinder(binder, Key.get(ConnectorSplitManager.class, ForJdbcDynamicFiltering.class))
+        //        .setBinding().to(ExasolSplitManager.class).in(SINGLETON);
+
+        newOptionalBinder(binder, Key.get(ConnectorSplitManager.class, ForJdbcDynamicFiltering.class)).setBinding().to(ExasolSplitManager.class).in(Scopes.SINGLETON);
+        //newOptionalBinder(binder, ConnectorSplitManager.class).setDefault().to(ExasolDynamicFilteringSplitManager.class).in(Scopes.SINGLETON);
+
     }
 
     @Provides
@@ -62,5 +72,12 @@ public class ExasolClientModule
                 .setConnectionProperties(connectionProperties)
                 .setOpenTelemetry(openTelemetry)
                 .build();
+    }
+
+    @Provides
+    @Singleton
+    public static ExasolWorkerNodeConnectionFactory exasolSplitConnectionFactory(CredentialProvider credentialProvider, OpenTelemetry openTelemetry)
+    {
+        return new ExasolWorkerNodeConnectionFactory(credentialProvider, openTelemetry);
     }
 }

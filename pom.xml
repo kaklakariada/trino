@@ -39,7 +39,6 @@
         <module>core/trino-server-main</module>
         <module>core/trino-spi</module>
         <module>core/trino-web-ui</module>
-        <module>docs</module>
         <module>lib/trino-array</module>
         <module>lib/trino-cache</module>
         <module>lib/trino-filesystem</module>

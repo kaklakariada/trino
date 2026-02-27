@@ -14,6 +14,7 @@
 package io.trino.plugin.exasol;
 
 import io.trino.plugin.jdbc.BaseJdbcConnectorTest;
+import io.trino.spi.type.VarcharType;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.testing.MaterializedResult;
@@ -397,5 +398,16 @@ final class TestExasolConnectorTest
     protected SqlExecutor onRemoteDatabase()
     {
         return exasolServer::execute;
+    }
+
+
+    @Test void splitTest(){
+        assertThat(query("""
+                SELECT n.name, r.name \
+                FROM nation n \
+                LEFT JOIN region r USING (regionkey) \
+                ORDER BY n.name ASC \
+                LIMIT 3""")).result().containsAll(MaterializedResult.resultBuilder(getSession(), VarcharType.createVarcharType(25), VarcharType.createVarcharType(25))
+                .row("ALGERIA", "AFRICA").row("ARGENTINA", "AMERICA").row("BRAZIL", "AMERICA").build());
     }
 }

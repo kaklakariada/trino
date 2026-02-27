@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.exasol;
 
+import com.exasol.jdbc.EXAConnection;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import io.airlift.slice.Slices;
@@ -26,6 +27,7 @@ import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcJoinCondition;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
 import io.trino.plugin.jdbc.JdbcSortItem;
+import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongReadFunction;
@@ -42,13 +44,20 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.type.Type;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.Date;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.sql.Types;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +67,7 @@ import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
+import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.booleanColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.decimalColumnMapping;
@@ -84,16 +94,21 @@ public class ExasolClient
             .add("EXA_STATISTICS")
             .add("SYS")
             .build();
+    private static final Logger log = LoggerFactory.getLogger(ExasolClient.class);
+
+    private final ExasolWorkerNodeConnectionFactory splitConnectionFactory;
 
     @Inject
     public ExasolClient(
             BaseJdbcConfig config,
             ConnectionFactory connectionFactory,
+            ExasolWorkerNodeConnectionFactory splitConnectionFactory,
             QueryBuilder queryBuilder,
             IdentifierMapping identifierMapping,
             RemoteQueryModifier queryModifier)
     {
         super("\"", connectionFactory, queryBuilder, config.getJdbcTypesMappedToVarchar(), identifierMapping, queryModifier, false);
+        this.splitConnectionFactory = splitConnectionFactory;
     }
 
     @Override
@@ -363,5 +378,44 @@ public class ExasolClient
     public boolean supportsTopN(ConnectorSession session, JdbcTableHandle handle, List<JdbcSortItem> sortOrder)
     {
         return true;
+    }
+
+    @Override
+    public ConnectorSplitSource getSplits(ConnectorSession session, JdbcTableHandle tableHandle)
+    {
+        try {
+            Connection connection = connectionFactory.openConnection(session);
+            EXAConnection exaConnection = connection.unwrap(EXAConnection.class);
+            System.out.println("preparing stmt in main connection");
+            PreparedStatement preparedStatement = connection.prepareStatement("SELECT \"REGIONKEY\", \"NAME\" FROM \"EXA_DB\".\"TPCH\".\"REGION\"");
+            //connection.prepareStatement("SELECT \"NAME\", \"REGIONKEY\" FROM \"EXA_DB\".\"TPCH\".\"NATION\" ORDER BY \"NAME\" ASC NULLS LAST LIMIT 3");
+            return new FixedSplitSource(enterParallelConnection(exaConnection));
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
+        }
+    }
+
+    private static List<ExasolSplit> enterParallelConnection(EXAConnection exaConnection)
+            throws SQLException
+    {
+        int parallelConnectionCount = exaConnection.RequestParallelConnections(20); // TODO: get number of Trino nodes
+        String[] hosts= exaConnection.GetAvailableWorkerHosts();
+        int[] ports= exaConnection.GetWorkerPorts();
+        long token = exaConnection.GetWorkerToken();
+        long sessionId = exaConnection.getSessionID();
+        List<ExasolSplit> splits = new ArrayList<>(parallelConnectionCount);
+        for (int i = 0; i < parallelConnectionCount; i++) {
+            splits.add(new ExasolSplit(new ExasolWorkerNode(i, hosts[i],  token, sessionId)));
+        }
+        log.debug("Got {} Exasol worker nodes:  {}", splits.size(), List.of(hosts));
+        return splits;
+    }
+
+    @Override
+    public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
+            throws SQLException
+    {
+        return splitConnectionFactory.openConnection(session, ((ExasolSplit) split).getExasolWorkerNode());
     }
 }
