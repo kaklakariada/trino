@@ -28,11 +28,13 @@ import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.ptf.Query;
+import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
 
 import java.util.Properties;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
+import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 
 public class ExasolClientModule
@@ -41,9 +43,12 @@ public class ExasolClientModule
     @Override
     protected void setup(Binder binder)
     {
+        System.out.println("Setting up binder...");
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(ExasolClient.class).in(Scopes.SINGLETON);
         configBinder(binder).bindConfig(JdbcStatisticsConfig.class);
         newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Query.class).in(Scopes.SINGLETON);
+        newOptionalBinder(binder, ConnectorPageSourceProvider.class).setBinding().to(ExasolParallelConnectionPageSourceProvider.class).in(Scopes.SINGLETON);
+        binder.bind(ParallelConnectionFactory.class).in(Scopes.SINGLETON);
     }
 
     @Provides
@@ -51,6 +56,7 @@ public class ExasolClientModule
     @ForBaseJdbc
     public static ConnectionFactory connectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, OpenTelemetry openTelemetry)
     {
+        System.out.println("Creating connection factory...");
         Properties connectionProperties = new Properties();
         // Deactivate SNAPSHOT_MODE (https://docs.exasol.com/db/latest/database_concepts/snapshot_mode.htm)
         // to ensure that {@link Connection#getMetaData()} always returns up-to-date data.

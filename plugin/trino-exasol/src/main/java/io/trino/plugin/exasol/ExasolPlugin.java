@@ -21,5 +21,6 @@ public class ExasolPlugin
     public ExasolPlugin()
     {
         super("exasol", ExasolClientModule::new);
+        System.out.println("Creating Exasol plugin");
     }
 }

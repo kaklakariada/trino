@@ -26,15 +26,18 @@ import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcJoinCondition;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
 import io.trino.plugin.jdbc.JdbcSortItem;
+import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongReadFunction;
 import io.trino.plugin.jdbc.LongWriteFunction;
+import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.SliceReadFunction;
 import io.trino.plugin.jdbc.SliceWriteFunction;
 import io.trino.plugin.jdbc.WriteFunction;
 import io.trino.plugin.jdbc.WriteMapping;
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
@@ -44,9 +47,13 @@ import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.type.Type;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.Date;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.sql.Types;
 import java.time.LocalDate;
 import java.util.HexFormat;
@@ -84,6 +91,7 @@ public class ExasolClient
             .add("EXA_STATISTICS")
             .add("SYS")
             .build();
+    private static final Logger log = LoggerFactory.getLogger(ExasolClient.class);
 
     @Inject
     public ExasolClient(
@@ -363,5 +371,22 @@ public class ExasolClient
     public boolean supportsTopN(ConnectorSession session, JdbcTableHandle handle, List<JdbcSortItem> sortOrder)
     {
         return true;
+    }
+
+    @Override
+    protected PreparedQuery prepareQuery(ConnectorSession session, Connection connection, JdbcTableHandle table, Optional<List<List<JdbcColumnHandle>>> groupingSets, List<JdbcColumnHandle> columns, Map<String, ParameterizedExpression> columnExpressions, Optional<JdbcSplit> split)
+    {
+        var query = super.prepareQuery(session, connection, table, groupingSets, columns, columnExpressions, split);
+        log.info("Prepared query "+query);
+        return query;
+    }
+
+    @Override
+    public PreparedStatement buildSql(ConnectorSession session, Connection connection, JdbcSplit split, JdbcTableHandle table, List<JdbcColumnHandle> columns)
+            throws SQLException
+    {
+        var stmt = super.buildSql(session, connection, split, table, columns);
+        log.info("Built SQL statement "+stmt);
+        return stmt;
     }
 }
