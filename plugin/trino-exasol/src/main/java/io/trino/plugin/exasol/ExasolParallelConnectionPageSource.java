@@ -39,6 +39,7 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     private final ResultSet mainResultSet;
     private final AtomicReference<Throwable> subConnectionFailure = new AtomicReference<>();
     private boolean closed = false;
+    private CompletableFuture<Void> allConsumersFuture;
 
     private ExasolParallelConnectionPageSource(List<SubConnectionPageSource> subConnectionPageSources, ExecutorService executor, Connection mainConnection, PreparedStatement mainStatement, ResultSet mainResultSet) {
         this.subConnectionPageSources = subConnectionPageSources;
@@ -52,29 +53,30 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     public static ExasolParallelConnectionPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles) {
         try {
             Connection mainConnection = createExaConnection(jdbcClient, session, table);
+            PreparedStatement mainStatement = prepareStatement(jdbcClient, session, mainConnection, table, jdbcSplit, columnHandles);
             List<Connection> subConnections = parallelConnectionFactory.createConnections(session, mainConnection);
             log.info("Connected to {} Exasol nodes. Preparing statement...", subConnections.size());
-            PreparedStatement mainStatement = prepareStatement(jdbcClient, session, mainConnection, table, jdbcSplit, columnHandles);
-            log.info("Executing prepared statement...");
+
+            log.debug("Executing prepared statement...");
             ResultSet mainResultSet = mainStatement.executeQuery();
             int resultSetHandle = mainResultSet.unwrap(EXAResultSet.class).GetHandle();
-            log.info("Statement executed, got result set handle {}. Reading result from subconnections...", resultSetHandle);
+            log.debug("Statement executed, got result set handle {}. Reading result from subconnections...", resultSetHandle);
             List<SubConnectionPageSource> subConnectionPageSources = subConnections.stream().map(con -> new SubConnectionPageSource(jdbcClient, executor, session, con, resultSetHandle, columnHandles)).toList();
             ExasolParallelConnectionPageSource pageSource = new ExasolParallelConnectionPageSource(subConnectionPageSources, executor, mainConnection, mainStatement, mainResultSet);
             pageSource.startReading();
             return pageSource;
         }
         catch (SQLException e) {
+            log.error("Error creating parallel connection page source: {}", e.getMessage(), e);
             throw new RuntimeException("Error creating parallel connection page source: "+e.getMessage(), e);
         }
     }
 
     private void startReading() {
-
         CompletableFuture<?>[] consumers = subConnectionPageSources.stream().map(source ->
                 CompletableFuture.supplyAsync(() -> consumePageSource(source), executor)
         ).toArray(CompletableFuture[]::new);
-        CompletableFuture.allOf(consumers).thenRun(()-> log.info("All consumers have finished reading"));
+        allConsumersFuture = CompletableFuture.allOf(consumers).thenRun(()-> log.info("All consumers have finished reading"));
     }
 
     private Void consumePageSource(SubConnectionPageSource source)
@@ -84,8 +86,8 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
             while (!source.isFinished()) {
                 SourcePage page = source.getNextSourcePage();
                 if (page != null) {
-                    log.info("Found page {} from source {}", page, source);
                     queue.add(page);
+                    log.info("Found page {} from source {}, queue size: {}", page, source, queue.size());
                 }
             }
         } catch(Throwable e) {
@@ -93,7 +95,7 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
             subConnectionFailure.set(e);
         } finally {
             int remainingConnections = completedSubConnections.decrementAndGet();
-            log.info("All pages read from {}, remaining connections: {}", source, remainingConnections);
+            log.info("All pages read from {}, remaining connections: {}, queue size: {}", source, remainingConnections, queue.size());
             return null;
         }
     }
@@ -127,12 +129,15 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
         if(throwable != null) {
             throw new RuntimeException("Sub connection failure: "+throwable.getMessage(), throwable);
         }
-        return queue.poll();
+        SourcePage page = queue.poll();
+        log.debug("Got next source page {}, remaining queue size: {}", page, queue.size());
+        return page;
     }
 
     @Override
     public CompletableFuture<?> isBlocked()
     {
+        //log.debug("Checking if blocked...");
         // TODO: combine futures of subconnections
         //return CompletableFuture.anyOf(subConnectionPageSources.stream().map(ConnectorPageSource::isBlocked).toArray(CompletableFuture[]::new));
         return CompletableFuture.completedFuture(null);
@@ -163,12 +168,17 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     @Override
     public boolean isFinished()
     {
-        return queue.isEmpty() && subConnectionFailure.get() != null && subConnectionsFinished();
+        boolean subConnectionsFinished = subConnectionsFinished();
+        boolean queueEmpty = queue.isEmpty();
+        boolean subConnectionFailure = this.subConnectionFailure.get() == null;
+        boolean finished = queueEmpty && subConnectionFailure && subConnectionsFinished;
+        log.debug("Checking isFinished: {}, queue empty: {}, subconnections ok: {}, subconnections finished: {}", finished, queueEmpty, subConnectionFailure, subConnectionsFinished);
+        return finished;
     }
 
     private boolean subConnectionsFinished()
     {
-        return subConnectionPageSources.stream().allMatch(source -> source.isFinished());
+        return allConsumersFuture != null && allConsumersFuture.isDone();
     }
 
     @Override
@@ -180,12 +190,12 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     @Override
     public void close()
     {
+        log.debug("Closing page source {}...", this);
         subConnectionPageSources.forEach(SubConnectionPageSource::close);
         if (closed) {
             return;
         }
         closed = true;
-
         // use try with resources to close everything properly
         try (Connection connection = this.mainConnection;
                 Statement statement = this.mainStatement;
@@ -203,5 +213,6 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
         catch (SQLException | RuntimeException e) {
             // ignore exception from close
         }
+        log.debug("Closed page source {} successfully", this);
     }
 }
