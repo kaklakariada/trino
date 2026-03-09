@@ -31,7 +31,7 @@ public class ParallelConnectionFactory
         this.openTelemetry = requireNonNull(openTelemetry);
     }
 
-    public List<EXAConnection> createConnections(ConnectorSession session, Connection connection) {
+    public List<Connection> createConnections(ConnectorSession session, Connection connection) {
         try {
             EXAConnection exaCon = connection.unwrap(EXAConnection.class);
             int maxWorkers = 20; // TODO: Read from configuration
@@ -39,9 +39,9 @@ public class ParallelConnectionFactory
             String[] hosts = exaCon.GetAvailableWorkerHosts();
             long token = exaCon.GetWorkerToken();
             long sessionId = exaCon.getSessionID();
-            List<EXAConnection> subConnections = new ArrayList<>(parallelConnectionCount);
+            List<Connection> subConnections = new ArrayList<>(parallelConnectionCount);
             for (String host: hosts) {
-                log.info("Connecting to host "+host+"...");
+                log.info("Creating subconnection to host {}...", host);
                 subConnections.add(createSubConnection(session, host, token, sessionId));
             }
             return subConnections;
@@ -51,7 +51,7 @@ public class ParallelConnectionFactory
         }
     }
 
-    private EXAConnection createSubConnection(ConnectorSession session, String host, long token, long sessionId)
+    private Connection createSubConnection(ConnectorSession session, String host, long token, long sessionId)
     {
         // TODO: validate certificate
         String subConnectionUrl = "jdbc:exa:%s;workertoken=%d;sessionid=%d;autocommit=0;encryption=1;validateservercertificate=0".formatted(host, token, sessionId);
@@ -62,7 +62,7 @@ public class ParallelConnectionFactory
                             credentialProvider)
                     .setOpenTelemetry(openTelemetry)
                     .build()
-                    .openConnection(session).unwrap(EXAConnection.class);
+                    .openConnection(session);
         }
         catch (SQLException e) {
             throw new RuntimeException("Failed connecting to %s: %s".formatted(subConnectionUrl, e.getMessage()), e);

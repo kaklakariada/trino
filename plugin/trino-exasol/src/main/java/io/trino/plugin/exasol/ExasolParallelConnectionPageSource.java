@@ -1,6 +1,5 @@
 package io.trino.plugin.exasol;
 
-import com.exasol.jdbc.EXAConnection;
 import com.exasol.jdbc.EXAResultSet;
 import io.trino.plugin.jdbc.BaseJdbcConnectorTableHandle;
 import io.trino.plugin.jdbc.JdbcClient;
@@ -15,6 +14,7 @@ import io.trino.spi.metrics.Metrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.List;
@@ -31,9 +31,9 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     private final ExecutorService executor;
     private final BlockingQueue<SourcePage> queue = new LinkedBlockingQueue<>();
     private final CountDownLatch completedSubConnections;
-    private final EXAConnection mainConnection;
+    private final Connection mainConnection;
 
-    private ExasolParallelConnectionPageSource(List<SubConnectionPageSource> subConnectionPageSources, ExecutorService executor, EXAConnection mainConnection) {
+    private ExasolParallelConnectionPageSource(List<SubConnectionPageSource> subConnectionPageSources, ExecutorService executor, Connection mainConnection) {
         this.subConnectionPageSources = subConnectionPageSources;
         this.executor = executor;
         this.completedSubConnections=new CountDownLatch(subConnectionPageSources.size());
@@ -43,14 +43,14 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     public static ExasolParallelConnectionPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles) {
 
         try {
-            EXAConnection exaCon = createExaConnection(jdbcClient, session, table);
-            List<EXAConnection> subConnections = parallelConnectionFactory.createConnections(session, exaCon);
-            PreparedStatement stmt = prepareStatement(jdbcClient, session, exaCon, table, jdbcSplit, columnHandles);
+            Connection mainConnection = createExaConnection(jdbcClient, session, table);
+            List<Connection> subConnections = parallelConnectionFactory.createConnections(session, mainConnection);
+            PreparedStatement stmt = prepareStatement(jdbcClient, session, mainConnection, table, jdbcSplit, columnHandles);
             EXAResultSet resultSet = stmt.executeQuery().unwrap(EXAResultSet.class);
             int resultSetHandle=resultSet.GetHandle();
             List<SubConnectionPageSource> subConnectionPageSources = subConnections.stream().map(con -> new SubConnectionPageSource(jdbcClient, executor, session, con, resultSetHandle, columnHandles)).toList();
 
-            ExasolParallelConnectionPageSource pageSource = new ExasolParallelConnectionPageSource(subConnectionPageSources, executor, exaCon);
+            ExasolParallelConnectionPageSource pageSource = new ExasolParallelConnectionPageSource(subConnectionPageSources, executor, mainConnection);
             pageSource.startReading();
             return pageSource;
         }
@@ -79,25 +79,25 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
         });
     }
 
-    private static PreparedStatement prepareStatement(JdbcClient jdbcClient, ConnectorSession session, EXAConnection exaCon, BaseJdbcConnectorTableHandle table, JdbcSplit jdbcSplit, List<JdbcColumnHandle> columnHandles)
+    private static PreparedStatement prepareStatement(JdbcClient jdbcClient, ConnectorSession session, Connection mainConnection, BaseJdbcConnectorTableHandle table, JdbcSplit jdbcSplit, List<JdbcColumnHandle> columnHandles)
             throws SQLException
     {
         if (table instanceof JdbcProcedureHandle procedureHandle) {
-            return jdbcClient.buildProcedure(session, exaCon, jdbcSplit, procedureHandle);
+            return jdbcClient.buildProcedure(session, mainConnection, jdbcSplit, procedureHandle);
         }
         else {
-            return jdbcClient.buildSql(session, exaCon, jdbcSplit, (JdbcTableHandle) table, columnHandles);
+            return jdbcClient.buildSql(session, mainConnection, jdbcSplit, (JdbcTableHandle) table, columnHandles);
         }
     }
 
-    private static EXAConnection createExaConnection(JdbcClient jdbcClient, ConnectorSession session, BaseJdbcConnectorTableHandle table)
+    private static Connection createExaConnection(JdbcClient jdbcClient, ConnectorSession session, BaseJdbcConnectorTableHandle table)
             throws SQLException
     {
         if (table instanceof JdbcProcedureHandle procedureHandle) {
-            return jdbcClient.getConnection(session, null, procedureHandle).unwrap(EXAConnection.class);
+            return jdbcClient.getConnection(session, null, procedureHandle);
         }
         else {
-            return jdbcClient.getConnection(session, null, (JdbcTableHandle) table).unwrap(EXAConnection.class);
+            return jdbcClient.getConnection(session, null, (JdbcTableHandle) table);
         }
     }
 

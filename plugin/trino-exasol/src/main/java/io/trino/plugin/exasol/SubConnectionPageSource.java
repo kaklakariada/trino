@@ -59,7 +59,7 @@ public final class SubConnectionPageSource
 
     private final JdbcClient jdbcClient;
     private final ExecutorService executor;
-    private final EXAConnection connection;
+    private final Connection connection;
     private final AtomicLong readTimeNanos = new AtomicLong(0);
     private final PageBuilder pageBuilder;
     private CompletableFuture<ResultSet> resultSetFuture;
@@ -71,7 +71,7 @@ public final class SubConnectionPageSource
     private int resultSetHandle;
 
     public SubConnectionPageSource(JdbcClient jdbcClient, ExecutorService executor, ConnectorSession session,
-            EXAConnection connection, int resultSetHandle, List<JdbcColumnHandle> columnHandles)
+            Connection connection, int resultSetHandle, List<JdbcColumnHandle> columnHandles)
     {
         this.jdbcClient = requireNonNull(jdbcClient, "jdbcClient is null");
         this.executor = requireNonNull(executor, "executor is null");
@@ -155,7 +155,7 @@ public final class SubConnectionPageSource
                     long start = nanoTime();
                     try {
                         log.debug("Executing: %d", resultSetHandle);
-                        return connection.DescribeResult(resultSetHandle);
+                        return exaConnection().DescribeResult(resultSetHandle);
                     }
                     catch (SQLException e) {
                         throw handleSqlException(e);
@@ -211,6 +211,12 @@ public final class SubConnectionPageSource
         Page page = pageBuilder.build();
         pageBuilder.reset();
         return SourcePage.create(page);
+    }
+
+    private EXAConnection exaConnection()
+            throws SQLException
+    {
+        return connection.unwrap(EXAConnection.class);
     }
 
     @Override

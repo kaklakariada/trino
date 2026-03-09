@@ -64,7 +64,6 @@ public class ExasolParallelConnectionPageSourceProvider implements ConnectorPage
             List<ColumnHandle> columns,
             DynamicFilter dynamicFilter)
     {
-        log.info("Creating new ExasolParallelConnectionPageSource...");
         JdbcSplit jdbcSplit = (JdbcSplit) split;
         List<JdbcColumnHandle> jdbcColumns = columns.stream()
                 .map(JdbcColumnHandle.class::cast)
