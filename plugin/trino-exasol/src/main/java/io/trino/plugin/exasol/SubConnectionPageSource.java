@@ -87,8 +87,6 @@ public final class SubConnectionPageSource
         objectReadFunctions = new ObjectReadFunction[columnHandles.size()];
 
         try {
-
-
             for (int i = 0; i < this.columnHandles.size(); i++) {
                 JdbcColumnHandle columnHandle = columnHandles.get(i);
                 ColumnMapping columnMapping = jdbcClient.toColumnMapping(session, connection, columnHandle.getJdbcTypeHandle())
@@ -154,7 +152,7 @@ public final class SubConnectionPageSource
                 resultSetFuture = supplyAsync(() -> {
                     long start = nanoTime();
                     try {
-                        log.debug("Executing: %d", resultSetHandle);
+                        log.debug("Getting result set for handle %d...", resultSetHandle);
                         return exaConnection().DescribeResult(resultSetHandle);
                     }
                     catch (SQLException e) {
