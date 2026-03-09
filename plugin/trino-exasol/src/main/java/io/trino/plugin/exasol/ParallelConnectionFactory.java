@@ -14,6 +14,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 
 import static java.util.Objects.requireNonNull;
 
@@ -54,17 +55,22 @@ public class ParallelConnectionFactory
     private Connection createSubConnection(ConnectorSession session, String host, long token, long sessionId)
     {
         // TODO: validate certificate
-        String subConnectionUrl = "jdbc:exa:%s;workertoken=%d;sessionid=%d;autocommit=0;encryption=1;validateservercertificate=0".formatted(host, token, sessionId);
+        String subConnectionUrl = "jdbc:exa-worker:%s;workertoken=%d;sessionid=%d;autocommit=0;encryption=1;validateservercertificate=0".formatted(host, token, sessionId);
+        Properties connectionProperties = new Properties();
+        connectionProperties.setProperty("debug", "1");
+        connectionProperties.setProperty("logdir", "/Users/chp/dev/trino/jdbclog");
         try {
             return DriverConnectionFactory.builder(
                             new EXADriver(),
                             subConnectionUrl,
                             credentialProvider)
+                    .setConnectionProperties(connectionProperties)
                     .setOpenTelemetry(openTelemetry)
                     .build()
                     .openConnection(session);
         }
         catch (SQLException e) {
+            log.error("Failed to create subconnection to {}: {}", subConnectionUrl, e.getMessage(), e);
             throw new RuntimeException("Failed connecting to %s: %s".formatted(subConnectionUrl, e.getMessage()), e);
         }
     }

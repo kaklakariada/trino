@@ -61,6 +61,8 @@ public class ExasolClientModule
         // Deactivate SNAPSHOT_MODE (https://docs.exasol.com/db/latest/database_concepts/snapshot_mode.htm)
         // to ensure that {@link Connection#getMetaData()} always returns up-to-date data.
         connectionProperties.setProperty("snapshottransactions", "1");
+        connectionProperties.setProperty("debug", "1");
+        connectionProperties.setProperty("logdir", "/Users/chp/dev/trino/jdbclog");
         return DriverConnectionFactory.builder(
                         new EXADriver(),
                         config.getConnectionUrl(),
