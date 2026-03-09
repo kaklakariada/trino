@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
@@ -32,51 +33,56 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     private final BlockingQueue<SourcePage> queue = new LinkedBlockingQueue<>();
     private final CountDownLatch completedSubConnections;
     private final Connection mainConnection;
+    private final ResultSet mainResultSet;
 
-    private ExasolParallelConnectionPageSource(List<SubConnectionPageSource> subConnectionPageSources, ExecutorService executor, Connection mainConnection) {
+    private ExasolParallelConnectionPageSource(List<SubConnectionPageSource> subConnectionPageSources, ExecutorService executor, Connection mainConnection, ResultSet mainResultSet) {
         this.subConnectionPageSources = subConnectionPageSources;
         this.executor = executor;
         this.completedSubConnections=new CountDownLatch(subConnectionPageSources.size());
         this.mainConnection = mainConnection;
+        this.mainResultSet = mainResultSet;
     }
 
     public static ExasolParallelConnectionPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles) {
-
         try {
             Connection mainConnection = createExaConnection(jdbcClient, session, table);
             List<Connection> subConnections = parallelConnectionFactory.createConnections(session, mainConnection);
             PreparedStatement stmt = prepareStatement(jdbcClient, session, mainConnection, table, jdbcSplit, columnHandles);
-            EXAResultSet resultSet = stmt.executeQuery().unwrap(EXAResultSet.class);
-            int resultSetHandle=resultSet.GetHandle();
+            ResultSet mainResultSet = stmt.executeQuery();
+            int resultSetHandle=mainResultSet.unwrap(EXAResultSet.class).GetHandle();
             List<SubConnectionPageSource> subConnectionPageSources = subConnections.stream().map(con -> new SubConnectionPageSource(jdbcClient, executor, session, con, resultSetHandle, columnHandles)).toList();
-
-            ExasolParallelConnectionPageSource pageSource = new ExasolParallelConnectionPageSource(subConnectionPageSources, executor, mainConnection);
+            ExasolParallelConnectionPageSource pageSource = new ExasolParallelConnectionPageSource(subConnectionPageSources, executor, mainConnection, mainResultSet);
             pageSource.startReading();
             return pageSource;
         }
         catch (SQLException e) {
-            throw new RuntimeException(e);
+            throw new RuntimeException("Error creating parallel connection page source: "+e.getMessage(), e);
         }
     }
 
     private void startReading() {
         subConnectionPageSources.forEach(source -> {
-            executor.submit(()->{
-                SourcePage page = null;
-                try {
-                    log.info("Reading all pages from "+source);
-                    while ((page = source.getNextSourcePage()) != null) {
-                        log.info("Found page "+page +" from source "+source);
-                        queue.add(page);
-                    }
-                } catch(Exception e) {
-                    log.error("Error reading from source "+source+": "+e.getMessage(), e);
-                } finally {
-                    log.info("All pages read from "+source);
-                    completedSubConnections.countDown();
-                }
-            });
+            executor.submit(() -> consumePageSource(source));
         });
+    }
+
+    private void consumePageSource(SubConnectionPageSource source)
+    {
+        try {
+            log.info("Reading all pages from {}", source);
+            while (!source.isFinished()) {
+                SourcePage page = source.getNextSourcePage();
+                if (page == null) {
+                    log.info("Found page {} from source {}", page, source);
+                    queue.add(page);
+                }
+            }
+        } catch(Exception e) {
+            log.error("Error reading from source {}: {}", source, e.getMessage(), e);
+        } finally {
+            log.info("All pages read from {}", source);
+            completedSubConnections.countDown();
+        }
     }
 
     private static PreparedStatement prepareStatement(JdbcClient jdbcClient, ConnectorSession session, Connection mainConnection, BaseJdbcConnectorTableHandle table, JdbcSplit jdbcSplit, List<JdbcColumnHandle> columnHandles)
@@ -159,6 +165,12 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     public void close()
     {
         subConnectionPageSources.forEach(SubConnectionPageSource::close);
+        try {
+            mainResultSet.close();
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Error closing main result set", e);
+        }
         try {
             mainConnection.close();
         }
