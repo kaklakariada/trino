@@ -7,6 +7,7 @@ import io.opentelemetry.api.OpenTelemetry;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.spi.connector.ConnectorSession;
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,7 +36,7 @@ public class ParallelConnectionFactory
     public List<Connection> createConnections(ConnectorSession session, Connection connection) {
         try {
             EXAConnection exaCon = connection.unwrap(EXAConnection.class);
-            int maxWorkers = 20; // TODO: Read from configuration
+            int maxWorkers = ExasolSessionProperties.getParallelImportWorkerCount(session);
             int parallelConnectionCount = exaCon.RequestParallelConnections(maxWorkers);
             String[] hosts = exaCon.GetAvailableWorkerHosts();
             long token = exaCon.GetWorkerToken();
@@ -54,17 +55,13 @@ public class ParallelConnectionFactory
 
     private Connection createSubConnection(ConnectorSession session, String host, long token, long sessionId)
     {
-        // TODO: validate certificate
-        String subConnectionUrl = "jdbc:exa-worker:%s;workertoken=%d;sessionid=%d;autocommit=0;encryption=1;validateservercertificate=0".formatted(host, token, sessionId);
-        Properties connectionProperties = new Properties();
-        connectionProperties.setProperty("debug", "1");
-        connectionProperties.setProperty("logdir", "/Users/chp/dev/trino/jdbclog");
+        String subConnectionUrl = "jdbc:exa-worker:" +host;
         try {
             return DriverConnectionFactory.builder(
                             new EXADriver(),
                             subConnectionUrl,
                             credentialProvider)
-                    .setConnectionProperties(connectionProperties)
+                    .setConnectionProperties(buildConnectionProperties(token, sessionId))
                     .setOpenTelemetry(openTelemetry)
                     .build()
                     .openConnection(session);
@@ -73,5 +70,18 @@ public class ParallelConnectionFactory
             log.error("Failed to create subconnection to {}: {}", subConnectionUrl, e.getMessage(), e);
             throw new RuntimeException("Failed connecting to %s: %s".formatted(subConnectionUrl, e.getMessage()), e);
         }
+    }
+
+    private static @NonNull Properties buildConnectionProperties(long token, long sessionId)
+    {
+        Properties connectionProperties = new Properties();
+        connectionProperties.setProperty("workertoken", String.valueOf(token));
+        connectionProperties.setProperty("sessionid", String.valueOf(sessionId));
+        connectionProperties.setProperty("autocommit", "0");
+        // TODO: validate certificate
+        connectionProperties.setProperty("validateservercertificate", "0");
+        connectionProperties.setProperty("debug", "1");
+        connectionProperties.setProperty("logdir", "/Users/chp/dev/trino/jdbclog");
+        return connectionProperties;
     }
 }

@@ -4,12 +4,14 @@ import com.exasol.jdbc.EXAResultSet;
 import io.trino.plugin.jdbc.BaseJdbcConnectorTableHandle;
 import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
+import io.trino.plugin.jdbc.JdbcPageSource;
 import io.trino.plugin.jdbc.JdbcProcedureHandle;
 import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SourcePage;
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,7 +52,16 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
         this.mainResultSet = mainResultSet;
     }
 
-    public static ExasolParallelConnectionPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles) {
+    public static ConnectorPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles) {
+        int parallelImportWorkerCount = ExasolSessionProperties.getParallelImportWorkerCount(session);
+        if(parallelImportWorkerCount == 0) {
+            return new JdbcPageSource(jdbcClient, executor, session, jdbcSplit, table, columnHandles);
+        }
+        return createParallelConnectionPageSource(jdbcClient, executor, parallelConnectionFactory, session, jdbcSplit, table, columnHandles);
+    }
+
+    private static @NonNull ExasolParallelConnectionPageSource createParallelConnectionPageSource(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles)
+    {
         try {
             Connection mainConnection = createExaConnection(jdbcClient, session, table);
             PreparedStatement mainStatement = prepareStatement(jdbcClient, session, mainConnection, table, jdbcSplit, columnHandles);

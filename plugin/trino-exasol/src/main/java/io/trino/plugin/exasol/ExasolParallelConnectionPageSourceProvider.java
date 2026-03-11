@@ -136,7 +136,7 @@ public class ExasolParallelConnectionPageSourceProvider implements ConnectorPage
                 columnAdaptationsBuilder.build());
     }
 
-    private ExasolParallelConnectionPageSource createPageSource(
+    private ConnectorPageSource createPageSource(
             ConnectorSession session,
             JdbcSplit jdbcSplit,
             BaseJdbcConnectorTableHandle table,

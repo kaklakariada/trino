@@ -116,7 +116,6 @@ public final class SubConnectionPageSource
                 }
             }
 
-
             pageBuilder = new PageBuilder(columnHandles.stream()
                     .map(JdbcColumnHandle::getColumnType)
                     .collect(toImmutableList()));
