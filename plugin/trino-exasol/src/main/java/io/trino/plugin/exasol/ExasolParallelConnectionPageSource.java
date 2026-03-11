@@ -57,7 +57,6 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
             List<Connection> subConnections = parallelConnectionFactory.createConnections(session, mainConnection);
             log.info("Connected to {} Exasol nodes. Preparing statement...", subConnections.size());
 
-            log.debug("Executing prepared statement...");
             ResultSet mainResultSet = mainStatement.executeQuery();
             int resultSetHandle = mainResultSet.unwrap(EXAResultSet.class).GetHandle();
             log.debug("Statement executed, got result set handle {}. Reading result from subconnections...", resultSetHandle);
@@ -82,12 +81,12 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     private Void consumePageSource(SubConnectionPageSource source)
     {
         try {
-            log.info("Reading all pages from {}...", source);
+            log.debug("Reading all pages from {}...", source);
             while (!source.isFinished()) {
                 SourcePage page = source.getNextSourcePage();
                 if (page != null) {
                     queue.add(page);
-                    log.info("Found page {} from source {}, queue size: {}", page, source, queue.size());
+                    log.debug("Found page {} from source {}, queue size: {}", page, source, queue.size());
                 }
             }
         } catch(Throwable e) {
@@ -95,7 +94,7 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
             subConnectionFailure.set(e);
         } finally {
             int remainingConnections = completedSubConnections.decrementAndGet();
-            log.info("All pages read from {}, remaining connections: {}, queue size: {}", source, remainingConnections, queue.size());
+            log.debug("All pages read from {}, remaining connections: {}, queue size: {}", source, remainingConnections, queue.size());
             return null;
         }
     }
@@ -190,29 +189,40 @@ public class ExasolParallelConnectionPageSource implements ConnectorPageSource
     @Override
     public void close()
     {
-        log.debug("Closing page source {}...", this);
-        subConnectionPageSources.forEach(SubConnectionPageSource::close);
         if (closed) {
+            log.debug("Page sources already closed");
             return;
         }
-        closed = true;
+
+
+        log.debug("Closing main connection...");
         // use try with resources to close everything properly
         try (Connection connection = this.mainConnection;
                 Statement statement = this.mainStatement;
                 ResultSet resultSet = this.mainResultSet) {
             if (statement != null) {
                 try {
+                    log.debug("Cancelling statement...");
                     // Trying to cancel running statement as close() may not do it
                     statement.cancel();
                 }
-                catch (SQLException _) {
+                catch (SQLException e) {
+                    log.debug("Cancel failed", e);
                     // statement already closed or cancel is not supported
                 }
             }
         }
         catch (SQLException | RuntimeException e) {
             // ignore exception from close
+            log.debug("Closing failed", e);
         }
+
+        // Subconnections must be closed after the main connection.
+        // When main connection is still open, closing of subconnections will block.
+        log.debug("Closing {} subconnection page sources of {}...", subConnectionPageSources.size(), this);
+        subConnectionPageSources.forEach(SubConnectionPageSource::close);
+
+        closed = true;
         log.debug("Closed page source {} successfully", this);
     }
 }
