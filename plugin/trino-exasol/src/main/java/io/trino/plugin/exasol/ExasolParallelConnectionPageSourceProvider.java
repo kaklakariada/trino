@@ -51,7 +51,8 @@ import static io.trino.plugin.jdbc.RetryingModule.retry;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.UnaryOperator.identity;
 
-public class ExasolParallelConnectionPageSourceProvider implements ConnectorPageSourceProvider
+public class ExasolParallelConnectionPageSourceProvider
+        implements ConnectorPageSourceProvider
 {
     private static final Logger log = LoggerFactory.getLogger(ExasolParallelConnectionPageSourceProvider.class);
     private final JdbcClient jdbcClient;

@@ -21,8 +21,8 @@ import java.util.Optional;
 
 public class ExasolConfig
 {
-    private int parallelConnectionsWorkerCount = 0;
-    private String jdbcDriverLogDir = null;
+    private int parallelConnectionsWorkerCount;
+    private String jdbcDriverLogDir;
 
     public int getParallelConnectionsWorkerCount()
     {

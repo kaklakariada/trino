@@ -32,7 +32,8 @@ public class ExasolSessionProperties
     private final List<PropertyMetadata<?>> sessionProperties;
 
     @Inject
-    public ExasolSessionProperties(ExasolConfig exasolConfig){
+    public ExasolSessionProperties(ExasolConfig exasolConfig)
+    {
         sessionProperties = ImmutableList.<PropertyMetadata<?>>builder()
                 .add(integerProperty(
                         PARALLEL_CONNECTIONS_WORKER_COUNT,

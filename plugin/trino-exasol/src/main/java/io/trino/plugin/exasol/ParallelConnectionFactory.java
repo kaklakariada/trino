@@ -46,7 +46,8 @@ public class ParallelConnectionFactory
         this.openTelemetry = requireNonNull(openTelemetry);
     }
 
-    public List<Connection> createConnections(ConnectorSession session, Connection connection) {
+    public List<Connection> createConnections(ConnectorSession session, Connection connection)
+    {
         try {
             EXAConnection exaCon = connection.unwrap(EXAConnection.class);
             int maxWorkers = ExasolSessionProperties.getParallelImportWorkerCount(session);
@@ -55,20 +56,20 @@ public class ParallelConnectionFactory
             long token = exaCon.GetWorkerToken();
             long sessionId = exaCon.getSessionID();
             List<Connection> subConnections = new ArrayList<>(parallelConnectionCount);
-            for (String host: hosts) {
+            for (String host : hosts) {
                 log.info("Creating subconnection to host {}...", host);
                 subConnections.add(createSubConnection(session, host, token, sessionId));
             }
             return subConnections;
         }
         catch (SQLException e) {
-            throw new RuntimeException("Error creating subconnections: "+e.getMessage(), e);
+            throw new RuntimeException("Error creating subconnections: " + e.getMessage(), e);
         }
     }
 
     private Connection createSubConnection(ConnectorSession session, String host, long token, long sessionId)
     {
-        String subConnectionUrl = "jdbc:exa-worker:" +host;
+        String subConnectionUrl = "jdbc:exa-worker:" + host;
         try {
             return DriverConnectionFactory.builder(
                             new EXADriver(),
