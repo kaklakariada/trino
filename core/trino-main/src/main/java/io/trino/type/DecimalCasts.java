@@ -13,9 +13,9 @@
  */
 package io.trino.type;
 
-import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Shorts;
 import com.google.common.primitives.SignedBytes;
@@ -73,6 +73,9 @@ import static java.lang.Float.intBitsToFloat;
 import static java.lang.Math.multiplyExact;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
+import static java.lang.runtime.ExactConversionsSupport.isLongToByteExact;
+import static java.lang.runtime.ExactConversionsSupport.isLongToIntExact;
+import static java.lang.runtime.ExactConversionsSupport.isLongToShortExact;
 import static java.math.RoundingMode.HALF_UP;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -100,7 +103,7 @@ public final class DecimalCasts
     public static final SqlScalarFunction DECIMAL_TO_JSON_CAST = castFunctionFromDecimalTo(JSON.getTypeSignature(), true, "shortDecimalToJson", "longDecimalToJson");
     public static final SqlScalarFunction JSON_TO_DECIMAL_CAST = castFunctionToDecimalFromBuilder(JSON.getTypeSignature(), true, false, "jsonToShortDecimal", "jsonToLongDecimal");
 
-    private static final JsonFactory JSON_FACTORY = createJsonFactory();
+    private static final JsonMapper JSON_MAPPER = new JsonMapper(createJsonFactory());
 
     private static SqlScalarFunction castFunctionFromDecimalTo(TypeSignature to, boolean neverFails, String... methodNames)
     {
@@ -272,12 +275,10 @@ public final class DecimalCasts
             longResult = -((-decimal + tenToScale / 2) / tenToScale);
         }
 
-        try {
-            return toIntExact(longResult);
-        }
-        catch (ArithmeticException e) {
+        if (!isLongToIntExact(longResult)) {
             throw new TrinoException(INVALID_CAST_ARGUMENT, format("Cannot cast '%s' to INTEGER", longResult));
         }
+        return (int) longResult;
     }
 
     @UsedByGeneratedCode
@@ -330,12 +331,10 @@ public final class DecimalCasts
             longResult = -((-decimal + tenToScale / 2) / tenToScale);
         }
 
-        try {
-            return Shorts.checkedCast(longResult);
-        }
-        catch (IllegalArgumentException e) {
+        if (!isLongToShortExact(longResult)) {
             throw new TrinoException(INVALID_CAST_ARGUMENT, format("Cannot cast '%s' to SMALLINT", longResult));
         }
+        return (short) longResult;
     }
 
     @UsedByGeneratedCode
@@ -389,12 +388,10 @@ public final class DecimalCasts
             longResult = -((-decimal + tenToScale / 2) / tenToScale);
         }
 
-        try {
-            return SignedBytes.checkedCast(longResult);
-        }
-        catch (IllegalArgumentException e) {
+        if (!isLongToByteExact(longResult)) {
             throw new TrinoException(INVALID_CAST_ARGUMENT, format("Cannot cast '%s' to TINYINT", longResult));
         }
+        return (byte) longResult;
     }
 
     @UsedByGeneratedCode
@@ -626,7 +623,7 @@ public final class DecimalCasts
     {
         try {
             SliceOutput dynamicSliceOutput = new DynamicSliceOutput(32);
-            try (JsonGenerator jsonGenerator = createJsonGenerator(JSON_FACTORY, dynamicSliceOutput)) {
+            try (JsonGenerator jsonGenerator = createJsonGenerator(JSON_MAPPER, dynamicSliceOutput)) {
                 jsonGenerator.writeNumber(bigDecimal);
             }
             return dynamicSliceOutput.slice();
@@ -639,7 +636,7 @@ public final class DecimalCasts
     @UsedByGeneratedCode
     public static Int128 jsonToLongDecimal(Slice json, long precision, long scale, Int128 tenToScale)
     {
-        try (JsonParser parser = createJsonParser(JSON_FACTORY, json)) {
+        try (JsonParser parser = createJsonParser(JSON_MAPPER, json)) {
             parser.nextToken();
             Int128 result = currentTokenAsLongDecimal(parser, intPrecision(precision), DecimalConversions.intScale(scale));
             checkCondition(parser.nextToken() == null, INVALID_CAST_ARGUMENT, "Cannot cast input json to DECIMAL(%s,%s)", precision, scale); // check no trailing token
@@ -653,7 +650,7 @@ public final class DecimalCasts
     @UsedByGeneratedCode
     public static Long jsonToShortDecimal(Slice json, long precision, long scale, long tenToScale)
     {
-        try (JsonParser parser = createJsonParser(JSON_FACTORY, json)) {
+        try (JsonParser parser = createJsonParser(JSON_MAPPER, json)) {
             parser.nextToken();
             Long result = currentTokenAsShortDecimal(parser, intPrecision(precision), DecimalConversions.intScale(scale));
             checkCondition(parser.nextToken() == null, INVALID_CAST_ARGUMENT, "Cannot cast input json to DECIMAL(%s,%s)", precision, scale); // check no trailing token
