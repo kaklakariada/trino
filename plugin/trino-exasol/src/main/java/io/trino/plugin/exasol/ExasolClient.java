@@ -45,8 +45,6 @@ import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.type.Type;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.Date;
@@ -87,7 +85,6 @@ public class ExasolClient
             .add("EXA_STATISTICS")
             .add("SYS")
             .build();
-    private static final Logger log = LoggerFactory.getLogger(ExasolClient.class);
 
     @Inject
     public ExasolClient(
