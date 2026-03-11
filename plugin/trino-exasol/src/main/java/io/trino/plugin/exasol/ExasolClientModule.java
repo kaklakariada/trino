@@ -30,7 +30,6 @@ import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.ptf.Query;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
-import org.jspecify.annotations.NonNull;
 
 import java.util.Optional;
 import java.util.Properties;
@@ -69,7 +68,7 @@ public class ExasolClientModule
                 .build();
     }
 
-    private static @NonNull Properties buildConnectionProperties(ExasolConfig exasolConfig)
+    private static Properties buildConnectionProperties(ExasolConfig exasolConfig)
     {
         Properties connectionProperties = new Properties();
         // Deactivate SNAPSHOT_MODE (https://docs.exasol.com/db/latest/database_concepts/snapshot_mode.htm)
