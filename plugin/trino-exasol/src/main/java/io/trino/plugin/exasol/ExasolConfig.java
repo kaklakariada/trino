@@ -15,7 +15,6 @@ package io.trino.plugin.exasol;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
-import jakarta.annotation.Nullable;
 
 import java.util.Optional;
 
@@ -43,7 +42,6 @@ public class ExasolConfig
 
     @ConfigDescription("Set a log directory to enable logging for the Exasol JDBC driver.")
     @Config("exasol.jdbc_driver.log_dir")
-    @Nullable
     public void setJdbcDriverLogDir(String jdbcDriverLogDir)
     {
         this.jdbcDriverLogDir = jdbcDriverLogDir;

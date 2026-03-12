@@ -116,15 +116,16 @@ public class ExasolParallelConnectionPageSource
                     log.debug("Found page {} from source {}, queue size: {}", page, source, queue.size());
                 }
             }
+            return null;
         }
         catch (Throwable e) {
             log.error("Error reading from source {}: {}", source, e.getMessage(), e);
             subConnectionFailure.set(e);
+            return null;
         }
         finally {
             int remainingConnections = completedSubConnections.decrementAndGet();
             log.debug("All pages read from {}, remaining connections: {}, queue size: {}", source, remainingConnections, queue.size());
-            return null;
         }
     }
 

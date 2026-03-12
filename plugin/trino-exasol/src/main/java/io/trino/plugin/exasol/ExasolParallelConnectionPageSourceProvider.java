@@ -33,8 +33,6 @@ import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
@@ -54,7 +52,6 @@ import static java.util.function.UnaryOperator.identity;
 public class ExasolParallelConnectionPageSourceProvider
         implements ConnectorPageSourceProvider
 {
-    private static final Logger log = LoggerFactory.getLogger(ExasolParallelConnectionPageSourceProvider.class);
     private final JdbcClient jdbcClient;
     private final ExecutorService executor;
     private final RetryPolicy<Object> policy;
