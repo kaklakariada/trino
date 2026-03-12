@@ -27,6 +27,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Properties;
 
 import static java.util.Objects.requireNonNull;
@@ -37,12 +38,14 @@ public class ParallelConnectionFactory
 
     private final CredentialProvider credentialProvider;
     private final OpenTelemetry openTelemetry;
+    private final ExasolConfig exasolConfig;
 
     @Inject
-    public ParallelConnectionFactory(CredentialProvider credentialProvider, OpenTelemetry openTelemetry)
+    public ParallelConnectionFactory(CredentialProvider credentialProvider, OpenTelemetry openTelemetry, ExasolConfig exasolConfig)
     {
         this.credentialProvider = requireNonNull(credentialProvider);
         this.openTelemetry = requireNonNull(openTelemetry);
+        this.exasolConfig = requireNonNull(exasolConfig);
     }
 
     public List<Connection> createConnections(ConnectorSession session, Connection connection)
@@ -85,7 +88,7 @@ public class ParallelConnectionFactory
         }
     }
 
-    private static Properties buildConnectionProperties(long token, long sessionId)
+    private Properties buildConnectionProperties(long token, long sessionId)
     {
         Properties connectionProperties = new Properties();
         connectionProperties.setProperty("workertoken", String.valueOf(token));
@@ -93,8 +96,11 @@ public class ParallelConnectionFactory
         connectionProperties.setProperty("autocommit", "0");
         // TODO: validate certificate
         connectionProperties.setProperty("validateservercertificate", "0");
-        connectionProperties.setProperty("debug", "1");
-        connectionProperties.setProperty("logdir", "/Users/chp/dev/trino/jdbclog");
+        Optional<String> logDir = exasolConfig.getJdbcDriverLogDir();
+        if (logDir.isPresent()) {
+            connectionProperties.setProperty("debug", "1");
+            connectionProperties.setProperty("logdir", logDir.get());
+        }
         return connectionProperties;
     }
 }
