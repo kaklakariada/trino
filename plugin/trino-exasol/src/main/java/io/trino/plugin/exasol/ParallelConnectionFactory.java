@@ -73,19 +73,25 @@ public class ParallelConnectionFactory
     {
         String subConnectionUrl = "jdbc:exa-worker:" + host;
         try {
-            return DriverConnectionFactory.builder(
-                            new EXADriver(),
-                            subConnectionUrl,
-                            credentialProvider)
-                    .setConnectionProperties(buildConnectionProperties(token, sessionId))
-                    .setOpenTelemetry(openTelemetry)
-                    .build()
-                    .openConnection(session);
+            try (DriverConnectionFactory connectionFactory = buildConnectionFactory(token, sessionId, subConnectionUrl)) {
+                return connectionFactory.openConnection(session);
+            }
         }
         catch (SQLException e) {
             log.error("Failed to create subconnection to {}: {}", subConnectionUrl, e.getMessage(), e);
             throw new RuntimeException("Failed connecting to %s: %s".formatted(subConnectionUrl, e.getMessage()), e);
         }
+    }
+
+    private DriverConnectionFactory buildConnectionFactory(long token, long sessionId, String subConnectionUrl)
+    {
+        return DriverConnectionFactory.builder(
+                        new EXADriver(),
+                        subConnectionUrl,
+                        credentialProvider)
+                .setConnectionProperties(buildConnectionProperties(token, sessionId))
+                .setOpenTelemetry(openTelemetry)
+                .build();
     }
 
     private Properties buildConnectionProperties(long token, long sessionId)
