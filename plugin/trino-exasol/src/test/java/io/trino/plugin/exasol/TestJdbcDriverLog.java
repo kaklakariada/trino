@@ -35,7 +35,8 @@ public class TestJdbcDriverLog
             throws IOException
     {
         assertQuery("SELECT count(*) FROM nation", "SELECT 25");
-        Stream<Path> logFiles = Files.list(logDir);
-        assertThat(logFiles).hasSizeGreaterThan(1);
+        try (Stream<Path> logFiles = Files.list(logDir)) {
+            assertThat(logFiles).hasSizeGreaterThan(1);
+        }
     }
 }
