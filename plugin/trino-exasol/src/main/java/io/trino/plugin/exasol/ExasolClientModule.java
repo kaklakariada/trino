@@ -28,12 +28,16 @@ import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.ptf.Query;
+import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
 
+import java.util.Optional;
 import java.util.Properties;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
+import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.trino.plugin.jdbc.JdbcModule.bindSessionPropertiesProvider;
 
 public class ExasolClientModule
         extends AbstractConfigurationAwareModule
@@ -42,25 +46,39 @@ public class ExasolClientModule
     protected void setup(Binder binder)
     {
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(ExasolClient.class).in(Scopes.SINGLETON);
+        bindSessionPropertiesProvider(binder, ExasolSessionProperties.class);
         configBinder(binder).bindConfig(JdbcStatisticsConfig.class);
+        configBinder(binder).bindConfig(ExasolConfig.class);
         newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Query.class).in(Scopes.SINGLETON);
+        newOptionalBinder(binder, ConnectorPageSourceProvider.class).setBinding().to(ExasolParallelConnectionPageSourceProvider.class).in(Scopes.SINGLETON);
+        binder.bind(ParallelConnectionFactory.class).in(Scopes.SINGLETON);
     }
 
     @Provides
     @Singleton
     @ForBaseJdbc
-    public static ConnectionFactory connectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, OpenTelemetry openTelemetry)
+    public static ConnectionFactory connectionFactory(BaseJdbcConfig config, ExasolConfig exasolConfig, CredentialProvider credentialProvider, OpenTelemetry openTelemetry)
+    {
+        return DriverConnectionFactory.builder(
+                        new EXADriver(),
+                        config.getConnectionUrl(),
+                        credentialProvider)
+                .setConnectionProperties(buildConnectionProperties(exasolConfig))
+                .setOpenTelemetry(openTelemetry)
+                .build();
+    }
+
+    private static Properties buildConnectionProperties(ExasolConfig exasolConfig)
     {
         Properties connectionProperties = new Properties();
         // Deactivate SNAPSHOT_MODE (https://docs.exasol.com/db/latest/database_concepts/snapshot_mode.htm)
         // to ensure that {@link Connection#getMetaData()} always returns up-to-date data.
         connectionProperties.setProperty("snapshottransactions", "1");
-        return DriverConnectionFactory.builder(
-                        new EXADriver(),
-                        config.getConnectionUrl(),
-                        credentialProvider)
-                .setConnectionProperties(connectionProperties)
-                .setOpenTelemetry(openTelemetry)
-                .build();
+        Optional<String> logDir = exasolConfig.getJdbcDriverLogDir();
+        if (logDir.isPresent()) {
+            connectionProperties.setProperty("debug", "1");
+            connectionProperties.setProperty("logdir", logDir.get());
+        }
+        return connectionProperties;
     }
 }

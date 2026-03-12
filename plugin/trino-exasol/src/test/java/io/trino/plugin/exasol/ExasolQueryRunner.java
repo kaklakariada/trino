@@ -71,6 +71,16 @@ public final class ExasolQueryRunner
             return this;
         }
 
+        public Builder withParallelWorkerCount(int count)
+        {
+            return addConnectorProperty("exasol.parallel_connections.worker_count", "3");
+        }
+
+        public Builder withJdbcDriverLogDir(String logDir)
+        {
+            return addConnectorProperty("exasol.jdbc_driver.log_dir", logDir);
+        }
+
         public Builder setInitialTables(Iterable<TpchTable<?>> initialTables)
         {
             this.initialTables = ImmutableList.copyOf(requireNonNull(initialTables, "initialTables is null"));
