@@ -49,6 +49,34 @@ specify the certificate's fingerprint in the JDBC URL using parameter
 ``fingerprint``, e.g.: ``jdbc:exa:exasol.example.com:8563;fingerprint=ABC123``.
 :::
 
+### Parallel connections
+
+To speed up importing data from an Exasol cluster with multiple nodes,
+you can enable parallel connections by specifying property
+``exasol.parallel_connections.worker_count`` with value 2 or higher.
+This will enable a custom page source that uses Exasol's
+[parallel connections](https://exasol.my.site.com/s/article/Parallel-connections-with-JDBC)
+to read query results in parallel. The actual number of parallel connections
+depends on the number of nodes in the Exasol cluster.
+Parallel connections are deactivated by default.
+
+Property value 0 will deactivate parallel connection explicitly. A value
+of 1 will use the custom page source with a single connection. This is only
+useful for testing.
+
+You can override the setting for an Exasol catalog using session property
+``parallel_connections_worker_count`` by running the following command:
+
+```sql
+set session catalog.parallel_connections_worker_count = 3;
+```
+
+### JDBC driver debugging
+
+To diagnose issues with the Exasol JDBC driver, you can enable log output by specifying
+a value for property ``exasol.jdbc_driver.log_dir``. The JDBC driver will create one log
+file for each session in the given directory. Logging is disabled by default.
+
 ```{include} jdbc-authentication.fragment
 ```
 
