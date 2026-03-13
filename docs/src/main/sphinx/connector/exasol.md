@@ -71,6 +71,13 @@ You can override the setting for an Exasol catalog using session property
 set session catalog.parallel_connections_worker_count = 3;
 ```
 
+:::{note}
+* Even with parallel connections, Trino will read the query result only
+  on a single Trino node, but in multiple threads.
+* Parallel connections cause overhead for each query. They only make sense
+  if the query reads a large amount of data.
+:::
+
 ### JDBC driver debugging
 
 To diagnose issues with the Exasol JDBC driver, you can enable log output by specifying
