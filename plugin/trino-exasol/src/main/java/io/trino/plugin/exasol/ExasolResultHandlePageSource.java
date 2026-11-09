@@ -54,7 +54,6 @@ import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static java.lang.System.nanoTime;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.CompletableFuture.supplyAsync;
 
 public final class ExasolResultHandlePageSource
         implements ConnectorPageSource
@@ -70,18 +69,19 @@ public final class ExasolResultHandlePageSource
     private final SliceReadFunction[] sliceReadFunctions;
     private final ObjectReadFunction[] objectReadFunctions;
 
-    private final JdbcClient jdbcClient;
     private final ExecutorService executor;
     private final Connection connection;
     private final int resultSetHandle;
+    private final ResultSetSupplier resultSetSupplier;
     private final AtomicLong readTimeNanos = new AtomicLong(0);
     private final PageBuilder pageBuilder;
-    private CompletableFuture<ResultSet> resultSetFuture;
+    private volatile CompletableFuture<ResultSet> resultSetFuture = UNINITIALIZED_RESULT_SET_FUTURE;
     @Nullable
     private ResultSet resultSet;
 
     private boolean finished;
-    private boolean closed;
+    private volatile boolean closed;
+    private boolean resultSetCloseRequested;
     private long completedPositions;
 
     public ExasolResultHandlePageSource(
@@ -92,10 +92,23 @@ public final class ExasolResultHandlePageSource
             int resultSetHandle,
             List<JdbcColumnHandle> columnHandles)
     {
-        this.jdbcClient = requireNonNull(jdbcClient, "jdbcClient is null");
+        this(jdbcClient, executor, session, connection, resultSetHandle, columnHandles, () -> connection.unwrap(EXAConnection.class).DescribeResult(resultSetHandle));
+    }
+
+    ExasolResultHandlePageSource(
+            JdbcClient jdbcClient,
+            ExecutorService executor,
+            ConnectorSession session,
+            Connection connection,
+            int resultSetHandle,
+            List<JdbcColumnHandle> columnHandles,
+            ResultSetSupplier resultSetSupplier)
+    {
+        requireNonNull(jdbcClient, "jdbcClient is null");
         this.executor = requireNonNull(executor, "executor is null");
         this.connection = requireNonNull(connection, "connection is null");
         this.resultSetHandle = resultSetHandle;
+        this.resultSetSupplier = requireNonNull(resultSetSupplier, "resultSetSupplier is null");
         this.columnHandles = ImmutableList.copyOf(columnHandles);
 
         readFunctions = new ReadFunction[columnHandles.size()];
@@ -139,7 +152,6 @@ public final class ExasolResultHandlePageSource
             pageBuilder = new PageBuilder(columnHandles.stream()
                     .map(JdbcColumnHandle::getColumnType)
                     .collect(toImmutableList()));
-            resultSetFuture = UNINITIALIZED_RESULT_SET_FUTURE;
         }
         catch (RuntimeException e) {
             throw handleSqlException(e);
@@ -167,23 +179,14 @@ public final class ExasolResultHandlePageSource
         }
         try {
             if (resultSetFuture == UNINITIALIZED_RESULT_SET_FUTURE && resultSet == null) {
-                checkState(!closed, "page source is closed");
-                resultSetFuture = supplyAsync(() -> {
-                    long start = nanoTime();
-                    try {
-                        log.debug("Getting result set for handle %d...", resultSetHandle);
-                        ResultSet rs = exaConnection().DescribeResult(resultSetHandle);
-                        log.debug("Got result set for handle: %s", rs);
-                        return rs;
+                synchronized (this) {
+                    checkState(!closed && !resultSetCloseRequested, "page source is closed");
+                    if (resultSetFuture == UNINITIALIZED_RESULT_SET_FUTURE) {
+                        CompletableFuture<ResultSet> future = new CompletableFuture<>();
+                        resultSetFuture = future;
+                        executor.execute(() -> describeResultSet(future));
                     }
-                    catch (SQLException e) {
-                        log.error(e, "Error describing result set for handle %s: %s", resultSetHandle, e.getMessage());
-                        throw handleSqlException(e);
-                    }
-                    finally {
-                        readTimeNanos.addAndGet(nanoTime() - start);
-                    }
-                }, executor);
+                }
             }
             if (resultSet == null) {
                 if (!resultSetFuture.isDone()) {
@@ -233,10 +236,28 @@ public final class ExasolResultHandlePageSource
         return SourcePage.create(page);
     }
 
-    private EXAConnection exaConnection()
-            throws SQLException
+    private void describeResultSet(CompletableFuture<ResultSet> future)
     {
-        return connection.unwrap(EXAConnection.class);
+        long start = nanoTime();
+        try {
+            log.debug("Getting result set for handle %d...", resultSetHandle);
+            ResultSet rs = resultSetSupplier.get();
+            log.debug("Got result set for handle: %s", rs);
+            if (!future.complete(rs)) {
+                closeResultSetQuietly(rs);
+            }
+        }
+        catch (SQLException | RuntimeException e) {
+            log.error(e, "Error describing result set for handle %s: %s", resultSetHandle, e.getMessage());
+            future.completeExceptionally(handleSqlException(e));
+        }
+        catch (Error e) {
+            future.completeExceptionally(e);
+            throw e;
+        }
+        finally {
+            readTimeNanos.addAndGet(nanoTime() - start);
+        }
     }
 
     @Override
@@ -260,26 +281,45 @@ public final class ExasolResultHandlePageSource
     @Override
     public void close()
     {
-        if (closed) {
-            return;
+        synchronized (this) {
+            if (closed) {
+                return;
+            }
+            closed = true;
         }
-        closed = true;
-        resultSetFuture.cancel(true);
-
-        // use try with resources to close everything properly
-        try (Connection connection = this.connection;
-                ResultSet resultSet = this.resultSet) {
-            if (resultSet != null) {
-                jdbcClient.abortReadConnection(connection, resultSet);
-            }
-            else {
-                connection.close();
-            }
+        closeResultSet();
+        try {
+            connection.close();
         }
         catch (SQLException | RuntimeException e) {
-            // ignore exception from close
+            log.debug(e, "Failed to close subconnection");
         }
-        resultSet = null;
+    }
+
+    void closeResultSet()
+    {
+        CompletableFuture<ResultSet> future;
+        synchronized (this) {
+            if (resultSetCloseRequested) {
+                return;
+            }
+            resultSetCloseRequested = true;
+            future = resultSetFuture;
+        }
+        if (future != UNINITIALIZED_RESULT_SET_FUTURE) {
+            // The result set may be returned after close() has already closed the connection.
+            future.thenAccept(this::closeResultSetQuietly);
+        }
+    }
+
+    private void closeResultSetQuietly(ResultSet resultSet)
+    {
+        try {
+            resultSet.close();
+        }
+        catch (SQLException | RuntimeException e) {
+            log.debug(e, "Failed to close result set for handle %s", resultSetHandle);
+        }
     }
 
     private RuntimeException handleSqlException(Exception e)
@@ -294,5 +334,12 @@ public final class ExasolResultHandlePageSource
             }
         }
         return new TrinoException(JDBC_ERROR, e);
+    }
+
+    @FunctionalInterface
+    interface ResultSetSupplier
+    {
+        ResultSet get()
+                throws SQLException;
     }
 }

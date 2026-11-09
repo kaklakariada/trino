@@ -154,6 +154,7 @@ public class ExasolParallelPageSource
             pageQueue.fail(producerId, e);
         }
         finally {
+            source.closeResultSet();
             pageQueue.finish(producerId);
         }
     }
@@ -234,6 +235,7 @@ public class ExasolParallelPageSource
             return;
         }
         readerTasks.forEach(task -> task.cancel(true));
+        subConnectionPageSources.forEach(ExasolResultHandlePageSource::closeResultSet);
 
         log.debug("Closing main connection...");
         // use try with resources to close everything properly
