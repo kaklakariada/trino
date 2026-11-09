@@ -13,10 +13,13 @@
  */
 package io.trino.parquet.reader;
 
+import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.parquet.DataPage;
 import io.trino.parquet.DictionaryPage;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.PrimitiveField;
+import io.trino.parquet.reader.TestingColumnReader.ColumnReaderFormat;
+import io.trino.parquet.reader.TestingColumnReader.DataPageVersion;
 import io.trino.spi.block.Block;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.values.ValuesWriter;
@@ -30,8 +33,6 @@ import java.util.Optional;
 
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.parquet.ParquetEncoding.RLE_DICTIONARY;
-import static io.trino.parquet.reader.TestingColumnReader.ColumnReaderFormat;
-import static io.trino.parquet.reader.TestingColumnReader.DataPageVersion;
 import static io.trino.parquet.reader.TestingColumnReader.getDictionaryPage;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.joda.time.DateTimeZone.UTC;
@@ -41,6 +42,11 @@ public class TestNestedColumnReader
 {
     @Override
     protected ColumnReader createColumnReader(PrimitiveField field)
+    {
+        return createColumnReader(field, newSimpleAggregatedMemoryContext());
+    }
+
+    private static ColumnReader createColumnReader(PrimitiveField field, AggregatedMemoryContext memoryContext)
     {
         ColumnDescriptor descriptor = field.getDescriptor();
         PrimitiveField tesingField = new PrimitiveField(
@@ -54,7 +60,7 @@ public class TestNestedColumnReader
                         descriptor.getMaxDefinitionLevel()),
                 field.getId());
         ColumnReaderFactory columnReaderFactory = new ColumnReaderFactory(UTC, ParquetReaderOptions.defaultOptions());
-        ColumnReader columnReader = columnReaderFactory.create(tesingField, newSimpleAggregatedMemoryContext());
+        ColumnReader columnReader = columnReaderFactory.create(tesingField, memoryContext);
         assertThat(columnReader).isInstanceOf(NestedColumnReader.class);
         return columnReader;
     }
@@ -166,6 +172,34 @@ public class TestNestedColumnReader
         Block actual1 = readBlock(reader, 3, 1);
 
         format.assertBlock(values1, actual1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    public <T> void testMemoryUsageWithoutRepetitionLevels(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        // Create reader
+        PrimitiveField field = createField(format, false, 0, 2);
+        AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
+        ColumnReader reader = createColumnReader(field, memoryContext);
+        // Write data
+        DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+        format.write(dictionaryWriter, new Integer[] {1, 2, 3});
+        DataPage page1 = createDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, new int[0], new int[] {2, 2, 2});
+        format.resetAndWrite(dictionaryWriter, new Integer[] {2, 4, 5, 3, 7});
+        DataPage page2 = createDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, new int[0], new int[] {2, 2, 2, 2, 2});
+        format.resetAndWrite(dictionaryWriter, new Integer[] {1});
+        DataPage page3 = createDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, new int[0], new int[] {2});
+        DictionaryPage dictionaryPage = getDictionaryPage(dictionaryWriter);
+        // Read and assert
+        reader.setPageReader(getPageReaderMock(List.of(page1, page2, page3), dictionaryPage), Optional.empty());
+        readBlock(reader, 3, 3);
+        long memoryUsage = memoryContext.getBytes();
+        assertThat(memoryUsage).isGreaterThan(0);
+        readBlock(reader, 5, 5);
+        // Memory usage does not depend on the value count of the current page
+        assertThat(memoryContext.getBytes()).isEqualTo(memoryUsage);
     }
 
     @ParameterizedTest

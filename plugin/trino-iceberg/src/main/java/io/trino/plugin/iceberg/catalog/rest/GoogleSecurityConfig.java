@@ -15,12 +15,17 @@ package io.trino.plugin.iceberg.catalog.rest;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.validation.FileExists;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotNull;
+
+import java.util.Optional;
 
 public class GoogleSecurityConfig
 {
     private String projectId;
+    private String jsonKey;
     private String jsonKeyFilePath;
 
     @NotNull
@@ -38,18 +43,38 @@ public class GoogleSecurityConfig
     }
 
     @NotNull
-    @FileExists
-    public String getJsonKeyFilePath()
+    public Optional<String> getJsonKey()
     {
-        return jsonKeyFilePath;
+        return Optional.ofNullable(jsonKey);
     }
 
-    // Duplicated from GcsFileSystemConfig to enforce the property in BigLake metastore
-    @Config("gcs.json-key-file-path")
-    @ConfigDescription("JSON key file used to access Google Cloud Storage")
+    @Config("iceberg.rest-catalog.google-json-key")
+    @ConfigSecuritySensitive
+    @ConfigDescription("Google Cloud service account key in JSON format, used to authenticate with the Iceberg REST catalog")
+    public GoogleSecurityConfig setJsonKey(String jsonKey)
+    {
+        this.jsonKey = jsonKey;
+        return this;
+    }
+
+    public Optional<@FileExists String> getJsonKeyFilePath()
+    {
+        return Optional.ofNullable(jsonKeyFilePath);
+    }
+
+    @Config("iceberg.rest-catalog.google-json-key-file-path")
+    @ConfigDescription("Path to a Google Cloud service account key file in JSON format, used to authenticate with the Iceberg REST catalog")
     public GoogleSecurityConfig setJsonKeyFilePath(String jsonKeyFilePath)
     {
         this.jsonKeyFilePath = jsonKeyFilePath;
         return this;
+    }
+
+    // When neither is set, Application Default Credentials (ADC) are used, which enables GKE Workload Identity and
+    // environment-based credential sources.
+    @AssertTrue(message = "iceberg.rest-catalog.google-json-key and iceberg.rest-catalog.google-json-key-file-path cannot be set at the same time")
+    public boolean isAuthMethodValid()
+    {
+        return !(jsonKey != null && jsonKeyFilePath != null);
     }
 }

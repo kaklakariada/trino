@@ -26,10 +26,9 @@ import io.trino.metadata.TestingFunctionResolution;
 import io.trino.spi.block.Block;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.sql.ir.Call;
 import io.trino.sql.ir.Cast;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
@@ -47,23 +46,27 @@ import io.trino.sql.planner.rowpattern.ScalarValuePointer;
 import io.trino.sql.planner.rowpattern.ValuePointer;
 import io.trino.sql.planner.rowpattern.ir.IrConcatenation;
 import io.trino.sql.planner.rowpattern.ir.IrLabel;
+import io.trino.type.TypeDescriptorKeyDeserializer;
 import io.trino.type.TypeDeserializer;
-import io.trino.type.TypeSignatureKeyDeserializer;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.metadata.TestingMetadataManager.createTestingMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
-import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
+import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN;
 import static io.trino.sql.ir.IrExpressions.ifExpression;
+import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.plan.FrameBoundType.CURRENT_ROW;
 import static io.trino.sql.planner.plan.FrameBoundType.UNBOUNDED_FOLLOWING;
+import static io.trino.sql.planner.plan.FrameExclusion.NO_OTHERS;
 import static io.trino.sql.planner.plan.RowsPerMatch.WINDOW;
 import static io.trino.sql.planner.plan.SkipToPosition.LAST;
 import static io.trino.sql.planner.plan.WindowFrameType.ROWS;
@@ -85,7 +88,7 @@ public class TestPatternRecognitionNodeSerialization
     static {
         JsonMapper objectMapper = new JsonMapperProvider()
                 .withKeyDeserializers(ImmutableMap.of(
-                        TypeSignature.class, new TypeSignatureKeyDeserializer(),
+                        TypeDescriptor.class, new TypeDescriptorKeyDeserializer(),
                         Symbol.class, new SymbolKeyDeserializer(TESTING_TYPE_MANAGER)))
                 .withJsonDeserializers(ImmutableMap.of(
                         Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER),
@@ -116,7 +119,7 @@ public class TestPatternRecognitionNodeSerialization
     @Test
     public void testAggregationValuePointerRoundtrip()
     {
-        ResolvedFunction countFunction = createTestingMetadataManager().resolveBuiltinFunction("count", ImmutableList.of());
+        ResolvedFunction countFunction = createTestingMetadataManager().resolveBuiltinFunction(getCharVarcharCoercion(TEST_SESSION), "count", ImmutableList.of());
         assertJsonRoundTrip(VALUE_POINTER_CODEC, new AggregationValuePointer(
                 countFunction,
                 new AggregatedSetDescriptor(ImmutableSet.of(), false),
@@ -124,7 +127,7 @@ public class TestPatternRecognitionNodeSerialization
                 Optional.of(new Symbol(VARCHAR, "classifier")),
                 Optional.of(new Symbol(BIGINT, "match_number"))));
 
-        ResolvedFunction maxFunction = createTestingMetadataManager().resolveBuiltinFunction("max", fromTypes(BIGINT));
+        ResolvedFunction maxFunction = createTestingMetadataManager().resolveBuiltinFunction(getCharVarcharCoercion(TEST_SESSION), "max", ImmutableList.of(BIGINT));
         assertJsonRoundTrip(VALUE_POINTER_CODEC, new AggregationValuePointer(
                 maxFunction,
                 new AggregatedSetDescriptor(ImmutableSet.of(new IrLabel("A"), new IrLabel("B")), true),
@@ -140,7 +143,7 @@ public class TestPatternRecognitionNodeSerialization
 
         assertJsonRoundTrip(EXPRESSION_AND_VALUE_POINTERS_CODEC, new ExpressionAndValuePointers(
                 ifExpression(
-                        new Comparison(GREATER_THAN, new Reference(VARCHAR, "classifier"), new Reference(VARCHAR, "x")),
+                        comparison(GREATER_THAN, new Reference(VARCHAR, "classifier"), new Reference(VARCHAR, "x")),
                         new Cast(new Call(RANDOM, ImmutableList.of()), INTEGER),
                         new Call(NEGATION_INTEGER, ImmutableList.of(new Reference(INTEGER, "match_number")))),
                 ImmutableList.of(
@@ -168,7 +171,7 @@ public class TestPatternRecognitionNodeSerialization
         assertJsonRoundTrip(MEASURE_CODEC, new Measure(
                 new ExpressionAndValuePointers(
                         ifExpression(
-                                new Comparison(GREATER_THAN, new Reference(INTEGER, "match_number"), new Reference(INTEGER, "x")),
+                                comparison(GREATER_THAN, new Reference(INTEGER, "match_number"), new Reference(INTEGER, "x")),
                                 new Constant(BIGINT, 10L),
                                 new Call(NEGATION_BIGINT, ImmutableList.of(new Reference(BIGINT, "y")))),
                         ImmutableList.of(
@@ -191,7 +194,7 @@ public class TestPatternRecognitionNodeSerialization
     @Test
     public void testPatternRecognitionNodeRoundtrip()
     {
-        ResolvedFunction rankFunction = createTestingMetadataManager().resolveBuiltinFunction("rank", ImmutableList.of());
+        ResolvedFunction rankFunction = createTestingMetadataManager().resolveBuiltinFunction(getCharVarcharCoercion(TEST_SESSION), "rank", ImmutableList.of());
 
         // test remaining fields inside PatternRecognitionNode specific to pattern recognition:
         // windowFunctions, measures, commonBaseFrame, rowsPerMatch, skipToLabel, skipToPosition, initial, pattern, subsets, variableDefinitions
@@ -206,12 +209,12 @@ public class TestPatternRecognitionNodeSerialization
                                 rankFunction,
                                 ImmutableList.of(),
                                 Optional.empty(),
-                                new Frame(ROWS, CURRENT_ROW, Optional.empty(), Optional.empty(), UNBOUNDED_FOLLOWING, Optional.empty(), Optional.empty()),
+                                new Frame(ROWS, CURRENT_ROW, Optional.empty(), Optional.empty(), UNBOUNDED_FOLLOWING, Optional.empty(), Optional.empty(), NO_OTHERS),
                                 false,
                                 false)),
                 ImmutableMap.of(
                         new Symbol(BOOLEAN, "measure"), new Measure(new ExpressionAndValuePointers(new Constant(BOOLEAN, null), ImmutableList.of()), BOOLEAN)),
-                Optional.of(new Frame(ROWS, CURRENT_ROW, Optional.empty(), Optional.empty(), UNBOUNDED_FOLLOWING, Optional.empty(), Optional.empty())),
+                Optional.of(new Frame(ROWS, CURRENT_ROW, Optional.empty(), Optional.empty(), UNBOUNDED_FOLLOWING, Optional.empty(), Optional.empty(), NO_OTHERS)),
                 WINDOW,
                 ImmutableSet.of(new IrLabel("B")),
                 LAST,

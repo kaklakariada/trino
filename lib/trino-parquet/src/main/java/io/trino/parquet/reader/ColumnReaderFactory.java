@@ -17,8 +17,10 @@ import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.PrimitiveField;
+import io.trino.parquet.reader.decoders.ValueDecoder.ValueDecodersProvider;
 import io.trino.parquet.reader.decoders.ValueDecoders;
 import io.trino.parquet.reader.flat.ColumnAdapter;
+import io.trino.parquet.reader.flat.DictionaryDecoder.DictionaryDecoderProvider;
 import io.trino.parquet.reader.flat.FlatColumnReader;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.AbstractIntType;
@@ -47,16 +49,16 @@ import org.joda.time.DateTimeZone;
 import java.util.Optional;
 
 import static io.trino.parquet.ParquetEncoding.PLAIN;
-import static io.trino.parquet.reader.decoders.ValueDecoder.ValueDecodersProvider;
 import static io.trino.parquet.reader.decoders.ValueDecoder.createLevelsDecoder;
 import static io.trino.parquet.reader.flat.BinaryColumnAdapter.BINARY_ADAPTER;
+import static io.trino.parquet.reader.flat.BitColumnAdapter.BIT_ADAPTER;
 import static io.trino.parquet.reader.flat.ByteColumnAdapter.BYTE_ADAPTER;
-import static io.trino.parquet.reader.flat.DictionaryDecoder.DictionaryDecoderProvider;
 import static io.trino.parquet.reader.flat.DictionaryDecoder.getDictionaryDecoder;
 import static io.trino.parquet.reader.flat.Fixed12ColumnAdapter.FIXED12_ADAPTER;
 import static io.trino.parquet.reader.flat.FlatDefinitionLevelDecoder.getFlatDefinitionLevelDecoder;
 import static io.trino.parquet.reader.flat.Int128ColumnAdapter.INT128_ADAPTER;
 import static io.trino.parquet.reader.flat.IntColumnAdapter.INT_ADAPTER;
+import static io.trino.parquet.reader.flat.JsonColumnAdapter.JSON_ADAPTER;
 import static io.trino.parquet.reader.flat.LongColumnAdapter.LONG_ADAPTER;
 import static io.trino.parquet.reader.flat.ShortColumnAdapter.SHORT_ADAPTER;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -66,6 +68,7 @@ import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
@@ -104,7 +107,7 @@ public final class ColumnReaderFactory
         LocalMemoryContext memoryContext = aggregatedMemoryContext.newLocalMemoryContext(ColumnReader.class.getSimpleName());
         ValueDecoders valueDecoders = new ValueDecoders(field, vectorizedDecodingEnabled);
         if (BOOLEAN.equals(type) && primitiveType == PrimitiveTypeName.BOOLEAN) {
-            return createColumnReader(field, valueDecoders::getBooleanDecoder, BYTE_ADAPTER, memoryContext);
+            return createColumnReader(field, valueDecoders::getBooleanDecoder, BIT_ADAPTER, memoryContext);
         }
         if (TINYINT.equals(type) && isIntegerOrDecimalPrimitive(primitiveType)) {
             if (isZeroScaleShortDecimalAnnotation(annotation)) {
@@ -224,13 +227,13 @@ public final class ColumnReaderFactory
             }
             if (timestampWithTimeZoneType.isShort()) {
                 return switch (timestampAnnotation.getUnit()) {
-                    case MILLIS -> createColumnReader(field, valueDecoders::getInt64TimestampMillsToShortTimestampWithTimeZoneDecoder, LONG_ADAPTER, memoryContext);
+                    case MILLIS -> createColumnReader(field, valueDecoders::getInt64TimestampMillisToShortTimestampWithTimeZoneDecoder, LONG_ADAPTER, memoryContext);
                     case MICROS -> createColumnReader(field, valueDecoders::getInt64TimestampMicrosToShortTimestampWithTimeZoneDecoder, LONG_ADAPTER, memoryContext);
                     case NANOS -> createColumnReader(field, valueDecoders::getInt64TimestampNanosToShortTimestampWithTimeZoneDecoder, LONG_ADAPTER, memoryContext);
                 };
             }
             return switch (timestampAnnotation.getUnit()) {
-                case MILLIS -> throw unsupportedException(type, field);
+                case MILLIS -> createColumnReader(field, valueDecoders::getInt64TimestampMillisToLongTimestampWithTimeZoneDecoder, FIXED12_ADAPTER, memoryContext);
                 case MICROS -> createColumnReader(field, valueDecoders::getInt64TimestampMicrosToLongTimestampWithTimeZoneDecoder, FIXED12_ADAPTER, memoryContext);
                 case NANOS -> createColumnReader(field, valueDecoders::getInt64TimestampNanosToLongTimestampWithTimeZoneDecoder, FIXED12_ADAPTER, memoryContext);
             };
@@ -263,6 +266,9 @@ public final class ColumnReaderFactory
         }
         if (type instanceof CharType && primitiveType == BINARY) {
             return createColumnReader(field, valueDecoders::getCharBinaryDecoder, BINARY_ADAPTER, memoryContext);
+        }
+        if (type.getBaseName().equals(JSON) && primitiveType == BINARY) {
+            return createColumnReader(field, valueDecoders::getBinaryDecoder, JSON_ADAPTER, memoryContext);
         }
         if (type instanceof AbstractVariableWidthType && primitiveType == BINARY) {
             return createColumnReader(field, valueDecoders::getBinaryDecoder, BINARY_ADAPTER, memoryContext);

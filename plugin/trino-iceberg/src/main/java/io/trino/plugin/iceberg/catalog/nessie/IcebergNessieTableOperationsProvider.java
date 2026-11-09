@@ -15,9 +15,11 @@ package io.trino.plugin.iceberg.catalog.nessie;
 
 import com.google.inject.Inject;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.iceberg.catalog.AbstractTrinoCatalog;
 import io.trino.plugin.iceberg.catalog.IcebergTableOperations;
 import io.trino.plugin.iceberg.catalog.IcebergTableOperationsProvider;
 import io.trino.plugin.iceberg.catalog.TrinoCatalog;
+import io.trino.plugin.iceberg.encryption.EncryptionManagerFactory;
 import io.trino.plugin.iceberg.fileio.ForwardingFileIoFactory;
 import io.trino.spi.connector.ConnectorSession;
 import org.apache.iceberg.nessie.NessieIcebergClient;
@@ -33,13 +35,19 @@ public class IcebergNessieTableOperationsProvider
     private final TrinoFileSystemFactory fileSystemFactory;
     private final ForwardingFileIoFactory fileIoFactory;
     private final NessieIcebergClient nessieClient;
+    private final EncryptionManagerFactory encryptionManagerFactory;
 
     @Inject
-    public IcebergNessieTableOperationsProvider(TrinoFileSystemFactory fileSystemFactory, ForwardingFileIoFactory fileIoFactory, NessieIcebergClient nessieClient)
+    public IcebergNessieTableOperationsProvider(
+            TrinoFileSystemFactory fileSystemFactory,
+            ForwardingFileIoFactory fileIoFactory,
+            NessieIcebergClient nessieClient,
+            EncryptionManagerFactory encryptionManagerFactory)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fileIoFactory = requireNonNull(fileIoFactory, "fileIoFactory is null");
         this.nessieClient = requireNonNull(nessieClient, "nessieClient is null");
+        this.encryptionManagerFactory = requireNonNull(encryptionManagerFactory, "encryptionManagerFactory is null");
     }
 
     @Override
@@ -53,11 +61,12 @@ public class IcebergNessieTableOperationsProvider
     {
         return new IcebergNessieTableOperations(
                 nessieClient,
-                fileIoFactory.create(fileSystemFactory.create(session), isUseFileSizeFromMetadata(session)),
+                fileIoFactory.create(((AbstractTrinoCatalog) catalog).measureFileSystem(fileSystemFactory.create(session)), isUseFileSizeFromMetadata(session)),
                 session,
                 database,
                 table,
                 owner,
-                location);
+                location,
+                encryptionManagerFactory);
     }
 }

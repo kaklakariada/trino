@@ -125,7 +125,7 @@ Hive connector documentation.
   - `false`
 * - `hive.storage-format`
   - The default file format used when creating new tables.
-  - `ORC`
+  - `PARQUET`
 * - `hive.orc.use-column-names`
   - Access ORC columns by name. By default, columns in ORC files are accessed by
     their ordinal position in the Hive table definition. The equivalent catalog
@@ -766,6 +766,19 @@ The following procedures are available:
   file system paths to use lowercase (e.g. `col_x=SomeValue`). Partitions on the file system
   not conforming to this convention are ignored, unless the argument is set to `false`.
 
+  Example:
+
+  ```sql
+  CALL system.sync_partition_metadata('web', 'page_views', 'FULL');
+  ```
+
+  ```text
+            metric           | value
+  ---------------------------+-------
+   added_partitions_count    |     2
+   dropped_partitions_count  |     1
+  ```
+
 - `system.drop_stats(schema_name, table_name, partition_values)`
 
   Drops statistics for a subset of partitions or the entire table. The partitions are specified as an
@@ -935,12 +948,12 @@ Newly added/renamed fields *must* have a default value in the Avro schema file.
 The schema evolution behavior is as follows:
 
 - Column added in new schema:
-  Data created with an older schema produces a *default* value when table is using the new schema.
+  Data created with an older schema produces a *default* value when the table is using the new schema.
 - Column removed in new schema:
   Data created with an older schema no longer outputs the data from the column that was removed.
 - Column is renamed in the new schema:
   This is equivalent to removing the column and adding a new one, and data created with an older schema
-  produces a *default* value when table is using the new schema.
+  produces a *default* value when the table is using the new schema.
 - Changing type of column in the new schema:
   If the type coercion is supported by Avro or the Hive connector, then the conversion happens.
   An error is thrown for incompatible types.
@@ -1040,6 +1053,11 @@ WITH (format='CSV',
     `RCBINARY`, `RCTEXT`, `SEQUENCEFILE`, `JSON`, `OPENX_JSON`, `TEXTFILE`,
     `CSV`, and `REGEX`. The catalog property `hive.storage-format` sets the
     default value and can change it to a different default.
+  -
+* - `last_column_takes_rest`
+  - Set this property to `true` so that the last column absorbs the remainder
+    of the line, including any further occurrences of the field separator.
+    Requires TextFile, RCText, or SequenceFile format.
   -
 * - `null_format`
   - The serialization format for `NULL` value. Requires TextFile, RCText, or
@@ -1202,17 +1220,23 @@ SELECT * FROM example.web."page_views$partitions";
   -
 * - `partition_projection_format`
   - Used with `partition_projection_type` set to `DATE`. The date column
-    projection format, defined as a string such as `yyyy MM` or `MM-dd-yy
+    projection format, defined as a string such as `yyyy-MM` or `MM-dd-yy
     HH:mm:ss` for use with the [Java DateTimeFormatter
     class](https://docs.oracle.com/javase/8/docs/api/java/time/format/DateTimeFormatter.html).
     Mapped from the AWS Athena table property
     [projection.${columnName}.format](https://docs.aws.amazon.com/athena/latest/ug/partition-projection-supported-types.html).
   -
 * - `partition_projection_interval_unit`
-  - Used with `partition_projection_type=DATA`. The date column projection range
+  - Used with `partition_projection_type` set to `DATE`. The date column projection range
     interval unit given in `partition_projection_interval`. Mapped from the AWS
     Athena table property
     [projection.${columnName}.interval.unit](https://docs.aws.amazon.com/athena/latest/ug/partition-projection-supported-types.html).
+    Supported units are `DAYS`, `HOURS`, `MINUTES`, and `SECONDS`. Formats with
+    month, quarter, or year precision, such as `yyyy-MM`, `'abc'-yyyy-MM`,
+    `yyyy-'Q'Q`, or `yyyy`, are supported only for `VARCHAR` columns and require
+    an explicit supported interval unit. Values advance by the configured
+    interval, regardless of the format precision. `MONTHS`, `YEARS`, and `WEEKS`
+    intervals are not supported.
   -
 
 :::
@@ -1523,21 +1547,16 @@ cause instability and performance degradation.
     be used to reduce the load on the storage system. By default, there is no
     limit, which results in Trino maximizing the parallelization of data access.
   -
-* - `hive.max-initial-splits`
-  - For each table scan, the coordinator first assigns file sections of up to
-    `max-initial-split-size`. After `max-initial-splits` have been assigned,
-    `max-split-size` is used for the remaining splits.
-  - `200`
-* - `hive.max-initial-split-size`
-  - The size of a single file section assigned to a worker until
-    `max-initial-splits` have been assigned. Smaller splits results in more
-    parallelism, which gives a boost to smaller queries.
-  - `32 MB`
 * - `hive.max-split-size`
   - The largest size of a single file section assigned to a worker. Smaller
         splits result in more parallelism and thus can decrease latency, but
         also have more overhead and increase load on the system.
   - `64 MB`
+* - `hive.parquet.max-split-size`
+  - The largest size of a single file section assigned to a worker for Parquet
+    files. Defaults to slightly below the typical Parquet row group size so that
+    splits align to row group boundaries.
+  - `120 MB`
 :::
 
 ## Hive 3-related limitations

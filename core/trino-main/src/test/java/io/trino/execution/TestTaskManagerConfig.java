@@ -15,6 +15,7 @@ package io.trino.execution;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
+import io.airlift.units.DataSize.Unit;
 import io.airlift.units.Duration;
 import org.junit.jupiter.api.Test;
 
@@ -25,7 +26,6 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
-import static io.airlift.units.DataSize.Unit;
 import static io.trino.util.MachineInfo.getAvailablePhysicalProcessorCount;
 import static it.unimi.dsi.fastutil.HashCommon.nextPowerOfTwo;
 import static java.lang.Math.clamp;
@@ -51,6 +51,7 @@ public class TestTaskManagerConfig
                 .setMinDrivers(Runtime.getRuntime().availableProcessors() * 2 * 2)
                 .setMinDriversPerTask(3)
                 .setMaxDriversPerTask(Integer.MAX_VALUE)
+                .setIdleLeafSplitAdmissionEnabled(true)
                 .setInfoMaxAge(new Duration(5, TimeUnit.MINUTES))
                 .setClientTimeout(new Duration(2, TimeUnit.MINUTES))
                 .setMaxIndexMemoryUsage(DataSize.of(64, Unit.MEGABYTE))
@@ -102,6 +103,7 @@ public class TestTaskManagerConfig
                 .put("task.min-drivers", "2")
                 .put("task.min-drivers-per-task", "5")
                 .put("task.max-drivers-per-task", "13")
+                .put("task.idle-leaf-split-admission.enabled", "false")
                 .put("task.info.max-age", "22m")
                 .put("task.client.timeout", "10s")
                 .put("sink.max-buffer-size", "42MB")
@@ -143,6 +145,7 @@ public class TestTaskManagerConfig
                 .setMinDrivers(2)
                 .setMinDriversPerTask(5)
                 .setMaxDriversPerTask(13)
+                .setIdleLeafSplitAdmissionEnabled(false)
                 .setInfoMaxAge(new Duration(22, TimeUnit.MINUTES))
                 .setClientTimeout(new Duration(10, TimeUnit.SECONDS))
                 .setSinkMaxBufferSize(DataSize.of(42, Unit.MEGABYTE))

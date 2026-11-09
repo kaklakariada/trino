@@ -166,6 +166,24 @@ mode:
 * - `--extra-header`
   - HTTP header to add to the authenticated HTTP requests
     (property can be used multiple times; format is key=value).
+* - `--oauth2-client-id`
+  - OAuth2 client ID for client credentials authentication. Requires
+    `--oauth2-client-secret` to also be set.
+* - `--oauth2-client-secret`
+  - Prompt for OAuth2 client secret for client credentials authentication. You 
+    can set the `TRINO_OAUTH2_CLIENT_SECRET` environment variable with the 
+    OAuth2 client secret value to avoid the prompt. For more information, see
+    [](cli-oauth2-client-credentials-auth)
+* - `--oauth2-token-endpoint`
+  - Optional `https://` URL of the OAuth2 token endpoint that the client
+    credentials are exchanged at. When set, the secret is only ever sent to this
+    endpoint, and a token endpoint advertised by the server is used only when it
+    matches this value. When not set, the token endpoint advertised by the server
+    is used, and it must be an `https://` URL.
+* - `--oauth2-scope`
+  - Optional OAuth2 scope requested for client credentials authentication. When
+    set, it overrides the scope advertised by the server in its authentication
+    challenge.
 * - `--http-proxy`
   - Configures the URL of the HTTP proxy to connect to Trino.
 * - `--history-file`
@@ -209,6 +227,15 @@ mode:
   - Specifies the name of the application or source connecting to Trino.
     Defaults to `trino-cli`. The value can be used as input for
     [](/admin/resource-groups).
+* - `--theme=<theme>`
+  - Selects the color theme for styled output. Options are `AUTO`, `DARK`,
+    `LIGHT`, `NONE`, `SOLARIZED_DARK`, `SOLARIZED_LIGHT`, `DRACULA`, `NORD`, or
+    `GRUVBOX_DARK`. Defaults to `AUTO`, which uses `DARK` for an interactive
+    terminal and disables color for a non-interactive terminal or when the
+    `NO_COLOR` environment variable is set. An explicit value other than `AUTO`
+    always applies, even when `NO_COLOR` is set. Use `NONE` to disable color.
+    The named schemes use 24-bit color, which is approximated on terminals
+    without truecolor support.
 * - `--timezone`
   - Sets the time zone for the session using the [time zone name](
     <https://wikipedia.org/wiki/List_of_tz_database_time_zones>). Defaults to
@@ -321,10 +348,6 @@ export TRINO_PASSWORD='LongSecurePassword123!@#'
 If the `TRINO_PASSWORD` environment variable is set, you are not prompted
 to provide a password to connect with the CLI.
 
-```text
-./trino https://trino.example.com --user=exampleusername --password
-```
-
 (cli-external-sso-auth)=
 ### External authentication - SSO
 
@@ -347,6 +370,38 @@ The detailed behavior is as follows:
   authentication token remains valid. Token expiration depends on the external
   authentication type configuration.
 - Expired tokens force you to log in again.
+
+(cli-oauth2-client-credentials-auth)=
+### OAuth2 client credentials authentication
+
+OAuth2 client credentials authentication is used for non-interactive
+(machine-to-machine) authentication using the OAuth2 client credentials flow,
+as detailed in {doc}`/security/oauth2`. Unlike browser-based SSO, the client
+authenticates directly with a client ID and secret without user involvement.
+
+The following example connects to the server and prompts the CLI for your
+client secret:
+
+```text
+./trino https://trino.example.com --oauth2-client-id=myclientid --oauth2-client-secret
+```
+
+The client secret is exchanged for a token at the OAuth2 token endpoint
+advertised by the server, which must be an `https://` URL. To pin the token
+endpoint to a trusted value instead, set `--oauth2-token-endpoint`; the CLI then
+sends the secret only to that endpoint and rejects a server-advertised endpoint
+that does not match it.
+
+Alternatively, set the client secret as the value of the
+`TRINO_OAUTH2_CLIENT_SECRET` environment variable. Typically use single quotes
+to avoid problems with special characters such as `$`:
+
+```text
+export TRINO_OAUTH2_CLIENT_SECRET='MyClientSecret123!@#'
+```
+
+If the `TRINO_OAUTH2_CLIENT_SECRET` environment variable is set, you are not
+prompted to provide a client secret to connect with the CLI.
 
 (cli-certificate-auth)=
 ### Certificate authentication

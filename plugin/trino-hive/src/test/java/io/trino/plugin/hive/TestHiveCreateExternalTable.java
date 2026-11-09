@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 
@@ -44,6 +45,7 @@ public class TestHiveCreateExternalTable
     {
         return HiveQueryRunner.builder()
                 .setHiveProperties(ImmutableMap.of("hive.non-managed-table-writes-enabled", "true"))
+                .addHiveProperty("fs.hadoop.enabled", "true")
                 .setInitialTables(ImmutableList.of(ORDERS, CUSTOMER))
                 .build();
     }
@@ -95,15 +97,16 @@ public class TestHiveCreateExternalTable
         String tableName = "test_create_external_non_exists_" + randomNameSuffix();
 
         @Language("SQL") String createTableSql = format(
-                "" +
-                        "CREATE TABLE %s.%s.%s (\n" +
-                        "   col1 varchar,\n" +
-                        "   col2 varchar\n" +
-                        ")\n" +
-                        "WITH (\n" +
-                        "   external_location = '%s',\n" +
-                        "   format = 'TEXTFILE'\n" +
-                        ")",
+                """
+                CREATE TABLE %s.%s.%s (
+                   col1 varchar,
+                   col2 varchar
+                )
+                WITH (
+                   external_location = '%s',
+                   format = 'TEXTFILE'
+                )\
+                """,
                 getSession().getCatalog().get(),
                 getSession().getSchema().get(),
                 tableName,
@@ -119,7 +122,7 @@ public class TestHiveCreateExternalTable
     public void testCreateExternalTableOnExistingPathToFile()
             throws Exception
     {
-        File tempFile = File.createTempFile("temp", ".tmp");
+        File tempFile = Files.createTempFile("temp", ".tmp").toFile();
         tempFile.deleteOnExit();
         String tableName = "test_create_external_on_file_" + randomNameSuffix();
 

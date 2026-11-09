@@ -42,6 +42,7 @@ import io.trino.operator.PipelineContext;
 import io.trino.operator.PipelineStatus;
 import io.trino.operator.TaskContext;
 import io.trino.operator.TaskStats;
+import io.trino.plugin.base.util.Lazy;
 import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.predicate.Domain;
 import io.trino.sql.planner.PlanFragment;
@@ -171,7 +172,7 @@ public class SqlTask
                 maxBroadcastBufferSize,
                 // Pass a memory context supplier instead of a memory context to the output buffer,
                 // because we haven't created the task context that holds the memory context yet.
-                () -> queryContext.getTaskContextByTaskId(taskId).localMemoryContext(),
+                Lazy.from(() -> queryContext.getTaskContextByTaskId(taskId).aggregateUserMemoryContext().newLocalMemoryContext(LazyOutputBuffer.class.getSimpleName())),
                 this::notifyStatusChanged,
                 exchangeManagerRegistry);
         taskStateMachine = new TaskStateMachine(taskId, taskNotificationExecutor);
@@ -210,7 +211,7 @@ public class SqlTask
                         if (!taskHolder.isFinished()) {
                             TaskHolder newHolder = new TaskHolder(
                                     createTaskInfo(taskHolder),
-                                    taskHolder.getIoStats(),
+                                    taskHolder.getIoTotals(),
                                     taskHolder.getDynamicFilterDomains());
                             checkState(taskHolderReference.compareAndSet(taskHolder, newHolder), "unsynchronized concurrent task holder update");
                             finished = true;
@@ -249,9 +250,9 @@ public class SqlTask
         });
     }
 
-    public SqlTaskIoStats getIoStats()
+    public SqlTaskIoTotals getIoTotals()
     {
-        return taskHolderReference.get().getIoStats();
+        return taskHolderReference.get().getIoTotals();
     }
 
     public TaskState getTaskState()
@@ -398,7 +399,7 @@ public class SqlTask
             userMemoryReservation = taskContext.getMemoryReservation();
             peakUserMemoryReservation = taskContext.getPeakMemoryReservation();
             revocableMemoryReservation = taskContext.getRevocableMemoryReservation();
-            outputDataSize = DataSize.ofBytes(taskContext.getOutputDataSize().getTotalCount());
+            outputDataSize = DataSize.ofBytes(taskContext.getOutputDataSize());
             fullGcCount = taskContext.getFullGcCount();
             fullGcTime = taskContext.getFullGcTime();
             dynamicFiltersVersion = taskContext.getDynamicFiltersVersion();
@@ -663,14 +664,14 @@ public class SqlTask
     {
         private final SqlTaskExecution taskExecution;
         private final TaskInfo finalTaskInfo;
-        private final SqlTaskIoStats finalIoStats;
+        private final SqlTaskIoTotals finalIoTotals;
         private final VersionedDynamicFilterDomains finalDynamicFilterDomains;
 
         private TaskHolder()
         {
             this.taskExecution = null;
             this.finalTaskInfo = null;
-            this.finalIoStats = null;
+            this.finalIoTotals = null;
             this.finalDynamicFilterDomains = null;
         }
 
@@ -678,15 +679,15 @@ public class SqlTask
         {
             this.taskExecution = requireNonNull(taskExecution, "taskExecution is null");
             this.finalTaskInfo = null;
-            this.finalIoStats = null;
+            this.finalIoTotals = null;
             this.finalDynamicFilterDomains = null;
         }
 
-        private TaskHolder(TaskInfo finalTaskInfo, SqlTaskIoStats finalIoStats, VersionedDynamicFilterDomains finalDynamicFilterDomains)
+        private TaskHolder(TaskInfo finalTaskInfo, SqlTaskIoTotals finalIoTotals, VersionedDynamicFilterDomains finalDynamicFilterDomains)
         {
             this.taskExecution = null;
             this.finalTaskInfo = requireNonNull(finalTaskInfo, "finalTaskInfo is null");
-            this.finalIoStats = requireNonNull(finalIoStats, "finalIoStats is null");
+            this.finalIoTotals = requireNonNull(finalIoTotals, "finalIoTotals is null");
             this.finalDynamicFilterDomains = requireNonNull(finalDynamicFilterDomains, "finalDynamicFilterDomains is null");
         }
 
@@ -707,19 +708,19 @@ public class SqlTask
             return finalTaskInfo;
         }
 
-        public SqlTaskIoStats getIoStats()
+        public SqlTaskIoTotals getIoTotals()
         {
-            // if we are finished, return the final IoStats
-            if (finalIoStats != null) {
-                return finalIoStats;
+            // if we are finished, return the final IoTotals
+            if (finalIoTotals != null) {
+                return finalIoTotals;
             }
-            // if we haven't started yet, return an empty IoStats
+            // if we haven't started yet, return an empty IoTotals
             if (taskExecution == null) {
-                return new SqlTaskIoStats();
+                return SqlTaskIoTotals.EMPTY;
             }
-            // get IoStats from the current task execution
+            // get IoTotals from the current task execution
             TaskContext taskContext = taskExecution.getTaskContext();
-            return new SqlTaskIoStats(taskContext.getProcessedInputDataSize(), taskContext.getInputPositions(), taskContext.getOutputDataSize(), taskContext.getOutputPositions());
+            return new SqlTaskIoTotals(taskContext.getProcessedInputDataSize(), taskContext.getInputPositions(), taskContext.getOutputDataSize(), taskContext.getOutputPositions());
         }
 
         public VersionedDynamicFilterDomains acknowledgeAndGetNewDynamicFilterDomains(long callersSummaryVersion)

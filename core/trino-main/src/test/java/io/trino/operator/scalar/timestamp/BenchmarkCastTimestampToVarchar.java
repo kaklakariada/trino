@@ -18,7 +18,6 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.execution.buffer.BenchmarkDataGenerator;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.metadata.TestingFunctionResolution;
-import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.operator.scalar.timestamptz.TimestampWithTimeZoneToTimestampWithTimeZoneCast;
 import io.trino.operator.scalar.timetz.TimeWithTimeZoneToTimeWithTimeZoneCast;
@@ -53,6 +52,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 
+import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_DAY;
@@ -76,7 +76,7 @@ public class BenchmarkCastTimestampToVarchar
     @Benchmark
     public List<Optional<Page>> benchmarkCastToVarchar(BenchmarkData data)
     {
-        return ImmutableList.copyOf(data.pageProcessor.process(SESSION, data.yieldSignal, data.localMemoryContext, SourcePage.create(data.page)));
+        return ImmutableList.copyOf(data.pageProcessor.process(SESSION, data.localMemoryContext, SourcePage.create(data.page)));
     }
 
     @State(Scope.Thread)
@@ -88,7 +88,6 @@ public class BenchmarkCastTimestampToVarchar
         private int precision;
         private Random random;
 
-        private DriverYieldSignal yieldSignal;
         private LocalMemoryContext localMemoryContext;
         private PageProcessor pageProcessor;
         private Page page;
@@ -97,7 +96,6 @@ public class BenchmarkCastTimestampToVarchar
         public void setup()
         {
             random = new Random(0);
-            yieldSignal = new DriverYieldSignal();
             localMemoryContext = newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName());
 
             Type sourceType;
@@ -130,7 +128,7 @@ public class BenchmarkCastTimestampToVarchar
                     functionResolution.getCoercion(sourceType, VarcharType.createUnboundedVarcharType()),
                     new Reference(sourceType, "$col_0")));
             pageProcessor = functionResolution.getExpressionCompiler()
-                    .compilePageProcessor(Optional.empty(), timestampProjections, ImmutableMap.of(new Symbol(sourceType, "$col_0"), 0))
+                    .compilePageProcessor(TEST_SESSION, Optional.empty(), timestampProjections, ImmutableMap.of(new Symbol(sourceType, "$col_0"), 0))
                     .get();
         }
 

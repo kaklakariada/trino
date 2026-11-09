@@ -58,6 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -68,8 +69,8 @@ import java.util.concurrent.TimeoutException;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Maps.uniqueIndex;
-import static com.google.common.collect.Sets.newConcurrentHashSet;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
 import static io.airlift.concurrent.MoreFutures.tryGetFutureValue;
@@ -95,6 +96,8 @@ import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 @Execution(CONCURRENT)
 public class TestDirectExchangeClient
 {
+    private static final DataSize MAX_RESPONSE_CONTENT_LENGTH = DataSize.of(32, Unit.MEGABYTE);
+
     private ScheduledExecutorService scheduler;
     private ExecutorService pageBufferClientCallbackExecutor;
     private PagesSerdeFactory serdeFactory;
@@ -142,6 +145,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 buffer,
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -176,12 +180,12 @@ public class TestDirectExchangeClient
         assertThat(status.getBufferedPages()).isEqualTo(0);
 
         // client should have sent only 3 requests: one to get all pages, one to acknowledge and one to get the done signal
-        assertStatus(status.getPageBufferClientStatuses().get(0), location, "closed", 3, 3, 3, "not scheduled");
+        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 3, 3, 3, "not scheduled");
         assertThat(status.getRequestDuration().getDigest().getCount()).isEqualTo(2.0);
 
         exchangeClient.close();
 
-        assertEventually(() -> assertThat(exchangeClient.getStatus().getPageBufferClientStatuses().get(0).getHttpRequestState())
+        assertEventually(() -> assertThat(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()).getHttpRequestState())
                 .describedAs("httpRequestState")
                 .isEqualTo("not scheduled"));
 
@@ -208,6 +212,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, Unit.MEGABYTE)),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -233,7 +238,7 @@ public class TestDirectExchangeClient
         assertThat(status.getBufferedPages()).isEqualTo(0);
 
         // client should have sent only 3 requests: one to get all pages, one to acknowledge and one to get the done signal
-        assertStatus(status.getPageBufferClientStatuses().get(0), location, "closed", 3, 3, 3, "not scheduled");
+        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 3, 3, 3, "not scheduled");
 
         exchangeClient.close();
     }
@@ -264,6 +269,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 buffer,
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -339,6 +345,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, Unit.MEGABYTE)),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -442,6 +449,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 buffer,
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, SECONDS),
                 true,
@@ -503,6 +511,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 buffer,
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, SECONDS),
                 true,
@@ -560,6 +569,7 @@ public class TestDirectExchangeClient
                         Span.getInvalid(),
                         createRandomExchangeId()),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, SECONDS),
                 true,
@@ -637,7 +647,7 @@ public class TestDirectExchangeClient
 
         TestingDirectExchangeBuffer buffer = new TestingDirectExchangeBuffer(DataSize.of(1, Unit.MEGABYTE));
 
-        Set<TaskId> failedTasks = newConcurrentHashSet();
+        Set<TaskId> failedTasks = ConcurrentHashMap.newKeySet();
         CountDownLatch latch = new CountDownLatch(2);
 
         @SuppressWarnings("resource")
@@ -646,6 +656,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 buffer,
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, SECONDS),
                 true,
@@ -766,6 +777,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.ofBytes(1)),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -792,7 +804,7 @@ public class TestDirectExchangeClient
         // client should have sent a single request for a single page
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(1);
         assertThat(exchangeClient.getStatus().getBufferedBytes() > 0).isTrue();
-        assertStatus(exchangeClient.getStatus().getPageBufferClientStatuses().get(0), location, "queued", 1, 1, 1, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "queued", 1, 1, 1, "not scheduled");
 
         // remove the page and wait for the client to fetch another page
         assertPageEquals(exchangeClient.pollPage(), createPage(1));
@@ -803,7 +815,7 @@ public class TestDirectExchangeClient
         while (exchangeClient.getStatus().getBufferedPages() == 0);
 
         // client should have sent a single request for a single page
-        assertStatus(exchangeClient.getStatus().getPageBufferClientStatuses().get(0), location, "queued", 2, 2, 2, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "queued", 2, 2, 2, "not scheduled");
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(1);
         assertThat(exchangeClient.getStatus().getBufferedBytes() > 0).isTrue();
 
@@ -816,7 +828,7 @@ public class TestDirectExchangeClient
         while (exchangeClient.getStatus().getBufferedPages() == 0);
 
         // client should have sent a single request for a single page
-        assertStatus(exchangeClient.getStatus().getPageBufferClientStatuses().get(0), location, "queued", 3, 3, 3, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "queued", 3, 3, 3, "not scheduled");
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(1);
         assertThat(exchangeClient.getStatus().getBufferedBytes() > 0).isTrue();
 
@@ -828,7 +840,7 @@ public class TestDirectExchangeClient
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(0);
         assertThat(exchangeClient.isFinished()).isTrue();
         exchangeClient.close();
-        assertStatus(exchangeClient.getStatus().getPageBufferClientStatuses().get(0), location, "closed", 3, 5, 5, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "closed", 3, 5, 5, "not scheduled");
     }
 
     @Test
@@ -862,7 +874,7 @@ public class TestDirectExchangeClient
         assertThat(status.getBufferedPages()).isEqualTo(0);
         assertThat(status.getBufferedBytes()).isEqualTo(0);
 
-        assertStatus(status.getPageBufferClientStatuses().get(0), location, "closed", 2, 4, 4, "not scheduled");
+        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 2, 4, 4, "not scheduled");
     }
 
     private DirectExchangeClient setUpDataCorruption(DataIntegrityVerification dataIntegrityVerification, URI location)
@@ -914,6 +926,7 @@ public class TestDirectExchangeClient
                 dataIntegrityVerification,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, Unit.MEGABYTE)),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -947,6 +960,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.ofBytes(1)),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -971,7 +985,7 @@ public class TestDirectExchangeClient
         assertThat(exchangeClient.pollPage()).isNull();
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(0);
 
-        PageBufferClientStatus clientStatus = exchangeClient.getStatus().getPageBufferClientStatuses().get(0);
+        PageBufferClientStatus clientStatus = getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses());
         assertThat(clientStatus.getUri()).isEqualTo(location);
         assertThat(clientStatus.getState())
                 .describedAs("status")
@@ -1001,6 +1015,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, Unit.MEGABYTE)),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -1036,6 +1051,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, Unit.MEGABYTE)),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -1073,6 +1089,7 @@ public class TestDirectExchangeClient
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, Unit.MEGABYTE)),
                 maxResponseSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 1,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -1098,6 +1115,7 @@ public class TestDirectExchangeClient
                 new TestingHttpClient(processor, scheduler),
                 DataIntegrityVerification.ABORT,
                 expectedMaxSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
                 TASK_ID,

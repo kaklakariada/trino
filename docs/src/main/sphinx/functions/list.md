@@ -143,6 +143,7 @@
 - {func}`e`
 - {func}`element_at`
 - {func}`empty_approx_set`
+- {func}`ends_with`
 - `evaluate_classifier_predictions`
 - {func}`every`
 - {func}`exclude_columns`
@@ -181,6 +182,7 @@
 ## G
 
 - {func}`geometric_mean`
+- {func}`geometry_collect_agg`
 - {func}`geometry_from_hadoop_shape`
 - {func}`geometry_invalid_reason`
 - {func}`geometry_nearest_points`
@@ -222,6 +224,7 @@
 ## J
 
 - {func}`jaccard_index`
+- [json()](json-value-constructor)
 - [json_array()](json-array)
 - {func}`json_array_contains`
 - {func}`json_array_get`
@@ -233,6 +236,8 @@
 - [json_object()](json-object)
 - {func}`json_parse`
 - [json_query()](json-query)
+- {func}`json_scalar`
+- [json_serialize()](json-serialize)
 - {func}`json_size`
 - [json_value()](json-value)
 
@@ -363,6 +368,7 @@
 - {func}`reverse`
 - {func}`rgb`
 - {func}`round`
+- {func}`ROW::fields`
 - {func}`row_number`
 - {func}`rpad`
 - {func}`rtrim`
@@ -384,8 +390,8 @@
 - {func}`slice`
 - [SOME](quantified-comparison-predicates)
 - {func}`soundex`
-- `spatial_partitioning`
-- `spatial_partitions`
+- {func}`spatial_partitioning`
+- {func}`spatial_partitions`
 - {func}`split`
 - {func}`split_part`
 - {func}`split_to_map`
@@ -395,10 +401,13 @@
 - {func}`sqrt`
 - {func}`ST_Area`
 - {func}`ST_AsBinary`
+- {func}`ST_AsEWKB`
+- {func}`ST_AsEWKT`
 - {func}`ST_AsText`
 - {func}`ST_Boundary`
 - {func}`ST_Buffer`
 - {func}`ST_Centroid`
+- {func}`ST_Collect`
 - {func}`ST_Contains`
 - {func}`ST_ConvexHull`
 - {func}`ST_CoordDim`
@@ -412,11 +421,15 @@
 - {func}`ST_EnvelopeAsPts`
 - {func}`ST_Equals`
 - {func}`ST_ExteriorRing`
+- {func}`ST_Force2D`
+- {func}`ST_Force3D`
 - {func}`ST_Geometries`
 - {func}`ST_GeometryFromText`
 - {func}`ST_GeometryN`
 - {func}`ST_GeometryType`
 - {func}`ST_GeomFromBinary`
+- {func}`ST_GeomFromEWKT`
+- {func}`ST_GeomFromKML`
 - {func}`ST_InteriorRingN`
 - {func}`ST_InteriorRings`
 - {func}`ST_Intersection`
@@ -428,21 +441,35 @@
 - {func}`ST_IsValid`
 - {func}`ST_Length`
 - {func}`ST_LineFromText`
+- {func}`ST_LineMerge`
 - {func}`ST_LineString`
+- {func}`ST_MakeLine`
+- {func}`ST_MakePolygon`
+- {func}`ST_MinimumBoundingCircle`
+- {func}`ST_Multi`
 - {func}`ST_MultiPoint`
+- {func}`ST_Normalize`
 - {func}`ST_NumGeometries`
-- `ST_NumInteriorRing`
+- {func}`ST_NumInteriorRing`
 - {func}`ST_NumPoints`
+- {func}`ST_OrientedEnvelope`
 - {func}`ST_Overlaps`
 - {func}`ST_Point`
 - {func}`ST_PointN`
+- {func}`ST_PointOnSurface`
 - {func}`ST_Points`
 - {func}`ST_Polygon`
+- {func}`ST_Polygonize`
 - {func}`ST_Relate`
+- {func}`ST_ReducePrecision`
+- {func}`ST_SetSRID`
+- {func}`ST_SRID`
 - {func}`ST_StartPoint`
 - {func}`ST_SymDifference`
 - {func}`ST_Touches`
+- {func}`ST_Transform`
 - {func}`ST_Union`
+- {func}`ST_VoronoiPolygons`
 - {func}`ST_Within`
 - {func}`ST_X`
 - {func}`ST_XMax`
@@ -450,6 +477,7 @@
 - {func}`ST_Y`
 - {func}`ST_YMax`
 - {func}`ST_YMin`
+- {func}`ST_Z`
 - {func}`starts_with`
 - {func}`stddev`
 - {func}`stddev_pop`
@@ -470,6 +498,7 @@
 - {func}`timezone`
 - {func}`timezone_hour`
 - {func}`timezone_minute`
+- {func}`title_case`
 - {func}`to_base`
 - {func}`to_base32`
 - {func}`to_base64`

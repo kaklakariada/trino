@@ -15,7 +15,10 @@ package io.trino.type;
 
 import com.google.common.primitives.SignedBytes;
 import io.airlift.slice.Slice;
+import io.trino.operator.scalar.preimage.IntegralCastPreimage;
+import io.trino.operator.scalar.preimage.OrderPreservingCastPreimage;
 import io.trino.spi.TrinoException;
+import io.trino.spi.function.FunctionPreimage;
 import io.trino.spi.function.LiteralParameter;
 import io.trino.spi.function.LiteralParameters;
 import io.trino.spi.function.ScalarOperator;
@@ -25,7 +28,8 @@ import io.trino.spi.type.TrinoNumber;
 
 import java.math.BigDecimal;
 
-import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.base.util.NumberFormatter.decimalLength;
+import static io.trino.plugin.base.util.NumberFormatter.formatLong;
 import static io.trino.spi.StandardErrorCode.DIVISION_BY_ZERO;
 import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
@@ -46,6 +50,7 @@ public final class SmallintOperators
 {
     private SmallintOperators() {}
 
+    // fallible
     @ScalarOperator(ADD)
     @SqlType(StandardTypes.SMALLINT)
     public static long add(@SqlType(StandardTypes.SMALLINT) long left, @SqlType(StandardTypes.SMALLINT) long right)
@@ -57,6 +62,7 @@ public final class SmallintOperators
         return (short) result;
     }
 
+    // fallible
     @ScalarOperator(SUBTRACT)
     @SqlType(StandardTypes.SMALLINT)
     public static long subtract(@SqlType(StandardTypes.SMALLINT) long left, @SqlType(StandardTypes.SMALLINT) long right)
@@ -68,6 +74,7 @@ public final class SmallintOperators
         return (short) result;
     }
 
+    // fallible
     @ScalarOperator(MULTIPLY)
     @SqlType(StandardTypes.SMALLINT)
     public static long multiply(@SqlType(StandardTypes.SMALLINT) long left, @SqlType(StandardTypes.SMALLINT) long right)
@@ -79,6 +86,7 @@ public final class SmallintOperators
         return (short) result;
     }
 
+    // fallible
     @ScalarOperator(DIVIDE)
     @SqlType(StandardTypes.SMALLINT)
     public static long divide(@SqlType(StandardTypes.SMALLINT) long left, @SqlType(StandardTypes.SMALLINT) long right)
@@ -95,6 +103,7 @@ public final class SmallintOperators
         }
     }
 
+    // fallible
     @ScalarOperator(MODULO)
     @SqlType(StandardTypes.SMALLINT)
     public static long modulo(@SqlType(StandardTypes.SMALLINT) long left, @SqlType(StandardTypes.SMALLINT) long right)
@@ -107,6 +116,7 @@ public final class SmallintOperators
         }
     }
 
+    // fallible
     @ScalarOperator(NEGATION)
     @SqlType(StandardTypes.SMALLINT)
     public static long negate(@SqlType(StandardTypes.SMALLINT) long value)
@@ -118,20 +128,24 @@ public final class SmallintOperators
         return (short) result;
     }
 
-    @ScalarOperator(CAST)
+    @ScalarOperator(value = CAST, neverFails = true)
     @SqlType(StandardTypes.BIGINT)
+    @FunctionPreimage(IntegralCastPreimage.class)
     public static long castToBigint(@SqlType(StandardTypes.SMALLINT) long value)
     {
         return value;
     }
 
-    @ScalarOperator(CAST)
+    @ScalarOperator(value = CAST, neverFails = true)
     @SqlType(StandardTypes.INTEGER)
+    @FunctionPreimage(IntegralCastPreimage.class)
     public static long castToInteger(@SqlType(StandardTypes.SMALLINT) long value)
     {
         return value;
     }
 
+    // fallible
+    @FunctionPreimage(OrderPreservingCastPreimage.class)
     @ScalarOperator(CAST)
     @SqlType(StandardTypes.TINYINT)
     public static long castToTinyint(@SqlType(StandardTypes.SMALLINT) long value)
@@ -142,44 +156,48 @@ public final class SmallintOperators
         return (byte) value;
     }
 
-    @ScalarOperator(CAST)
+    @FunctionPreimage(OrderPreservingCastPreimage.class)
+    @ScalarOperator(value = CAST, neverFails = true)
     @SqlType(StandardTypes.BOOLEAN)
     public static boolean castToBoolean(@SqlType(StandardTypes.SMALLINT) long value)
     {
         return value != 0;
     }
 
-    @ScalarOperator(CAST)
+    @FunctionPreimage(OrderPreservingCastPreimage.class)
+    @ScalarOperator(value = CAST, neverFails = true)
     @SqlType(StandardTypes.DOUBLE)
     public static double castToDouble(@SqlType(StandardTypes.SMALLINT) long value)
     {
         return value;
     }
 
-    @ScalarOperator(CAST)
+    @FunctionPreimage(OrderPreservingCastPreimage.class)
+    @ScalarOperator(value = CAST, neverFails = true)
     @SqlType(StandardTypes.REAL)
     public static long castToReal(@SqlType(StandardTypes.SMALLINT) long value)
     {
         return floatToRawIntBits((float) value);
     }
 
-    @ScalarOperator(CAST)
+    @FunctionPreimage(OrderPreservingCastPreimage.class)
+    @ScalarOperator(value = CAST, neverFails = true)
     @SqlType(StandardTypes.NUMBER)
     public static TrinoNumber castToNumber(@SqlType(StandardTypes.SMALLINT) long value)
     {
         return TrinoNumber.from(new BigDecimal(value));
     }
 
+    // fallible
+    @FunctionPreimage(OrderPreservingCastPreimage.class)
     @ScalarOperator(CAST)
     @LiteralParameters("x")
     @SqlType("varchar(x)")
     public static Slice castToVarchar(@LiteralParameter("x") long x, @SqlType(StandardTypes.SMALLINT) long value)
     {
-        // todo optimize me
-        String stringValue = String.valueOf(value);
-        // String is all-ASCII, so String.length() here returns actual code points count
-        if (stringValue.length() <= x) {
-            return utf8Slice(stringValue);
+        // the rendering is all ASCII, so its length in bytes is also its length in code points
+        if (decimalLength(value) <= x) {
+            return formatLong(value);
         }
 
         throw new TrinoException(INVALID_CAST_ARGUMENT, format("Value %s cannot be represented as varchar(%s)", value, x));

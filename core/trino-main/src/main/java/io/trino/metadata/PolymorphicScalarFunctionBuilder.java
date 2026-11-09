@@ -16,6 +16,8 @@ package io.trino.metadata;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Booleans;
 import io.trino.metadata.PolymorphicScalarFunction.PolymorphicScalarFunctionChoice;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.DomainProjection;
 import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.InvocationConvention.InvocationArgumentConvention;
 import io.trino.spi.function.InvocationConvention.InvocationReturnConvention;
@@ -30,6 +32,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -54,7 +57,8 @@ public final class PolymorphicScalarFunctionBuilder
     private String description;
     private boolean hidden;
     private Boolean deterministic;
-    private boolean neverFails;
+    private Optional<DomainProjection> domainProjection = Optional.empty();
+    private Predicate<BoundSignature> neverFails = _ -> false;
 
     private final List<PolymorphicScalarFunctionChoice> choices = new ArrayList<>();
 
@@ -112,7 +116,12 @@ public final class PolymorphicScalarFunctionBuilder
 
     public PolymorphicScalarFunctionBuilder neverFails(boolean neverFails)
     {
-        this.neverFails = neverFails;
+        return neverFails(neverFails ? _ -> true : _ -> false);
+    }
+
+    public PolymorphicScalarFunctionBuilder neverFails(Predicate<BoundSignature> neverFails)
+    {
+        this.neverFails = requireNonNull(neverFails, "neverFails is null");
         return this;
     }
 
@@ -128,6 +137,12 @@ public final class PolymorphicScalarFunctionBuilder
         return this;
     }
 
+    public PolymorphicScalarFunctionBuilder domainProjection(DomainProjection projection)
+    {
+        this.domainProjection = Optional.of(requireNonNull(projection, "projection is null"));
+        return this;
+    }
+
     public SqlScalarFunction build()
     {
         checkState(signature != null, "signature is null");
@@ -135,14 +150,8 @@ public final class PolymorphicScalarFunctionBuilder
         checkState(argumentNullability != null, "argumentNullability is null");
 
         FunctionMetadata.Builder functionMetadata = FunctionMetadata.scalarBuilder(name)
-                .signature(signature);
-
-        if (description != null) {
-            functionMetadata.description(description);
-        }
-        else {
-            functionMetadata.noDescription();
-        }
+                .signature(signature)
+                .description(Optional.ofNullable(description).orElse(""));
 
         if (hidden) {
             functionMetadata.hidden();
@@ -150,9 +159,8 @@ public final class PolymorphicScalarFunctionBuilder
         if (!deterministic) {
             functionMetadata.nondeterministic();
         }
-        if (neverFails) {
-            functionMetadata.neverFails();
-        }
+        functionMetadata.neverFails(neverFails);
+        domainProjection.ifPresent(functionMetadata::domainProjection);
         if (nullableResult) {
             functionMetadata.nullable();
         }
@@ -196,7 +204,7 @@ public final class PolymorphicScalarFunctionBuilder
 
         public Long getLiteral(String name)
         {
-            return functionBinding.variables().getLongVariable(name);
+            return functionBinding.variables().getNumericVariable(name);
         }
 
         public List<Type> getParameterTypes()

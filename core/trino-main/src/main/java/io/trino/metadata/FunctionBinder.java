@@ -15,18 +15,21 @@ package io.trino.metadata;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Ordering;
 import io.trino.connector.CatalogHandle;
+import io.trino.metadata.SignatureBinder.GroundSignature;
 import io.trino.spi.TrinoException;
 import io.trino.spi.function.BoundSignature;
 import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.FunctionNullability;
 import io.trino.spi.function.Signature;
+import io.trino.spi.function.TypeVariableConstraint;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeSignature;
-import io.trino.sql.analyzer.TypeSignatureProvider;
+import io.trino.spi.type.TypeSyntax;
+import io.trino.sql.analyzer.TypeDescriptorProvider;
+import io.trino.type.CharVarcharCoercion;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -45,10 +48,11 @@ import static io.trino.spi.StandardErrorCode.AMBIGUOUS_FUNCTION_CALL;
 import static io.trino.spi.StandardErrorCode.FUNCTION_IMPLEMENTATION_MISSING;
 import static io.trino.spi.StandardErrorCode.FUNCTION_NOT_FOUND;
 import static io.trino.spi.function.FunctionKind.SCALAR;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypeSignatures;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypeDescriptors;
 import static io.trino.type.UnknownType.UNKNOWN;
 import static java.lang.String.format;
 import static java.util.Collections.nCopies;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -65,12 +69,12 @@ class FunctionBinder
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
-    CatalogFunctionBinding bindFunction(List<TypeSignatureProvider> parameterTypes, Collection<CatalogFunctionMetadata> candidates, String displayName)
+    CatalogFunctionBinding bindFunction(CharVarcharCoercion charVarcharCoercion, List<TypeDescriptorProvider> parameterTypes, Collection<CatalogFunctionMetadata> candidates, String displayName)
     {
-        return tryBindFunction(parameterTypes, candidates).orElseThrow(() -> functionNotFound(displayName, parameterTypes, candidates));
+        return tryBindFunction(charVarcharCoercion, parameterTypes, candidates).orElseThrow(() -> functionNotFound(displayName, parameterTypes, candidates));
     }
 
-    Optional<CatalogFunctionBinding> tryBindFunction(List<TypeSignatureProvider> parameterTypes, Collection<CatalogFunctionMetadata> candidates)
+    Optional<CatalogFunctionBinding> tryBindFunction(CharVarcharCoercion charVarcharCoercion, List<TypeDescriptorProvider> parameterTypes, Collection<CatalogFunctionMetadata> candidates)
     {
         if (candidates.isEmpty()) {
             return Optional.empty();
@@ -80,7 +84,7 @@ class FunctionBinder
                 .filter(function -> !function.functionMetadata().getSignature().isGeneric())
                 .collect(toImmutableList());
 
-        Optional<CatalogFunctionBinding> match = matchFunctionExact(exactCandidates, parameterTypes);
+        Optional<CatalogFunctionBinding> match = matchFunctionExact(charVarcharCoercion, exactCandidates, parameterTypes);
         if (match.isPresent()) {
             return match;
         }
@@ -89,22 +93,22 @@ class FunctionBinder
                 .filter(function -> function.functionMetadata().getSignature().isGeneric())
                 .collect(toImmutableList());
 
-        match = matchFunctionExact(genericCandidates, parameterTypes);
+        match = matchFunctionExact(charVarcharCoercion, genericCandidates, parameterTypes);
         if (match.isPresent()) {
             return match;
         }
 
-        return matchFunctionWithCoercion(candidates, parameterTypes);
+        return matchFunctionWithCoercion(charVarcharCoercion, candidates, parameterTypes);
     }
 
-    CatalogFunctionBinding bindCoercion(Signature signature, Collection<CatalogFunctionMetadata> candidates)
+    CatalogFunctionBinding bindCoercion(CharVarcharCoercion charVarcharCoercion, GroundSignature signature, Collection<CatalogFunctionMetadata> candidates)
     {
         // coercions are much more common and much simpler than function calls, so we use a custom algorithm
         List<CatalogFunctionMetadata> exactCandidates = candidates.stream()
                 .filter(function -> possibleExactCastMatch(signature, function.functionMetadata().getSignature()))
                 .collect(toImmutableList());
         for (CatalogFunctionMetadata candidate : exactCandidates) {
-            if (canBindSignature(candidate.functionMetadata().getSignature(), signature)) {
+            if (canBindSignature(charVarcharCoercion, candidate.functionMetadata().getSignature(), signature)) {
                 return toFunctionBinding(candidate, signature);
             }
         }
@@ -114,7 +118,7 @@ class FunctionBinder
                 .filter(function -> function.functionMetadata().getSignature().isGeneric())
                 .collect(toImmutableList());
         for (CatalogFunctionMetadata candidate : genericCandidates) {
-            if (canBindSignature(candidate.functionMetadata().getSignature(), signature)) {
+            if (canBindSignature(charVarcharCoercion, candidate.functionMetadata().getSignature(), signature)) {
                 return toFunctionBinding(candidate, signature);
             }
         }
@@ -122,42 +126,42 @@ class FunctionBinder
         throw new TrinoException(FUNCTION_IMPLEMENTATION_MISSING, format("%s not found", signature));
     }
 
-    private boolean canBindSignature(Signature declaredSignature, Signature actualSignature)
+    private boolean canBindSignature(CharVarcharCoercion charVarcharCoercion, Signature declaredSignature, GroundSignature actualSignature)
     {
-        return new SignatureBinder(metadata, typeManager, declaredSignature, false)
-                .canBind(fromTypeSignatures(actualSignature.getArgumentTypes()), actualSignature.getReturnType());
+        return new SignatureBinder(metadata, typeManager, declaredSignature, false, charVarcharCoercion)
+                .canBind(fromTypeDescriptors(actualSignature.argumentTypes()), actualSignature.returnType());
     }
 
-    private static boolean possibleExactCastMatch(Signature signature, Signature declaredSignature)
+    private static boolean possibleExactCastMatch(GroundSignature signature, Signature declaredSignature)
     {
         if (declaredSignature.isGeneric()) {
             return false;
         }
-        if (!declaredSignature.getReturnType().getBase().equalsIgnoreCase(signature.getReturnType().getBase())) {
+        if (!declaredSignature.getReturnType().baseName().equalsIgnoreCase(signature.returnType().getBase())) {
             return false;
         }
-        return declaredSignature.getArgumentTypes().get(0).getBase().equalsIgnoreCase(signature.getArgumentTypes().get(0).getBase());
+        return declaredSignature.getArgumentTypes().getFirst().baseName().equalsIgnoreCase(signature.argumentTypes().getFirst().getBase());
     }
 
-    private Optional<CatalogFunctionBinding> matchFunctionExact(List<CatalogFunctionMetadata> candidates, List<TypeSignatureProvider> actualParameters)
+    private Optional<CatalogFunctionBinding> matchFunctionExact(CharVarcharCoercion charVarcharCoercion, List<CatalogFunctionMetadata> candidates, List<TypeDescriptorProvider> actualParameters)
     {
-        return matchFunction(candidates, actualParameters, false);
+        return matchFunction(charVarcharCoercion, candidates, actualParameters, false);
     }
 
-    private Optional<CatalogFunctionBinding> matchFunctionWithCoercion(Collection<CatalogFunctionMetadata> candidates, List<TypeSignatureProvider> actualParameters)
+    private Optional<CatalogFunctionBinding> matchFunctionWithCoercion(CharVarcharCoercion charVarcharCoercion, Collection<CatalogFunctionMetadata> candidates, List<TypeDescriptorProvider> actualParameters)
     {
-        return matchFunction(candidates, actualParameters, true);
+        return matchFunction(charVarcharCoercion, candidates, actualParameters, true);
     }
 
-    private Optional<CatalogFunctionBinding> matchFunction(Collection<CatalogFunctionMetadata> candidates, List<TypeSignatureProvider> parameters, boolean coercionAllowed)
+    private Optional<CatalogFunctionBinding> matchFunction(CharVarcharCoercion charVarcharCoercion, Collection<CatalogFunctionMetadata> candidates, List<TypeDescriptorProvider> parameters, boolean coercionAllowed)
     {
-        List<ApplicableFunction> applicableFunctions = identifyApplicableFunctions(candidates, parameters, coercionAllowed);
+        List<ApplicableFunction> applicableFunctions = identifyApplicableFunctions(charVarcharCoercion, candidates, parameters, coercionAllowed);
         if (applicableFunctions.isEmpty()) {
             return Optional.empty();
         }
 
         if (coercionAllowed) {
-            applicableFunctions = selectMostSpecificFunctions(applicableFunctions, parameters);
+            applicableFunctions = selectMostSpecificFunctions(charVarcharCoercion, applicableFunctions, parameters);
             checkState(!applicableFunctions.isEmpty(), "at least single function must be left");
         }
 
@@ -169,33 +173,39 @@ class FunctionBinder
         StringBuilder errorMessageBuilder = new StringBuilder();
         errorMessageBuilder.append("Could not choose a best candidate operator. Explicit type casts must be added.\n");
         errorMessageBuilder.append("Actual types: (");
-        Joiner.on(", ").appendTo(errorMessageBuilder, parameters);
+        Joiner.on(", ").appendTo(errorMessageBuilder, parameters.stream()
+                .map(parameter -> parameter.hasDependency() ? "<function>" : TypeSyntax.toSql(parameter.getTypeDescriptor()))
+                .toList());
         errorMessageBuilder.append(")\n");
         errorMessageBuilder.append("Candidates are:\n");
         for (ApplicableFunction function : applicableFunctions) {
             errorMessageBuilder.append("\t * ");
-            errorMessageBuilder.append(function.boundSignature());
+            GroundSignature signature = function.boundSignature();
+            errorMessageBuilder.append(signature.argumentTypes().stream()
+                    .map(TypeSyntax::toSql)
+                    .collect(Collectors.joining(",", "(", "):")));
+            errorMessageBuilder.append(TypeSyntax.toSql(signature.returnType()));
             errorMessageBuilder.append("\n");
         }
         throw new TrinoException(AMBIGUOUS_FUNCTION_CALL, errorMessageBuilder.toString());
     }
 
-    private List<ApplicableFunction> identifyApplicableFunctions(Collection<CatalogFunctionMetadata> candidates, List<TypeSignatureProvider> actualParameters, boolean allowCoercion)
+    private List<ApplicableFunction> identifyApplicableFunctions(CharVarcharCoercion charVarcharCoercion, Collection<CatalogFunctionMetadata> candidates, List<TypeDescriptorProvider> actualParameters, boolean allowCoercion)
     {
         ImmutableList.Builder<ApplicableFunction> applicableFunctions = ImmutableList.builder();
         for (CatalogFunctionMetadata function : candidates) {
-            new SignatureBinder(metadata, typeManager, function.functionMetadata().getSignature(), allowCoercion)
+            new SignatureBinder(metadata, typeManager, function.functionMetadata().getSignature(), allowCoercion, charVarcharCoercion)
                     .bind(actualParameters)
                     .ifPresent(signature -> applicableFunctions.add(new ApplicableFunction(function, signature)));
         }
         return applicableFunctions.build();
     }
 
-    private List<ApplicableFunction> selectMostSpecificFunctions(List<ApplicableFunction> applicableFunctions, List<TypeSignatureProvider> parameters)
+    private List<ApplicableFunction> selectMostSpecificFunctions(CharVarcharCoercion charVarcharCoercion, List<ApplicableFunction> applicableFunctions, List<TypeDescriptorProvider> parameters)
     {
         checkArgument(!applicableFunctions.isEmpty());
 
-        List<ApplicableFunction> mostSpecificFunctions = selectMostSpecificFunctions(applicableFunctions);
+        List<ApplicableFunction> mostSpecificFunctions = selectMostSpecificFunctions(charVarcharCoercion, applicableFunctions);
         if (mostSpecificFunctions.size() <= 1) {
             return mostSpecificFunctions;
         }
@@ -225,17 +235,16 @@ class FunctionBinder
         // all the functions are semantically the same. We can return just any of those.
         if (returnTypeIsTheSame(mostSpecificFunctions) && allReturnNullOnGivenInputTypes(mostSpecificFunctions, parameterTypes)) {
             // make it deterministic
-            ApplicableFunction selectedFunction = Ordering.usingToString()
-                    .reverse()
-                    .sortedCopy(mostSpecificFunctions)
-                    .get(0);
+            ApplicableFunction selectedFunction = mostSpecificFunctions.stream()
+                    .max(comparing(Object::toString))
+                    .orElseThrow();
             return ImmutableList.of(selectedFunction);
         }
 
         return mostSpecificFunctions;
     }
 
-    private List<ApplicableFunction> selectMostSpecificFunctions(List<ApplicableFunction> candidates)
+    private List<ApplicableFunction> selectMostSpecificFunctions(CharVarcharCoercion charVarcharCoercion, List<ApplicableFunction> candidates)
     {
         // Provided `isMoreSpecificThan` is a partial order relation, this finds all the minimum values among candidates.
         // TODO Warning: `isMoreSpecificThan` compares bound signature of the left with declared signature of the right (asymmetric) and it is *not* proper partial order relation.
@@ -244,11 +253,11 @@ class FunctionBinder
         List<ApplicableFunction> representatives = new ArrayList<>();
 
         for (ApplicableFunction current : candidates) {
-            if (representatives.removeIf(representative -> isMoreSpecificThan(current, representative))) {
+            if (representatives.removeIf(representative -> isMoreSpecificThan(charVarcharCoercion, current, representative))) {
                 representatives.add(current);
                 continue;
             }
-            if (representatives.stream().anyMatch(representative -> isMoreSpecificThan(representative, current))) {
+            if (representatives.stream().anyMatch(representative -> isMoreSpecificThan(charVarcharCoercion, representative, current))) {
                 // Current is less specific than one of the retained representatives.
                 continue;
             }
@@ -272,7 +281,7 @@ class FunctionBinder
 
     private boolean onlyCastsUnknown(ApplicableFunction applicableFunction, List<Type> actualParameters)
     {
-        List<Type> boundTypes = applicableFunction.boundSignature().getArgumentTypes().stream()
+        List<Type> boundTypes = applicableFunction.boundSignature().argumentTypes().stream()
                 .map(typeManager::getType)
                 .collect(toImmutableList());
         checkState(actualParameters.size() == boundTypes.size(), "type lists are of different lengths");
@@ -286,8 +295,8 @@ class FunctionBinder
 
     private boolean returnTypeIsTheSame(List<ApplicableFunction> applicableFunctions)
     {
-        Set<TypeSignature> returnTypes = applicableFunctions.stream()
-                .map(function -> function.boundSignature().getReturnType())
+        Set<TypeDescriptor> returnTypes = applicableFunctions.stream()
+                .map(function -> function.boundSignature().returnType())
                 .collect(Collectors.toSet());
         return returnTypes.size() == 1;
     }
@@ -316,14 +325,14 @@ class FunctionBinder
         return false;
     }
 
-    private Optional<List<Type>> toTypes(List<TypeSignatureProvider> typeSignatureProviders)
+    private Optional<List<Type>> toTypes(List<TypeDescriptorProvider> typeDescriptorProviders)
     {
         ImmutableList.Builder<Type> resultBuilder = ImmutableList.builder();
-        for (TypeSignatureProvider typeSignatureProvider : typeSignatureProviders) {
-            if (typeSignatureProvider.hasDependency()) {
+        for (TypeDescriptorProvider typeDescriptorProvider : typeDescriptorProviders) {
+            if (typeDescriptorProvider.hasDependency()) {
                 return Optional.empty();
             }
-            resultBuilder.add(typeManager.getType(typeSignatureProvider.getTypeSignature()));
+            resultBuilder.add(typeManager.getType(typeDescriptorProvider.getTypeDescriptor()));
         }
         return Optional.of(resultBuilder.build());
     }
@@ -331,22 +340,22 @@ class FunctionBinder
     /**
      * One method is more specific than another if invocation handled by the first method could be passed on to the other one
      */
-    private boolean isMoreSpecificThan(ApplicableFunction left, ApplicableFunction right)
+    private boolean isMoreSpecificThan(CharVarcharCoercion charVarcharCoercion, ApplicableFunction left, ApplicableFunction right)
     {
-        List<TypeSignatureProvider> resolvedTypes = fromTypeSignatures(left.boundSignature().getArgumentTypes());
-        return new SignatureBinder(metadata, typeManager, right.declaredSignature(), true)
+        List<TypeDescriptorProvider> resolvedTypes = fromTypeDescriptors(left.boundSignature().argumentTypes());
+        return new SignatureBinder(metadata, typeManager, right.declaredSignature(), true, charVarcharCoercion)
                 .canBind(resolvedTypes);
     }
 
-    private CatalogFunctionBinding toFunctionBinding(CatalogFunctionMetadata functionMetadata, Signature signature)
+    private CatalogFunctionBinding toFunctionBinding(CatalogFunctionMetadata functionMetadata, GroundSignature signature)
     {
         BoundSignature boundSignature = new BoundSignature(
                 new CatalogSchemaFunctionName(
                         functionMetadata.catalogHandle().getCatalogName().toString(),
                         functionMetadata.schemaName(),
                         functionMetadata.functionMetadata().getCanonicalName()),
-                typeManager.getType(signature.getReturnType()),
-                signature.getArgumentTypes().stream()
+                typeManager.getType(signature.returnType()),
+                signature.argumentTypes().stream()
                         .map(typeManager::getType)
                         .collect(toImmutableList()));
         return new CatalogFunctionBinding(
@@ -362,16 +371,10 @@ class FunctionBinder
     {
         FunctionMetadata.Builder newMetadata = FunctionMetadata.builder(functionMetadata.getCanonicalName(), functionMetadata.getKind())
                 .functionId(functionMetadata.getFunctionId())
-                .signature(signature.toSignature());
+                .signature(signature.toSignature())
+                .description(functionMetadata.getDescription());
 
         functionMetadata.getNames().forEach(newMetadata::alias);
-
-        if (functionMetadata.getDescription().isEmpty()) {
-            newMetadata.noDescription();
-        }
-        else {
-            newMetadata.description(functionMetadata.getDescription());
-        }
 
         if (functionMetadata.isHidden()) {
             newMetadata.hidden();
@@ -379,9 +382,7 @@ class FunctionBinder
         if (!functionMetadata.isDeterministic()) {
             newMetadata.nondeterministic();
         }
-        if (functionMetadata.isNeverFails()) {
-            newMetadata.neverFails();
-        }
+        newMetadata.neverFails(functionMetadata.getNeverFails());
         if (functionMetadata.isDeprecated()) {
             newMetadata.deprecated();
         }
@@ -404,7 +405,7 @@ class FunctionBinder
         return newMetadata.build();
     }
 
-    static TrinoException functionNotFound(String name, List<TypeSignatureProvider> parameterTypes, Collection<CatalogFunctionMetadata> candidates)
+    static TrinoException functionNotFound(String name, List<TypeDescriptorProvider> parameterTypes, Collection<CatalogFunctionMetadata> candidates)
     {
         if (candidates.isEmpty()) {
             return new TrinoException(FUNCTION_NOT_FOUND, format("Function '%s' not registered", name));
@@ -412,24 +413,24 @@ class FunctionBinder
 
         Set<String> expectedParameters = new TreeSet<>();
         for (CatalogFunctionMetadata function : candidates) {
-            String arguments = Joiner.on(", ").join(function.functionMetadata().getSignature().getArgumentTypes());
-            String constraints = Joiner.on(", ").join(function.functionMetadata().getSignature().getTypeVariableConstraints());
+            String arguments = function.functionMetadata().getSignature().getArgumentTypes().stream()
+                    .map(TypeSyntax::toSql)
+                    .collect(Collectors.joining(", "));
+            String constraints = function.functionMetadata().getSignature().getTypeVariableConstraints().stream()
+                    .map(TypeVariableConstraint::toSql)
+                    .collect(Collectors.joining(", "));
             expectedParameters.add(format("%s(%s) %s", name, arguments, constraints).stripTrailing());
         }
 
-        String parameters = Joiner.on(", ").join(parameterTypes);
+        String parameters = parameterTypes.stream()
+                .map(parameter -> parameter.hasDependency() ? "<function>" : TypeSyntax.toSql(parameter.getTypeDescriptor()))
+                .collect(Collectors.joining(", "));
         String expected = Joiner.on(", ").join(expectedParameters);
         String message = format("Unexpected parameters (%s) for function %s. Expected: %s", parameters, name, expected);
         return new TrinoException(FUNCTION_NOT_FOUND, message);
     }
 
-    /**
-     * @param boundSignature Ideally this would be a real bound signature,
-     *         but the resolver algorithm considers functions with illegal types (e.g., char(large_number))
-     *         We could just not consider these applicable functions, but there are tests that depend on
-     *         the specific error messages for these failures.
-     */
-    private record ApplicableFunction(CatalogFunctionMetadata function, Signature boundSignature)
+    private record ApplicableFunction(CatalogFunctionMetadata function, GroundSignature boundSignature)
     {
         public FunctionMetadata functionMetadata()
         {

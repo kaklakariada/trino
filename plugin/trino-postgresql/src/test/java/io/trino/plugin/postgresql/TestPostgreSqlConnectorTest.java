@@ -31,9 +31,9 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.JoinCondition;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.sql.analyzer.TypeSignatureProvider;
+import io.trino.sql.analyzer.TypeDescriptorProvider;
 import io.trino.sql.ir.Call;
-import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.ComparisonOperator;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
@@ -61,10 +61,12 @@ import java.util.stream.Stream;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.jdbc.JdbcMetadataSessionProperties.COMPLEX_JOIN_PUSHDOWN_ENABLED;
 import static io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping.AS_ARRAY;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.exchange;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
@@ -156,6 +158,27 @@ public class TestPostgreSqlConnectorTest
                 onRemoteDatabase(),
                 "tpch.test_unsupported_column_present",
                 "(one bigint, two interval, three varchar(10))");
+    }
+
+    @Test
+    public void testFloatingPointRangePushdownWithNaN()
+    {
+        for (String type : List.of("real", "double")) {
+            try (TestTable table = newTrinoTable(
+                    "test_nan_range_pushdown",
+                    "(id integer, x " + type + ")",
+                    List.of("1, -infinity()", "2, -1", "3, 0", "4, 1", "5, infinity()", "6, nan()", "7, NULL"))) {
+                assertThat(query("SELECT id FROM " + table.getName() + " WHERE x < 0"))
+                        .matches("VALUES 1, 2")
+                        .isFullyPushedDown();
+                assertThat(query("SELECT id FROM " + table.getName() + " WHERE x > 0"))
+                        .matches("VALUES 4, 5")
+                        .isFullyPushedDown();
+                assertThat(query("SELECT id FROM " + table.getName() + " WHERE x < 0 OR x > 0 OR x IS NULL"))
+                        .matches("VALUES 1, 2, 4, 5, 7")
+                        .isFullyPushedDown();
+            }
+        }
     }
 
     @Test
@@ -617,9 +640,9 @@ public class TestPostgreSqlConnectorTest
 
         List<String> nonEqualities = Stream.concat(
                         Stream.of(JoinCondition.Operator.values())
-                                .filter(operator -> operator != JoinCondition.Operator.EQUAL && operator != JoinCondition.Operator.IDENTICAL)
+                                .filter(operator -> operator != JoinCondition.Operator.EQUAL)
                                 .map(JoinCondition.Operator::getValue),
-                        Stream.of("IS DISTINCT FROM", "IS NOT DISTINCT FROM"))
+                        Stream.of("IS DISTINCT FROM"))
                 .collect(toImmutableList());
 
         try (TestTable nationLowercaseTable = newTrinoTable(
@@ -744,6 +767,17 @@ public class TestPostgreSqlConnectorTest
             assertThat(query(session, "SELECT * FROM nation n, region r, customer c WHERE n.regionkey = r.regionkey AND r.regionkey = c.custkey"))
                     .isFullyPushedDown();
         }
+    }
+
+    @Test
+    public void testLegacyJoinPushdownWithIdenticalCondition()
+    {
+        Session session = Session.builder(joinPushdownEnabled(getSession()))
+                .setCatalogSessionProperty("postgresql", COMPLEX_JOIN_PUSHDOWN_ENABLED, "false")
+                .build();
+
+        assertThat(query(session, "SELECT n1.name FROM nation n1 JOIN nation n2 ON n1.nationkey = n2.nationkey AND n1.regionkey IS NOT DISTINCT FROM n2.regionkey"))
+                .isFullyPushedDown();
     }
 
     @Test
@@ -1108,6 +1142,10 @@ public class TestPostgreSqlConnectorTest
                     .skippingTypesCheck()
                     .matches("VALUES 'cba', NULL")
                     .isFullyPushedDown();
+            assertThat(query("SELECT varchar_col.reverse() FROM " + table.getName()))
+                    .skippingTypesCheck()
+                    .matches("VALUES 'cba', NULL")
+                    .isFullyPushedDown();
 
             assertThat(query("SELECT reverse(varchar_col) FROM " + table.getName() + " WHERE id = 1"))
                     .skippingTypesCheck()
@@ -1143,10 +1181,10 @@ public class TestPostgreSqlConnectorTest
                     .hasPlan(output(
                             project(ImmutableMap.of("expr", expression(
                                             new Call(
-                                                    FUNCTIONS.resolveFunction("reverse", ImmutableList.of(new TypeSignatureProvider(VARCHAR.getTypeSignature()))),
+                                                    FUNCTIONS.resolveFunction("reverse", ImmutableList.of(new TypeDescriptorProvider(VARCHAR.getTypeDescriptor()))),
                                                     ImmutableList.of(
                                                             new Call(
-                                                                    FUNCTIONS.resolveFunction("lower", ImmutableList.of(new TypeSignatureProvider(VARCHAR.getTypeSignature()))),
+                                                                    FUNCTIONS.resolveFunction("lower", ImmutableList.of(new TypeDescriptorProvider(VARCHAR.getTypeDescriptor()))),
                                                                     ImmutableList.of(new Reference(VARCHAR, "varchar_col"))))))),
                                     tableScan(table.getName(), ImmutableMap.of("varchar_col", "varchar_col")))));
         }
@@ -1162,8 +1200,8 @@ public class TestPostgreSqlConnectorTest
             ResolvedFunction concatFunction = FUNCTIONS.resolveFunction(
                     "concat",
                     ImmutableList.of(
-                            new TypeSignatureProvider(VARCHAR.getTypeSignature()),
-                            new TypeSignatureProvider(VARCHAR.getTypeSignature())));
+                            new TypeDescriptorProvider(VARCHAR.getTypeDescriptor()),
+                            new TypeDescriptorProvider(VARCHAR.getTypeDescriptor())));
 
             assertThat(query("SELECT round(id), concat(reverse(cola), reverse(colb)), concat(reverse(cola), reverse(cola)), concat(reverse(cola), upper(reverse(cola))) FROM " + table.getName()))
                     .matches("VALUES (BIGINT '1', VARCHAR 'cbafed', VARCHAR 'cbacba', VARCHAR 'cbaCBA')")
@@ -1173,7 +1211,7 @@ public class TestPostgreSqlConnectorTest
                                             ImmutableMap.of(
                                                     "round_expr", expression(
                                                             new Call(
-                                                                    FUNCTIONS.resolveFunction("round", ImmutableList.of(new TypeSignatureProvider(BIGINT.getTypeSignature()))),
+                                                                    FUNCTIONS.resolveFunction("round", ImmutableList.of(new TypeDescriptorProvider(BIGINT.getTypeDescriptor()))),
                                                                     ImmutableList.of(new Reference(BIGINT, "id")))),
                                                     "concat_expr", expression(
                                                             new Call(concatFunction, ImmutableList.of(new Reference(VARCHAR, "reverse_cola"), new Reference(VARCHAR, "reverse_colb")))),
@@ -1183,7 +1221,7 @@ public class TestPostgreSqlConnectorTest
                                                             new Call(concatFunction, ImmutableList.of(
                                                                     new Reference(VARCHAR, "reverse_cola"),
                                                                     new Call(
-                                                                            FUNCTIONS.resolveFunction("upper", ImmutableList.of(new TypeSignatureProvider(VARCHAR.getTypeSignature()))),
+                                                                            FUNCTIONS.resolveFunction("upper", ImmutableList.of(new TypeDescriptorProvider(VARCHAR.getTypeDescriptor()))),
                                                                             ImmutableList.of(new Reference(VARCHAR, "reverse_cola"))))))),
                                             tableScan(
                                                     tableHandle -> {
@@ -1212,12 +1250,12 @@ public class TestPostgreSqlConnectorTest
             ResolvedFunction concatFunction = FUNCTIONS.resolveFunction(
                     "concat",
                     ImmutableList.of(
-                            new TypeSignatureProvider(VARCHAR.getTypeSignature()),
-                            new TypeSignatureProvider(VARCHAR.getTypeSignature())));
+                            new TypeDescriptorProvider(VARCHAR.getTypeDescriptor()),
+                            new TypeDescriptorProvider(VARCHAR.getTypeDescriptor())));
             ResolvedFunction reverseFunction = FUNCTIONS.resolveFunction(
                     "reverse",
                     ImmutableList.of(
-                            new TypeSignatureProvider(VARCHAR.getTypeSignature())));
+                            new TypeDescriptorProvider(VARCHAR.getTypeDescriptor())));
 
             assertThat(query("SELECT reverse_col, concat_col FROM (SELECT reverse(cola) AS reverse_col, CONCAT(reverse(cola), colb) AS concat_col FROM " + table.getName() + ") WHERE concat_col = 'cbadef'"))
                     .skippingTypesCheck()
@@ -1233,8 +1271,8 @@ public class TestPostgreSqlConnectorTest
                                                                     new Call(reverseFunction, ImmutableList.of(new Reference(VARCHAR, "cola"))),
                                                                     new Reference(VARCHAR, "colb"))))),
                                             filter(
-                                                    new Comparison(
-                                                            Comparison.Operator.EQUAL,
+                                                    comparison(
+                                                            ComparisonOperator.EQUAL,
                                                             new Call(
                                                                     concatFunction,
                                                                     ImmutableList.of(
@@ -1270,13 +1308,13 @@ public class TestPostgreSqlConnectorTest
                                                     new Call(
                                                             FUNCTIONS.resolveFunction(
                                                                     "reverse",
-                                                                    ImmutableList.of(new TypeSignatureProvider(VARCHAR.getTypeSignature()))),
+                                                                    ImmutableList.of(new TypeDescriptorProvider(VARCHAR.getTypeDescriptor()))),
                                                             ImmutableList.of(new Reference(VARCHAR, "col_money")))),
                                             "reverse_col_enum", expression(
                                                     new Call(
                                                             FUNCTIONS.resolveFunction(
                                                                     "reverse",
-                                                                    ImmutableList.of(new TypeSignatureProvider(VARCHAR.getTypeSignature()))),
+                                                                    ImmutableList.of(new TypeDescriptorProvider(VARCHAR.getTypeDescriptor()))),
                                                             ImmutableList.of(new Reference(VARCHAR, "col_enum"))))),
                                     tableScan(
                                             table.getName(),

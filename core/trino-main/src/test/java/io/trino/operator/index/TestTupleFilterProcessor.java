@@ -14,9 +14,7 @@
 package io.trino.operator.index;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
 import io.trino.metadata.TestingFunctionResolution;
-import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.connector.SourcePage;
@@ -40,24 +38,25 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
+import static io.trino.type.CharVarcharCoercion.SQL_STANDARD;
 
 public class TestTupleFilterProcessor
 {
     @Test
     public void testFilter()
     {
-        Page tuplePage = Iterables.getOnlyElement(rowPagesBuilder(BIGINT, VARCHAR, DOUBLE)
+        Page tuplePage = rowPagesBuilder(BIGINT, VARCHAR, DOUBLE)
                 .row(1L, "a", 0.1)
-                .build());
+                .buildPage();
 
         List<Type> outputTypes = ImmutableList.of(VARCHAR, BIGINT, BOOLEAN, DOUBLE, DOUBLE);
 
-        Page inputPage = Iterables.getOnlyElement(rowPagesBuilder(outputTypes)
+        Page inputPage = rowPagesBuilder(outputTypes)
                 .row("a", 1L, true, 0.1, 0.0)
                 .row("b", 1L, true, 0.1, 2.0)
                 .row("a", 1L, false, 0.1, 2.0)
                 .row("a", 0L, false, 0.2, 0.2)
-                .build());
+                .buildPage();
 
         TestingFunctionResolution functionResolution = new TestingFunctionResolution();
         PageFunctionCompiler pageFunctionCompiler = functionResolution.getPageFunctionCompiler();
@@ -69,20 +68,20 @@ public class TestTupleFilterProcessor
                 new int[] {1, 0, 3},
                 outputTypes,
                 pageFunctionCompiler,
+                SQL_STANDARD,
                 new BlockTypeOperators(new TypeOperators()));
         PageProcessor tupleFilterProcessor = filterFactory.createPageProcessor(tuplePage, OptionalInt.of(MAX_BATCH_SIZE)).get();
         Page actualPage = getOnlyElement(
                 tupleFilterProcessor.process(
                         SESSION,
-                        new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
                         SourcePage.create(inputPage)))
                 .orElseThrow(() -> new AssertionError("page is not present"));
 
-        Page expectedPage = Iterables.getOnlyElement(rowPagesBuilder(outputTypes)
+        Page expectedPage = rowPagesBuilder(outputTypes)
                 .row("a", 1L, true, 0.1, 0.0)
                 .row("a", 1L, false, 0.1, 2.0)
-                .build());
+                .buildPage();
 
         assertPageEquals(outputTypes, actualPage, expectedPage);
     }

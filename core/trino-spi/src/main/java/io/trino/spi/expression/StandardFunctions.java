@@ -50,6 +50,10 @@ public final class StandardFunctions
      */
     public static final FunctionName CAST_FUNCTION_NAME = new FunctionName("$cast");
     public static final FunctionName TRY_CAST_FUNCTION_NAME = new FunctionName("$try_cast");
+    /**
+     * A {@code char} to {@code varchar} cast under legacy semantics. The result type is determined by the {@link Call#getType()}.
+     */
+    public static final FunctionName LEGACY_CHAR_TO_VARCHAR_CAST_FUNCTION_NAME = new FunctionName("$legacy_char_to_varchar_cast");
 
     public static final FunctionName EQUAL_OPERATOR_FUNCTION_NAME = new FunctionName("$equal");
     public static final FunctionName NOT_EQUAL_OPERATOR_FUNCTION_NAME = new FunctionName("$not_equal");
@@ -61,6 +65,14 @@ public final class StandardFunctions
      * $identical function is equivalent to the SQL operator "IS NOT DISTINCT FROM".
      */
     public static final FunctionName IDENTICAL_OPERATOR_FUNCTION_NAME = new FunctionName("$identical");
+
+    /**
+     * $between is a 3-argument boolean function equivalent to the SQL `value BETWEEN min AND max`
+     * predicate. The value is named once, preserving the spec's single-evaluation semantics
+     * without the duplication that an explicit `$and($greater_than_or_equal(value, min),
+     * $less_than_or_equal(value, max))` would carry.
+     */
+    public static final FunctionName BETWEEN_FUNCTION_NAME = new FunctionName("$between");
 
     /**
      * Arithmetic addition.

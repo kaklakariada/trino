@@ -56,9 +56,9 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
-import static java.util.stream.Collectors.toMap;
 import static org.apache.iceberg.MetricsUtil.createNanValueCounts;
 import static org.apache.iceberg.parquet.ParquetUtil.extractTimestampInt96;
 
@@ -94,7 +94,7 @@ public final class ParquetUtil
         MessageType parquetTypeWithIds = getParquetTypeWithIds(metadata, nameMapping);
         Schema fileSchema = ParquetSchemaUtil.convertAndPrune(parquetTypeWithIds);
 
-        Map<Integer, FieldMetrics<?>> fieldMetricsMap = fieldMetrics.collect(toMap(FieldMetrics::id, identity()));
+        Map<Integer, FieldMetrics<?>> fieldMetricsMap = fieldMetrics.collect(toImmutableMap(FieldMetrics::id, identity()));
 
         List<BlockMetadata> blocks = metadata.getBlocks();
         for (BlockMetadata block : blocks) {
@@ -227,7 +227,10 @@ public final class ParquetUtil
             currentType = currentType.asStructType().fieldType(fieldName);
         }
 
-        return currentType != null && currentType.isPrimitiveType();
+        return currentType != null
+                && currentType.isPrimitiveType()
+                // TODO https://github.com/trinodb/trino/issues/30077 Store bounds for geometry and geography types
+                && !(currentType instanceof Types.GeometryType || currentType instanceof Types.GeographyType);
     }
 
     private static void increment(Map<Integer, Long> columns, int fieldId, long amount)
@@ -327,7 +330,7 @@ public final class ParquetUtil
         return switch (type.typeId()) {
             case BOOLEAN -> (Literal<T>) Literal.of((Boolean) value);
             case INTEGER, DATE -> (Literal<T>) Literal.of((Integer) value);
-            case LONG, TIME, TIMESTAMP -> (Literal<T>) Literal.of((Long) value);
+            case LONG, TIME, TIMESTAMP, TIMESTAMP_NANO -> (Literal<T>) Literal.of((Long) value);
             case FLOAT -> (Literal<T>) Literal.of((Float) value);
             case DOUBLE -> (Literal<T>) Literal.of((Double) value);
             case STRING -> {

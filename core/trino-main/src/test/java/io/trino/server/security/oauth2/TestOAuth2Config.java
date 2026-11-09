@@ -45,12 +45,14 @@ public class TestOAuth2Config
                 .setChallengeTimeout(new Duration(15, MINUTES))
                 .setPrincipalField("sub")
                 .setAdditionalAudiences(Collections.emptyList())
+                .setRequireAudience(false)
                 .setMaxClockSkew(new Duration(1, MINUTES))
                 .setJwtType(null)
                 .setUserMappingPattern(null)
                 .setUserMappingFile(null)
                 .setEnableRefreshTokens(false)
-                .setEnableDiscovery(true));
+                .setEnableDiscovery(true)
+                .setDomainHint(null));
     }
 
     @Test
@@ -66,6 +68,7 @@ public class TestOAuth2Config
                 .put("http-server.authentication.oauth2.scopes", "email,offline")
                 .put("http-server.authentication.oauth2.principal-field", "some-field")
                 .put("http-server.authentication.oauth2.additional-audiences", "test-aud1,test-aud2")
+                .put("http-server.authentication.oauth2.require-audience", "true")
                 .put("http-server.authentication.oauth2.challenge-timeout", "90s")
                 .put("http-server.authentication.oauth2.max-clock-skew", "15s")
                 .put("http-server.authentication.oauth2.jwt-type", "at+jwt")
@@ -73,6 +76,7 @@ public class TestOAuth2Config
                 .put("http-server.authentication.oauth2.user-mapping.file", userMappingFile.toString())
                 .put("http-server.authentication.oauth2.refresh-tokens", "true")
                 .put("http-server.authentication.oauth2.oidc.discovery", "false")
+                .put("http-server.authentication.oauth2.domain-hint", "example.com")
                 .buildOrThrow();
 
         OAuth2Config expected = new OAuth2Config()
@@ -83,13 +87,15 @@ public class TestOAuth2Config
                 .setScopes(ImmutableSet.of("email", "offline"))
                 .setPrincipalField("some-field")
                 .setAdditionalAudiences(List.of("test-aud1", "test-aud2"))
+                .setRequireAudience(true)
                 .setChallengeTimeout(new Duration(90, SECONDS))
                 .setMaxClockSkew(new Duration(15, SECONDS))
                 .setJwtType("at+jwt")
                 .setUserMappingPattern("(.*)@something")
                 .setUserMappingFile(userMappingFile.toFile())
                 .setEnableRefreshTokens(true)
-                .setEnableDiscovery(false);
+                .setEnableDiscovery(false)
+                .setDomainHint("example.com");
 
         assertFullMapping(properties, expected);
     }

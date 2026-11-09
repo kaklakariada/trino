@@ -15,6 +15,7 @@ package io.trino.operator.aggregation;
 
 import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableList;
+import com.google.common.primitives.Primitives;
 import io.trino.operator.ParametricImplementation;
 import io.trino.operator.aggregation.AggregationFromAnnotationsParser.AccumulatorStateDetails;
 import io.trino.operator.aggregation.AggregationFunctionAdapter.AggregationParameterKind;
@@ -33,7 +34,7 @@ import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.function.TypeParameter;
 import io.trino.spi.function.WindowAccumulator;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeTemplate;
 import io.trino.util.Reflection;
 
 import java.lang.annotation.Annotation;
@@ -64,7 +65,7 @@ import static io.trino.operator.annotations.ImplementationDependency.Factory.cre
 import static io.trino.operator.annotations.ImplementationDependency.getImplementationDependencyAnnotation;
 import static io.trino.operator.annotations.ImplementationDependency.isImplementationDependencyAnnotation;
 import static io.trino.operator.annotations.ImplementationDependency.validateImplementationDependencyAnnotation;
-import static io.trino.sql.analyzer.TypeSignatureTranslator.parseTypeSignature;
+import static io.trino.sql.analyzer.TypeDescriptorTranslator.parseTypeTemplate;
 import static io.trino.util.Reflection.methodHandle;
 import static java.util.Objects.requireNonNull;
 
@@ -98,7 +99,8 @@ public class ParametricAggregationImplementation
             List<ImplementationDependency> inputDependencies,
             List<ImplementationDependency> combineDependencies,
             List<ImplementationDependency> outputDependencies,
-            List<AggregationParameterKind> inputParameterKinds)
+            List<AggregationParameterKind> inputParameterKinds,
+            boolean returnNullable)
     {
         this.signature = requireNonNull(signature, "signature cannot be null");
         this.definitionClass = requireNonNull(definitionClass, "definition class cannot be null");
@@ -112,7 +114,7 @@ public class ParametricAggregationImplementation
         this.combineDependencies = requireNonNull(combineDependencies, "combineDependencies cannot be null");
         this.inputParameterKinds = requireNonNull(inputParameterKinds, "inputParameterKinds cannot be null");
         this.functionNullability = new FunctionNullability(
-                true,
+                returnNullable,
                 inputParameterKinds.stream()
                         .filter(parameterType -> parameterType != BLOCK_INDEX && parameterType != STATE)
                         .map(NULLABLE_BLOCK_INPUT_CHANNEL::equals)
@@ -219,11 +221,13 @@ public class ParametricAggregationImplementation
         private final List<ImplementationDependency> combineDependencies;
         private final List<ImplementationDependency> outputDependencies;
         private final List<AggregationParameterKind> inputParameterKinds;
+        private final boolean returnNullable;
 
         private final Signature.Builder signatureBuilder = Signature.builder();
 
         private final Set<String> literalParameters;
         private final List<TypeParameter> typeParameters;
+        private final Set<String> typeParameterNames;
 
         private Parser(
                 Class<?> aggregationDefinition,
@@ -240,6 +244,9 @@ public class ParametricAggregationImplementation
             // it is required to declare all literal and type parameters in input function
             literalParameters = parseLiteralParameters(inputFunction);
             typeParameters = Arrays.asList(inputFunction.getAnnotationsByType(TypeParameter.class));
+            typeParameterNames = typeParameters.stream()
+                    .map(TypeParameter::value)
+                    .collect(toImmutableSet());
 
             // parse dependencies
             inputDependencies = parseImplementationDependencies(inputFunction);
@@ -266,13 +273,15 @@ public class ParametricAggregationImplementation
             // parse native types of arguments
             argumentNativeContainerTypes = parseSignatureArgumentsTypes(inputFunction);
 
-            // determine TypeSignatures of function declaration
-            addInputTypeSignatures(signatureBuilder, inputFunction);
-            signatureBuilder.returnType(parseTypeSignature(outputFunction.getAnnotation(OutputFunction.class).value(), literalParameters));
+            // determine TypeDescriptors of function declaration
+            addInputTypeDescriptors(signatureBuilder, inputFunction);
+            signatureBuilder.returnType(parseTypeTemplate(outputFunction.getAnnotation(OutputFunction.class).value(), typeParameterNames, literalParameters));
 
             inputHandle = methodHandle(inputFunction);
             combineHandle = combineFunction.map(Reflection::methodHandle);
             outputHandle = methodHandle(outputFunction);
+            // Follows the scalar convention: the result is non-null unless the output method is annotated @SqlNullable
+            returnNullable = outputFunction.isAnnotationPresent(SqlNullable.class);
 
             this.windowAccumulator = windowAccumulator;
         }
@@ -290,7 +299,8 @@ public class ParametricAggregationImplementation
                     inputDependencies,
                     combineDependencies,
                     outputDependencies,
-                    inputParameterKinds);
+                    inputParameterKinds,
+                    returnNullable);
         }
 
         public static ParametricAggregationImplementation parseImplementation(
@@ -333,6 +343,14 @@ public class ParametricAggregationImplementation
                 else if (baseTypeAnnotation instanceof SqlType) {
                     boolean isParameterBlock = isParameterBlock(annotations[i]);
                     boolean isParameterNullable = isParameterNullable(annotations[i]);
+                    if (!isParameterBlock && !isParameterNullable) {
+                        Class<?> parameterType = method.getParameterTypes()[i];
+                        checkArgument(
+                                parameterType == Void.class || !Primitives.isWrapperType(parameterType),
+                                "%s contains an input parameter with boxed primitive type %s; a non-nullable aggregation input parameter must use the corresponding primitive type",
+                                methodName,
+                                parameterType.getSimpleName());
+                    }
                     builder.add(getInputParameterKind(isParameterNullable, isParameterBlock, methodName));
                 }
                 else if (baseTypeAnnotation instanceof BlockIndex) {
@@ -427,11 +445,9 @@ public class ParametricAggregationImplementation
                     validateImplementationDependencyAnnotation(
                             inputFunction,
                             annotation,
-                            typeParameters.stream()
-                                    .map(TypeParameter::value)
-                                    .collect(toImmutableSet()),
+                            typeParameterNames,
                             literalParameters);
-                    builder.add(createDependency(annotation, literalParameters, parameter.getType()));
+                    builder.add(createDependency(annotation, typeParameterNames, literalParameters, parameter.getType()));
                 });
             }
             return builder.build();
@@ -453,7 +469,7 @@ public class ParametricAggregationImplementation
         /// non-`@SqlType` parameter, since the declared name has nothing to attach
         /// to. (`@Name` itself is not `@Repeatable`, so the compiler enforces a
         /// single annotation per parameter.)
-        private void addInputTypeSignatures(Signature.Builder signatureBuilder, Method inputFunction)
+        private void addInputTypeDescriptors(Signature.Builder signatureBuilder, Method inputFunction)
         {
             Annotation[][] parameterAnnotations = inputFunction.getParameterAnnotations();
             for (Annotation[] annotations : parameterAnnotations) {
@@ -471,12 +487,12 @@ public class ParametricAggregationImplementation
                     checkArgument(declaredName == null, "Method [%s] has @Name on a parameter without @SqlType", inputFunction);
                     continue;
                 }
-                TypeSignature typeSignature = parseTypeSignature(sqlType.value(), literalParameters);
+                TypeTemplate typeTemplate = parseTypeTemplate(sqlType.value(), typeParameterNames, literalParameters);
                 if (declaredName != null) {
-                    signatureBuilder.argumentType(typeSignature, declaredName);
+                    signatureBuilder.argumentType(typeTemplate, declaredName);
                 }
                 else {
-                    signatureBuilder.argumentType(typeSignature);
+                    signatureBuilder.argumentType(typeTemplate);
                 }
             }
         }

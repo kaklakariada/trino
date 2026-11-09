@@ -38,9 +38,9 @@ import io.trino.spi.SplitWeight;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSource;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
@@ -297,7 +297,7 @@ public class TestHivePageSink
         List<Type> columnTypes = columns.stream()
                 .map(LineItemColumn::getType)
                 .map(TestHivePageSink::getType)
-                .map(hiveType -> TESTING_TYPE_MANAGER.getType(hiveType.getTypeSignature()))
+                .map(hiveType -> TESTING_TYPE_MANAGER.getType(hiveType.getTypeDescriptor()))
                 .collect(toList());
         Page page = createPage(_ -> true);
         pageSink.appendPage(page);
@@ -317,8 +317,8 @@ public class TestHivePageSink
             }
         }
 
-        MaterializedResult expectedResults = toMaterializedResult(getHiveSession(config), columnTypes, ImmutableList.of(page));
-        MaterializedResult results = toMaterializedResult(getHiveSession(config), columnTypes, pages);
+        MaterializedResult expectedResults = toMaterializedResult(columnTypes, ImmutableList.of(page));
+        MaterializedResult results = toMaterializedResult(columnTypes, pages);
         assertThat(results).containsExactlyElementsOf(expectedResults);
         assertThat(round(stats.getInputPageSizeInBytes().getAllTime().getMax())).isEqualTo(page.getRetainedSizeInBytes());
         return fileEntry.length();
@@ -335,7 +335,7 @@ public class TestHivePageSink
         List<Type> columnTypes = columns.stream()
                 .map(LineItemColumn::getType)
                 .map(TestHivePageSink::getType)
-                .map(hiveType -> TESTING_TYPE_MANAGER.getType(hiveType.getTypeSignature()))
+                .map(hiveType -> TESTING_TYPE_MANAGER.getType(hiveType.getTypeDescriptor()))
                 .collect(toList());
         PageBuilder pageBuilder = new PageBuilder(columnTypes);
         int rows = 0;
@@ -376,10 +376,10 @@ public class TestHivePageSink
         return pageBuilder.build();
     }
 
-    static MaterializedResult toMaterializedResult(ConnectorSession session, List<Type> types, List<Page> pages)
+    static MaterializedResult toMaterializedResult(List<Type> types, List<Page> pages)
     {
         // materialize pages
-        MaterializedResult.Builder resultBuilder = MaterializedResult.resultBuilder(session, types);
+        MaterializedResult.Builder resultBuilder = MaterializedResult.resultBuilder(types);
         for (Page outputPage : pages) {
             resultBuilder.page(outputPage);
         }
@@ -419,7 +419,7 @@ public class TestHivePageSink
                 TESTING_TYPE_MANAGER,
                 config,
                 getDefaultHivePageSourceFactories(fileSystemFactory, config));
-        return provider.createPageSource(transaction, getHiveSession(config), split, table, Optional.empty(), ImmutableList.copyOf(getColumnHandles()), DynamicFilter.EMPTY);
+        return provider.createPageSource(transaction, getHiveSession(config), split, table, Optional.empty(), ImmutableList.copyOf(getColumnHandles()), DynamicFilter.EMPTY, MemoryContext.NO_LIMIT);
     }
 
     private static ConnectorPageSink createPageSink(

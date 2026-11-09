@@ -13,7 +13,6 @@
  */
 package io.trino.hive.formats.encodings.text;
 
-import com.google.common.primitives.UnsignedBytes;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
@@ -50,9 +49,9 @@ public class StringEncoding
             escapeByte = escapeChar;
             escapeBuffer = new DynamicSliceOutput(1024);
             needsEscape = new boolean[256];
-            needsEscape[UnsignedBytes.toInt(escapeByte)] = true;
+            needsEscape[Byte.toUnsignedInt(escapeByte)] = true;
             for (int i = 0; i < separators.length(); i++) {
-                needsEscape[UnsignedBytes.toInt(separators.getByte(i))] = true;
+                needsEscape[Byte.toUnsignedInt(separators.getByte(i))] = true;
             }
         }
     }
@@ -126,8 +125,10 @@ public class StringEncoding
     @Override
     public void decodeValueInto(BlockBuilder builder, Slice slice, int offset, int length)
     {
-        if (needsEscape != null) {
-            Slice newSlice = Slices.allocate(slice.length());
+        // Unescaping copies the value, so only do it for values that actually contain an escape.
+        // The columnar path already skips the copy this way.
+        if (needsEscape != null && containsEscapeByte(slice, offset, length)) {
+            Slice newSlice = Slices.allocate(length);
             SliceOutput output = newSlice.getOutput();
             unescape(escapeByte, output, slice, offset, length);
             slice = newSlice;
@@ -137,6 +138,11 @@ public class StringEncoding
 
         length = calculateTruncationLength(type, slice, offset, length);
         type.writeSlice(builder, slice, offset, length);
+    }
+
+    private boolean containsEscapeByte(Slice slice, int offset, int length)
+    {
+        return slice.indexOfByte(escapeByte, offset, length) >= 0;
     }
 
     private static ColumnData unescape(ColumnData columnData, byte escapeByte)

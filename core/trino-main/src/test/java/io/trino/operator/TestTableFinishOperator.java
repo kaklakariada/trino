@@ -17,13 +17,17 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import io.airlift.units.DataSize;
+import io.trino.ExceededMemoryLimitException;
 import io.trino.Session;
 import io.trino.execution.TableExecuteContext;
 import io.trino.execution.TableExecuteContextManager;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.operator.DevNullOperator.DevNullOperatorFactory;
 import io.trino.operator.TableFinishOperator.TableFinishOperatorFactory;
 import io.trino.operator.TableFinishOperator.TableFinisher;
 import io.trino.operator.aggregation.TestingAggregationFunction;
+import io.trino.spi.Page;
 import io.trino.spi.block.LongArrayBlockBuilder;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.statistics.ColumnStatisticMetadata;
@@ -46,18 +50,21 @@ import java.util.concurrent.ScheduledExecutorService;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
+import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.block.BlockAssertions.assertBlockEquals;
 import static io.trino.operator.PageAssertions.assertPageEquals;
 import static io.trino.spi.statistics.ColumnStatisticType.MAX_VALUE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
 import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
@@ -112,46 +119,44 @@ public class TestTableFinishOperator
                 .addPipelineContext(0, true, true, false)
                 .addDriverContext();
         tableExecuteContextManager.registerTableExecuteContextForQuery(driverContext.getPipelineContext().getTaskContext().getQueryContext().getQueryId());
-        TableFinishOperator operator = (TableFinishOperator) operatorFactory.createOperator(driverContext);
+        try (TableFinishOperator operator = (TableFinishOperator) operatorFactory.createOperator(driverContext)) {
+            List<Type> inputTypes = ImmutableList.of(BIGINT, VARBINARY, BIGINT);
 
-        List<Type> inputTypes = ImmutableList.of(BIGINT, VARBINARY, BIGINT);
+            operator.addInput(rowPagesBuilder(inputTypes).row(4, null, null).buildPage());
+            operator.addInput(rowPagesBuilder(inputTypes).row(5, null, null).buildPage());
+            operator.addInput(rowPagesBuilder(inputTypes).row(null, new byte[] {1}, null).buildPage());
+            operator.addInput(rowPagesBuilder(inputTypes).row(null, new byte[] {2}, null).buildPage());
+            operator.addInput(rowPagesBuilder(inputTypes).row(null, null, 6).buildPage());
+            operator.addInput(rowPagesBuilder(inputTypes).row(null, null, 7).buildPage());
 
-        operator.addInput(rowPagesBuilder(inputTypes).row(4, null, null).build().get(0));
-        operator.addInput(rowPagesBuilder(inputTypes).row(5, null, null).build().get(0));
-        operator.addInput(rowPagesBuilder(inputTypes).row(null, new byte[] {1}, null).build().get(0));
-        operator.addInput(rowPagesBuilder(inputTypes).row(null, new byte[] {2}, null).build().get(0));
-        operator.addInput(rowPagesBuilder(inputTypes).row(null, null, 6).build().get(0));
-        operator.addInput(rowPagesBuilder(inputTypes).row(null, null, 7).build().get(0));
+            assertThat(driverContext.getMemoryUsage()).as("memoryUsage").isGreaterThan(0);
 
-        assertThat(driverContext.getMemoryUsage()).as("memoryUsage").isGreaterThan(0);
+            assertThat(operator.isBlocked().isDone())
+                    .describedAs("isBlocked should be done")
+                    .isTrue();
+            assertThat(operator.needsInput())
+                    .describedAs("needsInput should be true")
+                    .isTrue();
 
-        assertThat(operator.isBlocked().isDone())
-                .describedAs("isBlocked should be done")
-                .isTrue();
-        assertThat(operator.needsInput())
-                .describedAs("needsInput should be true")
-                .isTrue();
+            operator.finish();
+            assertThat(operator.isFinished())
+                    .describedAs("isFinished should be false")
+                    .isFalse();
 
-        operator.finish();
-        assertThat(operator.isFinished())
-                .describedAs("isFinished should be false")
-                .isFalse();
+            assertThat(operator.getOutput()).isNull();
+            List<Type> outputTypes = ImmutableList.of(BIGINT);
+            assertPageEquals(outputTypes, operator.getOutput(), rowPagesBuilder(outputTypes).row(9).buildPage());
 
-        assertThat(operator.getOutput()).isNull();
-        List<Type> outputTypes = ImmutableList.of(BIGINT);
-        assertPageEquals(outputTypes, operator.getOutput(), rowPagesBuilder(outputTypes).row(9).build().get(0));
-
-        assertThat(operator.isBlocked().isDone())
-                .describedAs("isBlocked should be done")
-                .isTrue();
-        assertThat(operator.needsInput())
-                .describedAs("needsInput should be false")
-                .isFalse();
-        assertThat(operator.isFinished())
-                .describedAs("isFinished should be true")
-                .isTrue();
-
-        operator.close();
+            assertThat(operator.isBlocked().isDone())
+                    .describedAs("isBlocked should be done")
+                    .isTrue();
+            assertThat(operator.needsInput())
+                    .describedAs("needsInput should be false")
+                    .isFalse();
+            assertThat(operator.isFinished())
+                    .describedAs("isFinished should be true")
+                    .isTrue();
+        }
 
         assertThat(tableFinisher.getFragments()).isEqualTo(ImmutableList.of(Slices.wrappedBuffer(new byte[] {1}), Slices.wrappedBuffer(new byte[] {2})));
         assertThat(tableFinisher.getComputedStatistics()).hasSize(1);
@@ -164,6 +169,42 @@ public class TestTableFinishOperator
         assertThat(driverContext.getMemoryUsage())
                 .describedAs("memoryUsage")
                 .isEqualTo(0);
+    }
+
+    @Test
+    public void testFragmentsMemoryLimit()
+            throws Exception
+    {
+        TableExecuteContextManager tableExecuteContextManager = new TableExecuteContextManager();
+        TableFinishOperatorFactory operatorFactory = new TableFinishOperatorFactory(
+                0,
+                new PlanNodeId("node"),
+                new TestTableFinisher(),
+                new DevNullOperatorFactory(1, new PlanNodeId("test")),
+                new StatisticAggregationsDescriptor<>(ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of()),
+                tableExecuteContextManager,
+                true,
+                TEST_SESSION);
+        DriverContext driverContext = createTaskContext(scheduledExecutor, scheduledExecutor, TEST_SESSION, DataSize.of(1, MEGABYTE))
+                .addPipelineContext(0, true, true, false)
+                .addDriverContext();
+        tableExecuteContextManager.registerTableExecuteContextForQuery(driverContext.getPipelineContext().getTaskContext().getQueryContext().getQueryId());
+        try (TableFinishOperator operator = (TableFinishOperator) operatorFactory.createOperator(driverContext)) {
+            List<Type> inputTypes = ImmutableList.of(BIGINT, VARBINARY);
+
+            Page page = rowPagesBuilder(inputTypes)
+                    .row(null, new byte[300_000])
+                    .row(null, new byte[300_000])
+                    .buildPage();
+            operator.addInput(page);
+            assertThat(driverContext.getMemoryUsage()).isEqualTo(page.getBlock(1).getRetainedSizeInBytes());
+
+            assertThatThrownBy(() -> operator.addInput(rowPagesBuilder(inputTypes).row(null, new byte[500_000]).buildPage()))
+                    .isInstanceOf(ExceededMemoryLimitException.class)
+                    .hasMessageMatching("Query exceeded per-node memory limit of 1MB.*");
+        }
+
+        assertThat(driverContext.getMemoryUsage()).isEqualTo(0);
     }
 
     private static class TestTableFinisher

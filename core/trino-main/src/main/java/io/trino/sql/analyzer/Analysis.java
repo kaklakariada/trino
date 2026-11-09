@@ -60,7 +60,7 @@ import io.trino.sql.analyzer.JsonPathAnalyzer.JsonPathAnalysis;
 import io.trino.sql.analyzer.PatternRecognitionAnalysis.PatternInputAnalysis;
 import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.tree.AllColumns;
-import io.trino.sql.tree.ComparisonExpression;
+import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.DataType;
 import io.trino.sql.tree.ExistsPredicate;
 import io.trino.sql.tree.Expression;
@@ -68,7 +68,6 @@ import io.trino.sql.tree.FieldReference;
 import io.trino.sql.tree.FunctionCall;
 import io.trino.sql.tree.GroupingOperation;
 import io.trino.sql.tree.Identifier;
-import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.Join;
 import io.trino.sql.tree.JsonTable;
 import io.trino.sql.tree.JsonTableColumnDefinition;
@@ -77,11 +76,13 @@ import io.trino.sql.tree.MeasureDefinition;
 import io.trino.sql.tree.Nearest;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.NodeRef;
+import io.trino.sql.tree.NullIfExpression;
 import io.trino.sql.tree.Offset;
 import io.trino.sql.tree.OrderBy;
 import io.trino.sql.tree.Parameter;
+import io.trino.sql.tree.Pivot;
+import io.trino.sql.tree.Predicate;
 import io.trino.sql.tree.QualifiedName;
-import io.trino.sql.tree.QuantifiedComparisonExpression;
 import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.RangeQuantifier;
@@ -93,6 +94,7 @@ import io.trino.sql.tree.SubqueryExpression;
 import io.trino.sql.tree.SubsetDefinition;
 import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableFunctionInvocation;
+import io.trino.sql.tree.UniquePredicate;
 import io.trino.sql.tree.Unnest;
 import io.trino.sql.tree.WindowFrame;
 import io.trino.sql.tree.WindowOperation;
@@ -146,6 +148,8 @@ public class Analysis
 
     private final Map<NodeRef<Table>, Query> namedQueries = new LinkedHashMap<>();
 
+    private final Map<NodeRef<Pivot>, PivotAnalysis> pivotAnalyses = new LinkedHashMap<>();
+
     // map expandable query to the node being the inner recursive reference
     private final Map<NodeRef<Query>, Node> expandableNamedQueries = new LinkedHashMap<>();
 
@@ -185,10 +189,11 @@ public class Analysis
     private final Map<NodeRef<Expression>, ResolvedFunction> jsonInputFunctions = new LinkedHashMap<>();
     private final Map<NodeRef<Node>, ResolvedFunction> jsonOutputFunctions = new LinkedHashMap<>();
     private final Map<NodeRef<JsonTable>, JsonTableAnalysis> jsonTableAnalyses = new LinkedHashMap<>();
+    private final Map<NodeRef<Expression>, JsonSimplifiedAccessor> jsonSimplifiedAccessors = new LinkedHashMap<>();
 
     private final Map<NodeRef<QuerySpecification>, List<FunctionCall>> aggregates = new LinkedHashMap<>();
     private final Map<NodeRef<OrderBy>, List<Expression>> orderByAggregates = new LinkedHashMap<>();
-    private final Map<NodeRef<QuerySpecification>, GroupingSetAnalysis> groupingSets = new LinkedHashMap<>();
+    private final Map<NodeRef<Node>, GroupingSetAnalysis> groupingSets = new LinkedHashMap<>();
 
     private final Map<NodeRef<Node>, Expression> where = new LinkedHashMap<>();
     private final Map<NodeRef<QuerySpecification>, Expression> having = new LinkedHashMap<>();
@@ -213,12 +218,13 @@ public class Analysis
     private final Map<NodeRef<Join>, Expression> joins = new LinkedHashMap<>();
     private final Map<NodeRef<Join>, JoinUsingAnalysis> joinUsing = new LinkedHashMap<>();
     private final Map<NodeRef<Node>, SubqueryAnalysis> subqueries = new LinkedHashMap<>();
-    private final Map<NodeRef<Expression>, PredicateCoercions> predicateCoercions = new LinkedHashMap<>();
+    private final Map<NodeRef<Predicate>, PredicateCoercions> predicateCoercions = new LinkedHashMap<>();
 
     private final Map<NodeRef<Table>, TableEntry> tables = new LinkedHashMap<>();
 
     private final Map<NodeRef<Expression>, Type> types = new LinkedHashMap<>();
     private final Map<NodeRef<Expression>, Type> coercions = new LinkedHashMap<>();
+    private final Map<NodeRef<NullIfExpression>, Type> nullIfComparisonTypes = new LinkedHashMap<>();
 
     private final Map<NodeRef<Expression>, Type> sortKeyCoercionsForFrameBoundCalculation = new LinkedHashMap<>();
     private final Map<NodeRef<Expression>, Type> sortKeyCoercionsForFrameBoundComparison = new LinkedHashMap<>();
@@ -227,7 +233,7 @@ public class Analysis
     private final Map<NodeRef<Node>, RoutineEntry> resolvedFunctions = new LinkedHashMap<>();
     private final Map<NodeRef<FunctionCall>, Identifier> methodCallReceivers = new LinkedHashMap<>();
 
-    private final Map<NodeRef<FunctionCall>, List<Integer>> argumentBindings = new LinkedHashMap<>();
+    private final Map<NodeRef<Expression>, List<Integer>> argumentBindings = new LinkedHashMap<>();
     private final Map<NodeRef<Identifier>, LambdaArgumentDeclaration> lambdaArgumentReferences = new LinkedHashMap<>();
 
     private final Map<Field, ColumnHandle> columns = new LinkedHashMap<>();
@@ -251,9 +257,7 @@ public class Analysis
     private Optional<Create> create = Optional.empty();
     private Optional<Insert> insert = Optional.empty();
     private Optional<RefreshMaterializedViewAnalysis> refreshMaterializedView = Optional.empty();
-    private Optional<QualifiedObjectName> delegatedRefreshMaterializedView = Optional.empty();
     private Optional<AnalyzeMetadata> analyzeMetadata = Optional.empty();
-    private Optional<List<ColumnSchema>> updatedColumns = Optional.empty();
     private Optional<MergeAnalysis> mergeAnalysis = Optional.empty();
 
     private final QueryType queryType;
@@ -269,6 +273,9 @@ public class Analysis
     private final Multimap<NodeRef<Expression>, Field> fieldLineage = ArrayListMultimap.create();
 
     private Optional<TableExecuteHandle> tableExecuteHandle = Optional.empty();
+    // AST node the execute handle is registered against; for a materialized view this names the view,
+    // while the registered TableHandle is the view's storage table
+    private Optional<Table> tableExecuteTable = Optional.empty();
 
     // names of tables and aliased relations. All names are resolved case-insensitive.
     private final Map<NodeRef<Relation>, QualifiedName> relationNames = new LinkedHashMap<>();
@@ -441,7 +448,7 @@ public class Analysis
         return unmodifiableMap(lambdaArgumentReferences);
     }
 
-    public void setGroupingSets(QuerySpecification node, GroupingSetAnalysis groupingSets)
+    public void setGroupingSets(Node node, GroupingSetAnalysis groupingSets)
     {
         this.groupingSets.put(NodeRef.of(node), groupingSets);
     }
@@ -451,7 +458,7 @@ public class Analysis
         return groupingSets.containsKey(NodeRef.of(node));
     }
 
-    public GroupingSetAnalysis getGroupingSets(QuerySpecification node)
+    public GroupingSetAnalysis getGroupingSets(Node node)
     {
         return groupingSets.get(NodeRef.of(node));
     }
@@ -541,10 +548,12 @@ public class Analysis
     public void recordSubqueries(Node node, ExpressionAnalysis expressionAnalysis)
     {
         SubqueryAnalysis subqueries = this.subqueries.computeIfAbsent(NodeRef.of(node), _ -> new SubqueryAnalysis());
-        subqueries.addInPredicates(dereference(expressionAnalysis.getSubqueryInPredicates()));
+        subqueries.addInPredicates(expressionAnalysis.getSubqueryInPredicates());
         subqueries.addSubqueries(dereference(expressionAnalysis.getSubqueries()));
         subqueries.addExistsSubqueries(dereference(expressionAnalysis.getExistsSubqueries()));
-        subqueries.addQuantifiedComparisons(dereference(expressionAnalysis.getQuantifiedComparisons()));
+        subqueries.addQuantifiedComparisons(expressionAnalysis.getQuantifiedComparisons());
+        subqueries.addMatchPredicates(expressionAnalysis.getMatchPredicates());
+        subqueries.addUniquePredicates(dereference(expressionAnalysis.getUniquePredicates()));
     }
 
     private <T extends Node> List<T> dereference(Collection<NodeRef<T>> nodeRefs)
@@ -739,12 +748,12 @@ public class Analysis
     /// positionally this is the identity binding `[0, 1, ..., N-1]`; for a call
     /// with named arguments it reorders so the named values land at their declared
     /// positions.
-    public void setArgumentBinding(FunctionCall node, List<Integer> binding)
+    public void setArgumentBinding(Expression node, List<Integer> binding)
     {
         argumentBindings.put(NodeRef.of(node), List.copyOf(binding));
     }
 
-    public List<Integer> getArgumentBinding(FunctionCall node)
+    public List<Integer> getArgumentBinding(Expression node)
     {
         List<Integer> binding = argumentBindings.get(NodeRef.of(node));
         if (binding == null) {
@@ -798,6 +807,16 @@ public class Analysis
         this.coercions.putAll(coercions);
         this.sortKeyCoercionsForFrameBoundCalculation.putAll(sortKeyCoercionsForFrameBoundCalculation);
         this.sortKeyCoercionsForFrameBoundComparison.putAll(sortKeyCoercionsForFrameBoundComparison);
+    }
+
+    public void addNullIfComparisonTypes(Map<NodeRef<NullIfExpression>, Type> types)
+    {
+        this.nullIfComparisonTypes.putAll(types);
+    }
+
+    public Type getNullIfComparisonType(NullIfExpression expression)
+    {
+        return nullIfComparisonTypes.get(NodeRef.of(expression));
     }
 
     public Type getSortKeyCoercionForFrameBoundCalculation(Expression frameOffset)
@@ -875,16 +894,6 @@ public class Analysis
         return insert;
     }
 
-    public void setUpdatedColumns(List<ColumnSchema> updatedColumns)
-    {
-        this.updatedColumns = Optional.of(updatedColumns);
-    }
-
-    public Optional<List<ColumnSchema>> getUpdatedColumns()
-    {
-        return updatedColumns;
-    }
-
     public Optional<MergeAnalysis> getMergeAnalysis()
     {
         return mergeAnalysis;
@@ -905,16 +914,6 @@ public class Analysis
         return refreshMaterializedView;
     }
 
-    public void setDelegatedRefreshMaterializedView(QualifiedObjectName viewName)
-    {
-        this.delegatedRefreshMaterializedView = Optional.of(viewName);
-    }
-
-    public Optional<QualifiedObjectName> getDelegatedRefreshMaterializedView()
-    {
-        return delegatedRefreshMaterializedView;
-    }
-
     public Query getNamedQuery(Table table)
     {
         return namedQueries.get(NodeRef.of(table));
@@ -926,6 +925,21 @@ public class Analysis
         requireNonNull(query, "query is null");
 
         namedQueries.put(NodeRef.of(tableReference), query);
+    }
+
+    public void registerPivotAnalysis(Pivot pivot, PivotAnalysis analysis)
+    {
+        requireNonNull(pivot, "pivot is null");
+        requireNonNull(analysis, "analysis is null");
+
+        pivotAnalyses.put(NodeRef.of(pivot), analysis);
+    }
+
+    public PivotAnalysis getPivotAnalysis(Pivot pivot)
+    {
+        PivotAnalysis analysis = pivotAnalyses.get(NodeRef.of(pivot));
+        checkArgument(analysis != null, "pivot has no analysis registered: %s", pivot);
+        return analysis;
     }
 
     public void registerExpandableQuery(Query query, Node recursiveReference)
@@ -1148,6 +1162,62 @@ public class Analysis
     public JsonPathAnalysis getJsonPathAnalysis(Node node)
     {
         return jsonPathAnalyses.get(NodeRef.of(node));
+    }
+
+    public void setJsonSimplifiedAccessor(Expression expression, JsonSimplifiedAccessor recipe)
+    {
+        jsonSimplifiedAccessors.put(NodeRef.of(expression), recipe);
+    }
+
+    public Optional<JsonSimplifiedAccessor> getJsonSimplifiedAccessor(Expression expression)
+    {
+        return Optional.ofNullable(jsonSimplifiedAccessors.get(NodeRef.of(expression)));
+    }
+
+    public sealed interface JsonSimplifiedAccessor
+            permits JsonSimplifiedAccessor.Query, JsonSimplifiedAccessor.Value
+    {
+        ResolvedField column();
+
+        JsonPathAnalysis pathAnalysis();
+
+        ResolvedFunction inputFunction();
+
+        record Query(
+                ResolvedField column,
+                JsonPathAnalysis pathAnalysis,
+                ResolvedFunction inputFunction,
+                ResolvedFunction queryFunction,
+                ResolvedFunction outputFunction)
+                implements JsonSimplifiedAccessor
+        {
+            public Query
+            {
+                requireNonNull(column, "column is null");
+                requireNonNull(pathAnalysis, "pathAnalysis is null");
+                requireNonNull(inputFunction, "inputFunction is null");
+                requireNonNull(queryFunction, "queryFunction is null");
+                requireNonNull(outputFunction, "outputFunction is null");
+            }
+        }
+
+        record Value(
+                ResolvedField column,
+                JsonPathAnalysis pathAnalysis,
+                ResolvedFunction inputFunction,
+                ResolvedFunction valueFunction,
+                Type returnedType)
+                implements JsonSimplifiedAccessor
+        {
+            public Value
+            {
+                requireNonNull(column, "column is null");
+                requireNonNull(pathAnalysis, "pathAnalysis is null");
+                requireNonNull(inputFunction, "inputFunction is null");
+                requireNonNull(valueFunction, "valueFunction is null");
+                requireNonNull(returnedType, "returnedType is null");
+            }
+        }
     }
 
     public void setJsonInputFunctions(Map<NodeRef<Expression>, ResolvedFunction> functions)
@@ -1384,14 +1454,14 @@ public class Analysis
         return implicitFromScopes.get(NodeRef.of(node));
     }
 
-    public void addPredicateCoercions(Map<NodeRef<Expression>, PredicateCoercions> coercions)
+    public void addPredicateCoercions(Map<NodeRef<Predicate>, PredicateCoercions> coercions)
     {
         predicateCoercions.putAll(coercions);
     }
 
-    public PredicateCoercions getPredicateCoercions(Expression expression)
+    public PredicateCoercions getPredicateCoercions(Predicate predicate)
     {
-        return predicateCoercions.get(NodeRef.of(expression));
+        return predicateCoercions.get(NodeRef.of(predicate));
     }
 
     public void setTableExecuteHandle(TableExecuteHandle tableExecuteHandle)
@@ -1404,6 +1474,18 @@ public class Analysis
     public Optional<TableExecuteHandle> getTableExecuteHandle()
     {
         return tableExecuteHandle;
+    }
+
+    public void setTableExecuteTable(Table table)
+    {
+        requireNonNull(table, "table is null");
+        checkState(this.tableExecuteTable.isEmpty(), "tableExecuteTable already set");
+        this.tableExecuteTable = Optional.of(table);
+    }
+
+    public Table getTableExecuteTable()
+    {
+        return tableExecuteTable.orElseThrow(() -> new IllegalStateException("tableExecuteTable not set"));
     }
 
     public void setTableFunctionAnalysis(TableFunctionInvocation node, TableFunctionInvocationAnalysis analysis)
@@ -1776,6 +1858,29 @@ public class Analysis
         }
     }
 
+    public record PivotAnalysis(
+            GroupingSetAnalysis groupingSetAnalysis,
+            boolean distinctGroupingSets,
+            List<PivotOutputColumn> outputColumns,
+            List<FunctionCall> aggregates)
+    {
+        public PivotAnalysis
+        {
+            requireNonNull(groupingSetAnalysis, "groupingSetAnalysis is null");
+            outputColumns = ImmutableList.copyOf(outputColumns);
+            aggregates = ImmutableList.copyOf(aggregates);
+        }
+    }
+
+    public record PivotOutputColumn(String name, Type type)
+    {
+        public PivotOutputColumn
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(type, "type is null");
+        }
+    }
+
     public static class UnnestAnalysis
     {
         private final Map<NodeRef<Expression>, List<Field>> mappings;
@@ -1803,14 +1908,16 @@ public class Analysis
 
     public static class SubqueryAnalysis
     {
-        private final List<InPredicate> inPredicatesSubqueries = new ArrayList<>();
+        private final List<OperandAndPredicate> inPredicates = new ArrayList<>();
         private final List<SubqueryExpression> subqueries = new ArrayList<>();
         private final List<ExistsPredicate> existsSubqueries = new ArrayList<>();
-        private final List<QuantifiedComparisonExpression> quantifiedComparisonSubqueries = new ArrayList<>();
+        private final List<OperandAndPredicate> quantifiedComparisons = new ArrayList<>();
+        private final List<OperandAndPredicate> matchPredicates = new ArrayList<>();
+        private final List<UniquePredicate> uniquePredicates = new ArrayList<>();
 
-        public void addInPredicates(List<InPredicate> expressions)
+        public void addInPredicates(List<OperandAndPredicate> predicates)
         {
-            inPredicatesSubqueries.addAll(expressions);
+            inPredicates.addAll(predicates);
         }
 
         public void addSubqueries(List<SubqueryExpression> expressions)
@@ -1823,14 +1930,24 @@ public class Analysis
             existsSubqueries.addAll(expressions);
         }
 
-        public void addQuantifiedComparisons(List<QuantifiedComparisonExpression> expressions)
+        public void addQuantifiedComparisons(List<OperandAndPredicate> predicates)
         {
-            quantifiedComparisonSubqueries.addAll(expressions);
+            quantifiedComparisons.addAll(predicates);
         }
 
-        public List<InPredicate> getInPredicatesSubqueries()
+        public void addMatchPredicates(List<OperandAndPredicate> predicates)
         {
-            return unmodifiableList(inPredicatesSubqueries);
+            matchPredicates.addAll(predicates);
+        }
+
+        public void addUniquePredicates(List<UniquePredicate> expressions)
+        {
+            uniquePredicates.addAll(expressions);
+        }
+
+        public List<OperandAndPredicate> getInPredicates()
+        {
+            return unmodifiableList(inPredicates);
         }
 
         public List<SubqueryExpression> getSubqueries()
@@ -1843,9 +1960,32 @@ public class Analysis
             return unmodifiableList(existsSubqueries);
         }
 
-        public List<QuantifiedComparisonExpression> getQuantifiedComparisonSubqueries()
+        public List<OperandAndPredicate> getQuantifiedComparisons()
         {
-            return unmodifiableList(quantifiedComparisonSubqueries);
+            return unmodifiableList(quantifiedComparisons);
+        }
+
+        public List<OperandAndPredicate> getMatchPredicates()
+        {
+            return unmodifiableList(matchPredicates);
+        }
+
+        public List<UniquePredicate> getUniquePredicates()
+        {
+            return unmodifiableList(uniquePredicates);
+        }
+    }
+
+    /// A relational subquery predicate (`InPredicate` or `QuantifiedComparisonPredicate`) paired
+    /// with its operand. Unifies the regular `Predicated(value, predicate)` case and the F262
+    /// extended-CASE case (operand from the surrounding CASE expression, predicate from the
+    /// WHEN clause). The same shape covers both — planning consumes them uniformly.
+    public record OperandAndPredicate(Expression operand, Predicate predicate)
+    {
+        public OperandAndPredicate
+        {
+            requireNonNull(operand, "operand is null");
+            requireNonNull(predicate, "predicate is null");
         }
     }
 
@@ -2668,7 +2808,7 @@ public class Analysis
     }
 
     public record NearestAnalysis(
-            ComparisonExpression.Operator operator,
+            ComparisonPredicate.Operator operator,
             Expression candidateExpression)
     {
         public NearestAnalysis

@@ -22,7 +22,7 @@ import io.trino.spi.function.FunctionId;
 import io.trino.spi.function.FunctionKind;
 import io.trino.spi.function.FunctionNullability;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
 
 import java.util.Map;
 import java.util.Set;
@@ -38,7 +38,7 @@ public record ResolvedFunction(
         boolean deterministic,
         boolean neverFails,
         FunctionNullability functionNullability,
-        Map<TypeSignature, Type> typeDependencies,
+        Map<TypeDescriptor, Type> typeDependencies,
         Set<ResolvedFunction> functionDependencies)
 {
     public ResolvedFunction
@@ -56,6 +56,34 @@ public record ResolvedFunction(
     public CatalogSchemaFunctionName name()
     {
         return signature().getName();
+    }
+
+    @Override
+    public int hashCode()
+    {
+        // equal instances share the function id, which is cheap to hash
+        return functionId.hashCode();
+    }
+
+    @Override
+    public boolean equals(Object object)
+    {
+        if (this == object) {
+            return true;
+        }
+        if (object == null || getClass() != object.getClass()) {
+            return false;
+        }
+        ResolvedFunction other = (ResolvedFunction) object;
+        return functionId.equals(other.functionId) &&
+                deterministic == other.deterministic &&
+                neverFails == other.neverFails &&
+                functionKind == other.functionKind &&
+                signature.equals(other.signature) &&
+                catalogHandle.equals(other.catalogHandle) &&
+                functionNullability.equals(other.functionNullability) &&
+                typeDependencies.equals(other.typeDependencies) &&
+                functionDependencies.equals(other.functionDependencies);
     }
 
     @Override

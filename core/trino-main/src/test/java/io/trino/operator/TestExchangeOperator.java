@@ -58,10 +58,11 @@ import static io.trino.cache.SafeCaches.buildNonEvictableCacheWithWeakInvalidate
 import static io.trino.execution.buffer.CompressionCodec.LZ4;
 import static io.trino.execution.buffer.TestingPagesSerdes.createTestingPagesSerdeFactory;
 import static io.trino.operator.ExchangeOperator.REMOTE_CATALOG_HANDLE;
-import static io.trino.operator.PageAssertions.assertPageEquals;
+import static io.trino.operator.PageAssertions.assertPagesEqual;
 import static io.trino.operator.TestingTaskBuffer.PAGE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
+import static java.util.Collections.nCopies;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -101,6 +102,7 @@ public class TestExchangeOperator
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, MEGABYTE)),
                 DataSize.of(10, MEGABYTE),
+                DataSize.of(32, MEGABYTE),
                 3,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
@@ -327,10 +329,7 @@ public class TestExchangeOperator
         assertThat(operator.getOutput()).isNull();
 
         // verify pages
-        assertThat(outputPages).hasSize(expectedPageCount);
-        for (Page page : outputPages) {
-            assertPageEquals(TYPES, page, PAGE);
-        }
+        assertPagesEqual(TYPES, outputPages, nCopies(expectedPageCount, PAGE));
 
         return outputPages;
     }

@@ -18,9 +18,9 @@ import io.trino.metastore.PrincipalPrivileges;
 import io.trino.metastore.Table;
 import io.trino.metastore.cache.CachingHiveMetastore;
 import io.trino.plugin.hive.metastore.MetastoreUtil;
-import io.trino.plugin.iceberg.CreateTableException;
 import io.trino.plugin.iceberg.UnknownTableTypeException;
 import io.trino.plugin.iceberg.catalog.AbstractIcebergTableOperations;
+import io.trino.plugin.iceberg.encryption.EncryptionManagerFactory;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.TableNotFoundException;
@@ -62,20 +62,20 @@ public abstract class AbstractMetastoreTableOperations
             String database,
             String table,
             Optional<String> owner,
-            Optional<String> location)
+            Optional<String> location,
+            EncryptionManagerFactory encryptionManagerFactory)
     {
-        super(fileIo, session, database, table, owner, location);
+        super(fileIo, session, database, table, owner, location, encryptionManagerFactory);
         this.metastore = requireNonNull(metastore, "metastore is null");
     }
 
     @Override
     protected String getRefreshedLocation(boolean invalidateCaches)
     {
-        if (invalidateCaches) {
-            metastore.invalidateTable(database, tableName);
-        }
-
         boolean isMaterializedViewStorageTable = isMaterializedViewStorage(tableName);
+        if (invalidateCaches) {
+            metastore.invalidateTable(database, isMaterializedViewStorageTable ? tableNameFrom(tableName) : tableName);
+        }
 
         Table table;
         if (isMaterializedViewStorageTable) {
@@ -126,10 +126,11 @@ public abstract class AbstractMetastoreTableOperations
             metastore.createTable(table, privileges);
         }
         catch (Exception e) {
-            // clean up metadata file corresponding to the current transaction
-            io().deleteFile(newMetadataLocation);
-            // wrap exception in CleanableFailure to ensure that manifest list Avro files are also cleaned up
-            throw new CreateTableException(e, getSchemaTableName());
+            // The metastore call can fail even though the table was actually created, e.g. when the response is lost
+            // on a timeout, or when a retried request observes the table that the first (successful) attempt created
+            // and reports AlreadyExists. Deleting the new metadata file in that case would corrupt the just-created
+            // table, so the actual commit outcome is verified before any cleanup is performed.
+            checkNewTableCommit(newMetadataLocation, metadata, e);
         }
     }
 

@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.jmh.Benchmarks;
 import io.trino.metadata.TestingFunctionResolution;
-import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
@@ -45,6 +44,7 @@ import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.block.RowBlock.fromFieldBlocks;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -69,7 +69,6 @@ public class BenchmarkRowToRowCast
     {
         return ImmutableList.copyOf(data.getPageProcessor().process(
                 SESSION,
-                new DriverYieldSignal(),
                 newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
                 SourcePage.create(data.getPage())));
     }
@@ -95,7 +94,7 @@ public class BenchmarkRowToRowCast
                     new Reference(fromRowType, "$col_0")));
 
             pageProcessor = functionResolution.getExpressionCompiler()
-                    .compilePageProcessor(Optional.empty(), projections, ImmutableMap.of(new Symbol(fromRowType, "$col_0"), 0))
+                    .compilePageProcessor(TEST_SESSION, Optional.empty(), projections, ImmutableMap.of(new Symbol(fromRowType, "$col_0"), 0))
                     .get();
 
             Block[] fieldBlocks = fromFieldTypes.stream()

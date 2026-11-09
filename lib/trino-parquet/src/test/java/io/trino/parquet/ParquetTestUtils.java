@@ -44,11 +44,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
+import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfUnchecked;
@@ -62,6 +62,11 @@ import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.spi.block.ArrayBlock.fromElementBlock;
+import static io.trino.spi.block.Bitmap.allocateWords;
+import static io.trino.spi.block.Bitmap.clear;
+import static io.trino.spi.block.Bitmap.isSet;
+import static io.trino.spi.block.Bitmap.set;
+import static io.trino.spi.block.Bitmap.wordsForBits;
 import static io.trino.spi.block.MapBlock.fromKeyValueBlock;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
@@ -78,14 +83,25 @@ public class ParquetTestUtils
     public static Slice writeParquetFile(ParquetWriterOptions writerOptions, List<Type> types, List<String> columnNames, List<Page> inputPages)
             throws IOException
     {
-        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-        ParquetWriter writer = createParquetWriter(outputStream, writerOptions, types, columnNames, CompressionCodec.SNAPPY);
+        checkArgument(types.size() == columnNames.size());
+        ParquetSchemaConverter schemaConverter = new ParquetSchemaConverter(types, columnNames, false, false);
+        return writeParquetFile(writerOptions, schemaConverter.getMessageType(), schemaConverter.getPrimitiveTypes(), inputPages);
+    }
 
-        for (Page inputPage : inputPages) {
-            checkArgument(types.size() == inputPage.getChannelCount());
-            writer.write(inputPage);
+    /**
+     * Writes the pages with an explicit Parquet schema, for types that {@link ParquetSchemaConverter} does not map, like VARIANT.
+     * {@code primitiveTypes} maps the path of each primitive column to its Trino type, except for VARIANT leaves.
+     */
+    public static Slice writeParquetFile(ParquetWriterOptions writerOptions, MessageType messageType, Map<List<String>, Type> primitiveTypes, List<Page> inputPages)
+            throws IOException
+    {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        try (ParquetWriter writer = createParquetWriter(outputStream, writerOptions, messageType, primitiveTypes, CompressionCodec.SNAPPY)) {
+            for (Page inputPage : inputPages) {
+                checkArgument(messageType.getFieldCount() == inputPage.getChannelCount());
+                writer.write(inputPage);
+            }
         }
-        writer.close();
         return Slices.wrappedBuffer(outputStream.toByteArray());
     }
 
@@ -93,10 +109,15 @@ public class ParquetTestUtils
     {
         checkArgument(types.size() == columnNames.size());
         ParquetSchemaConverter schemaConverter = new ParquetSchemaConverter(types, columnNames, false, false);
+        return createParquetWriter(outputStream, writerOptions, schemaConverter.getMessageType(), schemaConverter.getPrimitiveTypes(), compression);
+    }
+
+    private static ParquetWriter createParquetWriter(OutputStream outputStream, ParquetWriterOptions writerOptions, MessageType messageType, Map<List<String>, Type> primitiveTypes, CompressionCodec compression)
+    {
         return new ParquetWriter(
                 outputStream,
-                schemaConverter.getMessageType(),
-                schemaConverter.getPrimitiveTypes(),
+                messageType,
+                primitiveTypes,
                 writerOptions,
                 compression,
                 "test-version",
@@ -135,6 +156,54 @@ public class ParquetTestUtils
             TupleDomain<String> predicate)
             throws IOException
     {
+        return createParquetReader(input, parquetMetadata, options, memoryContext, types, columnNames, predicate, false);
+    }
+
+    public static ParquetReader createParquetReader(
+            ParquetDataSource input,
+            ParquetMetadata parquetMetadata,
+            ParquetReaderOptions options,
+            AggregatedMemoryContext memoryContext,
+            List<Type> types,
+            List<String> columnNames,
+            TupleDomain<String> predicate,
+            boolean forceSelectedPositionsPushdown)
+            throws IOException
+    {
+        return createParquetReader(input, parquetMetadata, options, memoryContext, types, columnNames, predicate, forceSelectedPositionsPushdown, UTC);
+    }
+
+    public static ParquetReader createParquetReader(
+            ParquetDataSource input,
+            ParquetMetadata parquetMetadata,
+            ParquetReaderOptions options,
+            AggregatedMemoryContext memoryContext,
+            List<Type> types,
+            List<String> columnNames,
+            TupleDomain<String> predicate,
+            boolean forceSelectedPositionsPushdown,
+            DateTimeZone timeZone)
+            throws IOException
+    {
+        return createParquetReader(input, parquetMetadata, options, memoryContext, types, columnNames, predicate, forceSelectedPositionsPushdown, timeZone, exception -> {
+            throwIfUnchecked(exception);
+            return new RuntimeException(exception);
+        });
+    }
+
+    public static ParquetReader createParquetReader(
+            ParquetDataSource input,
+            ParquetMetadata parquetMetadata,
+            ParquetReaderOptions options,
+            AggregatedMemoryContext memoryContext,
+            List<Type> types,
+            List<String> columnNames,
+            TupleDomain<String> predicate,
+            boolean forceSelectedPositionsPushdown,
+            DateTimeZone timeZone,
+            Function<Exception, RuntimeException> exceptionTransform)
+            throws IOException
+    {
         FileMetadata fileMetaData = parquetMetadata.getFileMetaData();
         MessageType fileSchema = fileMetaData.getSchema();
         MessageColumnIO messageColumnIO = getColumnIO(fileSchema, fileSchema);
@@ -150,7 +219,7 @@ public class ParquetTestUtils
         Map<List<String>, ColumnDescriptor> descriptorsByPath = getDescriptors(fileSchema, fileSchema);
         TupleDomain<ColumnDescriptor> parquetTupleDomain = predicate.transformKeys(
                 columnName -> descriptorsByPath.get(ImmutableList.of(columnName.toLowerCase(ENGLISH))));
-        TupleDomainParquetPredicate parquetPredicate = buildPredicate(fileSchema, parquetTupleDomain, descriptorsByPath, UTC);
+        TupleDomainParquetPredicate parquetPredicate = buildPredicate(fileSchema, parquetTupleDomain, descriptorsByPath, timeZone);
         List<RowGroupInfo> rowGroups = getFilteredRowGroups(
                 0,
                 input.getEstimatedSize(),
@@ -159,7 +228,7 @@ public class ParquetTestUtils
                 ImmutableList.of(parquetTupleDomain),
                 ImmutableList.of(parquetPredicate),
                 descriptorsByPath,
-                UTC,
+                timeZone,
                 1000,
                 options);
         return new ParquetReader(
@@ -168,16 +237,14 @@ public class ParquetTestUtils
                 false,
                 rowGroups,
                 input,
-                UTC,
+                timeZone,
                 memoryContext,
                 options,
-                exception -> {
-                    throwIfUnchecked(exception);
-                    return new RuntimeException(exception);
-                },
+                exceptionTransform,
                 Optional.of(parquetPredicate),
                 Optional.empty(),
-                Optional.empty());
+                Optional.empty(),
+                forceSelectedPositionsPushdown);
     }
 
     public static List<Page> generateInputPages(List<Type> types, int positionsPerPage, int pageCount)
@@ -219,49 +286,49 @@ public class ParquetTestUtils
         return groupsBuilder.build();
     }
 
-    public static RowBlock createRowBlock(Optional<boolean[]> rowIsNull, int positionCount)
+    public static RowBlock createRowBlock(Optional<long[]> rowIsValid, int positionCount)
     {
         // TODO test with nested null fields and without nulls
         Block[] fieldBlocks = new Block[4];
         // no nulls block
-        fieldBlocks[0] = new LongArrayBlock(positionCount, rowIsNull, new long[positionCount]);
+        fieldBlocks[0] = new LongArrayBlock(positionCount, rowIsValid, new long[positionCount]);
         // no nulls with mayHaveNull block
-        fieldBlocks[1] = new LongArrayBlock(positionCount, rowIsNull.or(() -> Optional.of(new boolean[positionCount])), new long[positionCount]);
+        fieldBlocks[1] = new LongArrayBlock(positionCount, rowIsValid.or(() -> Optional.of(allValid(positionCount))), new long[positionCount]);
         // all nulls block
-        boolean[] allNulls = new boolean[positionCount];
-        Arrays.fill(allNulls, true);
-        fieldBlocks[2] = new LongArrayBlock(positionCount, Optional.of(allNulls), new long[positionCount]);
+        fieldBlocks[2] = new LongArrayBlock(positionCount, Optional.of(new long[wordsForBits(positionCount)]), new long[positionCount]);
         // random nulls block
-        boolean[] valueIsNull = rowIsNull.map(boolean[]::clone).orElseGet(() -> new boolean[positionCount]);
+        long[] valueIsValid = rowIsValid.map(long[]::clone).orElseGet(() -> allValid(positionCount));
         for (int i = 0; i < positionCount; i++) {
-            valueIsNull[i] |= RANDOM.nextBoolean();
+            if (RANDOM.nextBoolean()) {
+                clear(valueIsValid, 0, i);
+            }
         }
-        fieldBlocks[3] = new LongArrayBlock(positionCount, Optional.of(valueIsNull), new long[positionCount]);
+        fieldBlocks[3] = new LongArrayBlock(positionCount, Optional.of(valueIsValid), new long[positionCount]);
 
-        return RowBlock.fromNotNullSuppressedFieldBlocks(positionCount, rowIsNull, fieldBlocks);
+        return RowBlock.fromNotNullSuppressedFieldBlocks(positionCount, rowIsValid, fieldBlocks);
     }
 
-    public static Block createArrayBlock(Optional<boolean[]> valueIsNull, int positionCount)
+    public static Block createArrayBlock(Optional<long[]> valueIsValid, int positionCount)
     {
-        int[] arrayOffset = generateOffsets(valueIsNull, positionCount);
-        return fromElementBlock(positionCount, valueIsNull, arrayOffset, createLongsBlockWithRandomNulls(arrayOffset[positionCount]));
+        int[] arrayOffset = generateOffsets(valueIsValid, positionCount);
+        return fromElementBlock(positionCount, valueIsValid, arrayOffset, createLongsBlockWithRandomNulls(arrayOffset[positionCount]));
     }
 
-    public static Block createMapBlock(Optional<boolean[]> mapIsNull, int positionCount)
+    public static Block createMapBlock(Optional<long[]> mapIsValid, int positionCount)
     {
-        int[] offsets = generateOffsets(mapIsNull, positionCount);
+        int[] offsets = generateOffsets(mapIsValid, positionCount);
         int entriesCount = offsets[positionCount];
         Block keyBlock = new LongArrayBlock(entriesCount, Optional.empty(), new long[entriesCount]);
         Block valueBlock = createLongsBlockWithRandomNulls(entriesCount);
-        return fromKeyValueBlock(mapIsNull, offsets, keyBlock, valueBlock, new MapType(BIGINT, BIGINT, TYPE_OPERATORS));
+        return fromKeyValueBlock(mapIsValid, offsets, keyBlock, valueBlock, new MapType(BIGINT, BIGINT, TYPE_OPERATORS));
     }
 
-    public static int[] generateOffsets(Optional<boolean[]> valueIsNull, int positionCount)
+    public static int[] generateOffsets(Optional<long[]> valueIsValid, int positionCount)
     {
         int maxCardinality = 7; // array length or map size at the current position
         int[] offsets = new int[positionCount + 1];
         for (int position = 0; position < positionCount; position++) {
-            if (valueIsNull.isPresent() && valueIsNull.get()[position]) {
+            if (valueIsValid.isPresent() && !isSet(valueIsValid.get(), 0, position)) {
                 offsets[position + 1] = offsets[position];
             }
             else {
@@ -273,11 +340,19 @@ public class ParquetTestUtils
 
     private static Block createLongsBlockWithRandomNulls(int positionCount)
     {
-        boolean[] valueIsNull = new boolean[positionCount];
+        long[] valueIsValid = new long[wordsForBits(positionCount)];
         for (int i = 0; i < positionCount; i++) {
-            valueIsNull[i] = RANDOM.nextBoolean();
+            if (!RANDOM.nextBoolean()) {
+                set(valueIsValid, 0, i);
+            }
         }
-        return new LongArrayBlock(positionCount, Optional.of(valueIsNull), new long[positionCount]);
+        return new LongArrayBlock(positionCount, Optional.of(valueIsValid), new long[positionCount]);
+    }
+
+    private static long[] allValid(int positionCount)
+    {
+        long[] valueIsValid = allocateWords(positionCount, true);
+        return valueIsValid;
     }
 
     private static Block generateBlock(Type type, int positions)

@@ -15,27 +15,35 @@ package io.trino.plugin.iceberg.catalog;
 
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
+import io.airlift.log.Logger;
 import io.trino.annotation.NotThreadSafe;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.metastore.Column;
 import io.trino.metastore.HiveType;
 import io.trino.metastore.StorageFormat;
+import io.trino.plugin.iceberg.CreateTableException;
 import io.trino.plugin.iceberg.IcebergExceptions;
+import io.trino.plugin.iceberg.UnknownTableTypeException;
+import io.trino.plugin.iceberg.encryption.EncryptionManagerFactory;
 import io.trino.plugin.iceberg.util.HiveSchemaUtil;
-import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.TableNotFoundException;
 import jakarta.annotation.Nullable;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableMetadataParser;
+import org.apache.iceberg.encryption.EncryptedKey;
+import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.exceptions.CommitFailedException;
+import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.types.Types.NestedField;
 
-import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -49,7 +57,6 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.hive.formats.HiveClassNames.FILE_INPUT_FORMAT_CLASS;
 import static io.trino.hive.formats.HiveClassNames.FILE_OUTPUT_FORMAT_CLASS;
 import static io.trino.hive.formats.HiveClassNames.LAZY_SIMPLE_SERDE_CLASS;
-import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_INVALID_METADATA;
 import static io.trino.plugin.iceberg.IcebergExceptions.translateMetadataException;
 import static io.trino.plugin.iceberg.IcebergTableName.isMaterializedViewStorage;
 import static io.trino.plugin.iceberg.IcebergUtil.METADATA_FOLDER_NAME;
@@ -74,6 +81,8 @@ import static org.apache.iceberg.util.LocationUtil.stripTrailingSlash;
 public abstract class AbstractIcebergTableOperations
         implements IcebergTableOperations
 {
+    private static final Logger log = Logger.get(AbstractIcebergTableOperations.class);
+
     public static final StorageFormat ICEBERG_METASTORE_STORAGE_FORMAT = StorageFormat.create(
             LAZY_SIMPLE_SERDE_CLASS,
             FILE_INPUT_FORMAT_CLASS,
@@ -85,12 +94,17 @@ public abstract class AbstractIcebergTableOperations
     protected final Optional<String> owner;
     protected final Optional<String> location;
     private final FileIO fileIo;
+    private final EncryptionManagerFactory encryptionManagerFactory;
 
     protected TableMetadata currentMetadata;
     protected String currentMetadataLocation;
     protected boolean shouldRefresh = true;
     protected OptionalInt version = OptionalInt.empty();
     protected Optional<MaterializedViewCommitData> materializedViewCommitData = Optional.empty();
+    private Map<String, String> encryptionProperties = Map.of();
+    private List<EncryptedKey> encryptionKeys = List.of();
+    private EncryptionManager encryptionManager = PlaintextEncryptionManager.instance();
+    private FileIO effectiveFileIo;
 
     protected AbstractIcebergTableOperations(
             FileIO fileIo,
@@ -98,7 +112,8 @@ public abstract class AbstractIcebergTableOperations
             String database,
             String table,
             Optional<String> owner,
-            Optional<String> location)
+            Optional<String> location,
+            EncryptionManagerFactory encryptionManagerFactory)
     {
         this.fileIo = requireNonNull(fileIo, "fileIo is null");
         this.session = requireNonNull(session, "session is null");
@@ -106,6 +121,8 @@ public abstract class AbstractIcebergTableOperations
         this.tableName = requireNonNull(table, "table is null");
         this.owner = requireNonNull(owner, "owner is null");
         this.location = requireNonNull(location, "location is null");
+        this.encryptionManagerFactory = requireNonNull(encryptionManagerFactory, "encryptionManagerFactory is null");
+        this.effectiveFileIo = fileIo;
     }
 
     @Override
@@ -116,6 +133,7 @@ public abstract class AbstractIcebergTableOperations
         currentMetadataLocation = tableMetadata.metadataFileLocation();
         shouldRefresh = false;
         version = OptionalInt.of(parseVersion(Location.of(currentMetadataLocation).fileName()));
+        updateEncryptionManager(tableMetadata);
     }
 
     @Override
@@ -198,7 +216,13 @@ public abstract class AbstractIcebergTableOperations
     @Override
     public FileIO io()
     {
-        return fileIo;
+        return effectiveFileIo;
+    }
+
+    @Override
+    public EncryptionManager encryption()
+    {
+        return encryptionManager;
     }
 
     @Override
@@ -226,9 +250,98 @@ public abstract class AbstractIcebergTableOperations
         return getLocationProvider(getSchemaTableName(), metadata.location(), metadata.properties());
     }
 
+    protected CreateTableException deleteOrphanedMetadata(String metadataLocation, Exception cause)
+    {
+        try {
+            io().deleteFile(metadataLocation);
+        }
+        catch (RuntimeException e) {
+            log.warn(e, "Failed to clean up metadata file %s for table %s", metadataLocation, getSchemaTableName());
+        }
+        return new CreateTableException(cause, getSchemaTableName());
+    }
+
     protected SchemaTableName getSchemaTableName()
     {
         return new SchemaTableName(database, tableName);
+    }
+
+    protected void checkNewTableCommit(String newMetadataLocation, TableMetadata metadata, Exception failure)
+    {
+        String tableUuid = requireNonNull(metadata.uuid(), "tableUuid is null");
+        // A created table carries the UUID this operation assigned
+        CommitStatus status = checkCommitStatus(newMetadataLocation, committedMetadata -> tableUuid.equals(committedMetadata.uuid()) ? CommitStatus.SUCCESS : CommitStatus.FAILURE);
+        switch (status) {
+            case SUCCESS -> log.warn(failure, "Received an error while creating table %s, but the table was actually created; treating the commit as successful", getSchemaTableName());
+            // Keeps every new file, since the table may exist.
+            case UNKNOWN -> throw new CommitStateUnknownException(failure);
+            // CreateTableException lets Iceberg also delete the manifest list and manifests.
+            case FAILURE -> throw deleteOrphanedMetadata(newMetadataLocation, failure);
+        }
+    }
+
+    protected void checkExistingTableCommit(String expectedMetadataLocation, String newMetadataLocation, boolean rejected, Exception failure)
+    {
+        CommitStatus status = checkCommitStatus(newMetadataLocation, committedMetadata -> {
+            if (isInMetadataHistory(committedMetadata, newMetadataLocation)) {
+                return CommitStatus.SUCCESS;
+            }
+            if (rejected && isInMetadataHistory(committedMetadata, expectedMetadataLocation)) {
+                return CommitStatus.FAILURE;
+            }
+            return CommitStatus.UNKNOWN;
+        });
+        switch (status) {
+            case SUCCESS -> log.warn(failure, "Received an error while committing to table %s, but the commit was actually applied; treating the commit as successful", getSchemaTableName());
+            // Keeps every new file, since the update may have been applied.
+            case UNKNOWN -> throw new CommitStateUnknownException(failure);
+            // CommitFailedException lets Iceberg retry; the new metadata file is left for remove_orphan_files.
+            case FAILURE -> throw new CommitFailedException(failure, "Failed to commit to table %s due to a concurrent update", getSchemaTableName());
+        }
+    }
+
+    /**
+     * Checks whether a failed commit was applied. It was when the catalog points at the metadata this operation wrote;
+     * otherwise {@code commitStatusFunction} decides from the metadata the catalog points at. A failed read gives
+     * {@link CommitStatus#UNKNOWN}, since deleting files the catalog still references cannot be undone.
+     */
+    private CommitStatus checkCommitStatus(String newMetadataLocation, Function<TableMetadata, CommitStatus> commitStatusFunction)
+    {
+        String committedLocation;
+        try {
+            committedLocation = fixBrokenMetadataLocation(getRefreshedLocation(true));
+        }
+        catch (TableNotFoundException | UnknownTableTypeException _) {
+            return CommitStatus.FAILURE;
+        }
+        catch (RuntimeException e) {
+            log.error(e, "Could not determine commit status for table %s; treating commit state as unknown", getSchemaTableName());
+            return CommitStatus.UNKNOWN;
+        }
+        if (newMetadataLocation.equals(committedLocation)) {
+            return CommitStatus.SUCCESS;
+        }
+        TableMetadata committedMetadata;
+        try {
+            committedMetadata = TableMetadataParser.read(io(), committedLocation);
+        }
+        catch (RuntimeException e) {
+            log.error(e, "Could not read current metadata %s of table %s to determine commit status; treating commit state as unknown", committedLocation, getSchemaTableName());
+            return CommitStatus.UNKNOWN;
+        }
+        return commitStatusFunction.apply(committedMetadata);
+    }
+
+    private static boolean isInMetadataHistory(TableMetadata metadata, String metadataLocation)
+    {
+        return metadataLocation.equals(metadata.metadataFileLocation()) || metadata.previousFiles().stream().anyMatch(entry -> metadataLocation.equals(entry.file()));
+    }
+
+    private enum CommitStatus
+    {
+        SUCCESS,
+        FAILURE,
+        UNKNOWN,
     }
 
     protected String writeNewMetadata(TableMetadata metadata, int newVersion)
@@ -273,9 +386,6 @@ public abstract class AbstractIcebergTableOperations
                             .build())
                     .get(() -> metadataLoader.apply(newLocation));
         }
-        catch (UncheckedIOException e) {
-            throw new TrinoException(ICEBERG_INVALID_METADATA, "Error accessing metadata file for table %s".formatted(getSchemaTableName().toString()), e);
-        }
         catch (Throwable failure) {
             throw translateMetadataException(failure, getSchemaTableName().toString());
         }
@@ -292,6 +402,7 @@ public abstract class AbstractIcebergTableOperations
         currentMetadataLocation = newLocation;
         version = OptionalInt.of(parseVersion(Location.of(newLocation).fileName()));
         shouldRefresh = false;
+        updateEncryptionManager(newMetadata);
     }
 
     protected static String newTableMetadataFilePath(TableMetadata meta, int newVersion)
@@ -318,5 +429,23 @@ public abstract class AbstractIcebergTableOperations
                         Optional.empty(),
                         Map.of()))
                 .collect(toImmutableList());
+    }
+
+    private void updateEncryptionManager(TableMetadata metadata)
+    {
+        Map<String, String> newEncryptionProperties = metadata.properties();
+        List<EncryptedKey> newEncryptionKeys = metadata.encryptionKeys();
+        if (encryptionProperties.equals(newEncryptionProperties) && encryptionKeys.equals(newEncryptionKeys)) {
+            return;
+        }
+        encryptionProperties = newEncryptionProperties;
+        encryptionKeys = newEncryptionKeys;
+        encryptionManager = encryptionManagerFactory.create(newEncryptionKeys, newEncryptionProperties);
+        if (encryptionManager instanceof PlaintextEncryptionManager) {
+            effectiveFileIo = fileIo;
+        }
+        else {
+            effectiveFileIo = EncryptingFileIO.combine(fileIo, encryptionManager);
+        }
     }
 }

@@ -45,14 +45,14 @@ import static java.time.ZoneOffset.UTC;
 
 final class DateTimeParsing
 {
-    static final Pattern DATETIME_PATTERN = Pattern.compile("" +
+    static final Pattern DATETIME_PATTERN = Pattern.compile(
             "(?<year>[-+]?\\d{4,})-(?<month>\\d{1,2})-(?<day>\\d{1,2})" +
-            "( (?:(?<hour>\\d{1,2}):(?<minute>\\d{1,2})(?::(?<second>\\d{1,2})(?:\\.(?<fraction>\\d+))?)?)?" +
-            "\\s*(?<timezone>.+)?)?");
+                    "( (?:(?<hour>\\d{1,2}):(?<minute>\\d{1,2})(?::(?<second>\\d{1,2})(?:\\.(?<fraction>\\d+))?)?)?" +
+                    "\\s*(?<timezone>.+)?)?");
 
-    static final Pattern TIME_PATTERN = Pattern.compile("" +
+    static final Pattern TIME_PATTERN = Pattern.compile(
             "(?<hour>\\d{1,2}):(?<minute>\\d{1,2})(?::(?<second>\\d{1,2})(?:\\.(?<fraction>\\d+))?)?" +
-            "\\s*((?<sign>[+-])(?<offsetHour>\\d\\d):(?<offsetMinute>\\d\\d))?");
+                    "\\s*((?<sign>[+-])(?<offsetHour>\\d\\d):(?<offsetMinute>\\d\\d))?");
 
     private static final long[] POWERS_OF_TEN = {
             1L,
@@ -89,41 +89,6 @@ final class DateTimeParsing
     static int parseDate(String value)
     {
         return toIntExact(LocalDate.parse(value, DATE_FORMATTER).toEpochDay());
-    }
-
-    static long parseDayTimeInterval(String value)
-    {
-        boolean negative = value.startsWith("-");
-        if (negative) {
-            value = value.substring(1);
-        }
-
-        int dotIndex = value.indexOf('.');
-        long seconds;
-        long millis;
-        if (dotIndex >= 0) {
-            seconds = Long.parseLong(value.substring(0, dotIndex));
-            String fraction = value.substring(dotIndex + 1);
-            if (fraction.length() > 3) {
-                fraction = fraction.substring(0, 3);
-            }
-            while (fraction.length() < 3) {
-                fraction = fraction + "0";
-            }
-            millis = Long.parseLong(fraction);
-        }
-        else {
-            seconds = Long.parseLong(value);
-            millis = 0;
-        }
-
-        long result = seconds * 1000 + millis;
-        return negative ? -result : result;
-    }
-
-    static long parseYearMonthInterval(String value)
-    {
-        return Long.parseLong(value);
     }
 
     static Object parseTimestamp(int precision, String value)
@@ -353,7 +318,7 @@ final class DateTimeParsing
             fractionValue = Long.parseLong(fraction);
         }
 
-        long picos = (((hour * 60) + minute) * 60 + second) * PICOSECONDS_PER_SECOND + rescale(fractionValue, precision, 12);
+        long picos = (((hour * 60L) + minute) * 60 + second) * PICOSECONDS_PER_SECOND + rescale(fractionValue, precision, 12);
         return new LongTimeWithTimeZone(picos, (offsetSign * (offsetHour * 60 + offsetMinute)));
     }
 
@@ -373,7 +338,7 @@ final class DateTimeParsing
             throw new IllegalArgumentException("Invalid TIMESTAMP due to daylight savings transition");
         }
 
-        return timestamp.toEpochSecond(offsets.get(0));
+        return timestamp.toEpochSecond(offsets.getFirst());
     }
 
     private static LongTimestamp longTimestamp(long epochSecond, long fractionInPicos)

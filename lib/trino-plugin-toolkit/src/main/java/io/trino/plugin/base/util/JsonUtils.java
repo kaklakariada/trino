@@ -88,11 +88,6 @@ public final class JsonUtils
         return parseJson(mapper, JsonMapper::createParser, jsonBytes, javaType);
     }
 
-    public static <T> T parseJson(InputStream inputStream, Class<T> javaType)
-    {
-        return parseJson(JSON_MAPPER, inputStream, javaType);
-    }
-
     public static <T> T parseJson(JsonMapper mapper, InputStream inputStream, Class<T> javaType)
     {
         return parseJson(mapper, JsonMapper::createParser, inputStream, javaType);
@@ -105,9 +100,7 @@ public final class JsonUtils
         requireNonNull(input, "input is null");
         requireNonNull(javaType, "javaType is null");
         try (JsonParser parser = parserConstructor.createParser(mapper, input)) {
-            T value = mapper.readValue(parser, javaType);
-            checkArgument(parser.nextToken() == null, "Found characters after the expected end of input");
-            return value;
+            return mapper.readValue(parser, javaType);
         }
         catch (IOException e) {
             throw new UncheckedIOException("Could not parse JSON", e);

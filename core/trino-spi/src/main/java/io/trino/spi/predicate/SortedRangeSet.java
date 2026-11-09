@@ -16,12 +16,16 @@ package io.trino.spi.predicate;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.errorprone.annotations.DoNotCall;
+import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.UuidType;
+import io.trino.spi.type.VarbinaryType;
+import io.trino.spi.type.VarcharType;
 
 import java.lang.invoke.MethodHandle;
 import java.util.ArrayList;
@@ -50,8 +54,10 @@ import static io.trino.spi.predicate.SortedRangeSet.DiscreteSetMarker.NON_DISCRE
 import static io.trino.spi.predicate.SortedRangeSet.DiscreteSetMarker.UNKNOWN;
 import static io.trino.spi.predicate.Utils.TUPLE_DOMAIN_TYPE_OPERATORS;
 import static io.trino.spi.predicate.Utils.handleThrowable;
+import static io.trino.spi.type.TypeUtils.isDirectLongComparisonValidType;
 import static io.trino.spi.type.TypeUtils.isFloatingPointNaN;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
+import static io.trino.spi.type.TypeUtils.typeHasNaN;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
@@ -207,6 +213,13 @@ public final class SortedRangeSet
 
     private static SortedRangeSet fromUnorderedValuesBlock(Type type, Block block)
     {
+        if (isDirectLongComparisonValidType(type)) {
+            return fromUnorderedLongValuesBlock(type, block);
+        }
+        if (isSliceOrderedType(type)) {
+            return fromUnorderedSliceValuesBlock(type, block);
+        }
+
         // choice of placing unordered values first or last does not matter for this code
         MethodHandle comparisonOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getComparisonUnorderedLastOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION));
 
@@ -244,6 +257,87 @@ public final class SortedRangeSet
                 inclusive,
                 DictionaryBlock.create(dictionaryIndex, block, dictionary),
                 DISCRETE);
+    }
+
+    private static SortedRangeSet fromUnorderedLongValuesBlock(Type type, Block block)
+    {
+        long[] values = new long[block.getPositionCount()];
+        for (int position = 0; position < values.length; position++) {
+            values[position] = type.getLong(block, position);
+        }
+        Arrays.sort(values);
+
+        int distinctCount = values.length > 0 ? 1 : 0;
+        for (int i = 1; i < values.length; i++) {
+            if (values[i] != values[i - 1]) {
+                distinctCount++;
+            }
+        }
+
+        BlockBuilder builder = type.createBlockBuilder(null, distinctCount * 2);
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0 && values[i] == values[i - 1]) {
+                continue;
+            }
+            // each distinct value is both the low and the high bound of a single value range
+            type.writeLong(builder, values[i]);
+            type.writeLong(builder, values[i]);
+        }
+        Block ranges = builder.build();
+
+        boolean[] inclusive = new boolean[ranges.getPositionCount()];
+        Arrays.fill(inclusive, true);
+
+        return new SortedRangeSet(
+                type,
+                inclusive,
+                ranges,
+                DISCRETE);
+    }
+
+    private static SortedRangeSet fromSortedDistinctValues(Type type, Block distinctValues)
+    {
+        // each distinct value is both the low and the high bound of a single value range
+        int[] dictionary = new int[distinctValues.getPositionCount() * 2];
+        for (int i = 0; i < distinctValues.getPositionCount(); i++) {
+            dictionary[2 * i] = i;
+            dictionary[2 * i + 1] = i;
+        }
+        boolean[] inclusive = new boolean[dictionary.length];
+        Arrays.fill(inclusive, true);
+
+        return new SortedRangeSet(
+                type,
+                inclusive,
+                DictionaryBlock.create(dictionary.length, distinctValues, dictionary),
+                DISCRETE);
+    }
+
+    /**
+     * Types whose values order and compare equal exactly like their {@link Slice} values, unlike char.
+     */
+    private static boolean isSliceOrderedType(Type type)
+    {
+        return type instanceof VarcharType || type instanceof VarbinaryType || type instanceof UuidType;
+    }
+
+    private static SortedRangeSet fromUnorderedSliceValuesBlock(Type type, Block block)
+    {
+        Slice[] values = new Slice[block.getPositionCount()];
+        for (int position = 0; position < values.length; position++) {
+            values[position] = type.getSlice(block, position);
+        }
+        Arrays.sort(values);
+
+        BlockBuilder distinctValues = type.createBlockBuilder(null, values.length);
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0 && values[i].equals(values[i - 1])) {
+                continue;
+            }
+            type.writeSlice(distinctValues, values[i]);
+        }
+
+        return fromSortedDistinctValues(type, distinctValues.build());
     }
 
     /**
@@ -536,7 +630,15 @@ public final class SortedRangeSet
     }
 
     @Override
-    public SortedRangeSet intersect(ValueSet other)
+    public ValueSet intersect(ValueSet other)
+    {
+        if (other instanceof FloatingPointValueSet floatingPoint) {
+            return floatingPoint.intersect(this);
+        }
+        return intersect(checkCompatibility(other));
+    }
+
+    public SortedRangeSet intersect(SortedRangeSet other)
     {
         SortedRangeSet that = checkCompatibility(other);
 
@@ -802,6 +904,19 @@ public final class SortedRangeSet
     @Override
     public boolean overlaps(ValueSet other)
     {
+        if (other instanceof FloatingPointValueSet floatingPoint) {
+            return floatingPoint.overlaps(this);
+        }
+        if (typeHasNaN(type)) {
+            // An unbounded end and an inclusive infinity denote the same ordered values
+            return FloatingPointValueSet.fromRanges(this).overlaps(other);
+        }
+        return overlaps(checkCompatibility(other));
+    }
+
+    /// Compares the ranges of both sets without interpreting NaN membership.
+    boolean overlaps(SortedRangeSet other)
+    {
         SortedRangeSet that = checkCompatibility(other);
 
         if (this.isNone() || that.isNone()) {
@@ -931,7 +1046,17 @@ public final class SortedRangeSet
     }
 
     @Override
-    public SortedRangeSet union(Collection<ValueSet> valueSets)
+    public ValueSet union(Collection<ValueSet> valueSets)
+    {
+        // A union of proper subsets can cover every ordered value. Join them with explicit NaN
+        // membership, so the result does not become the all-values set, which includes NaN.
+        if (typeHasNaN(type) || valueSets.stream().anyMatch(FloatingPointValueSet.class::isInstance)) {
+            return FloatingPointValueSet.fromRanges(this).union(valueSets);
+        }
+        return unionRanges(valueSets.stream().map(this::checkCompatibility).toList());
+    }
+
+    SortedRangeSet unionRanges(Collection<SortedRangeSet> valueSets)
     {
         if (this.isAll()) {
             return this;
@@ -965,7 +1090,29 @@ public final class SortedRangeSet
     }
 
     @Override
-    public SortedRangeSet union(ValueSet other)
+    public ValueSet union(ValueSet other)
+    {
+        if (other instanceof FloatingPointValueSet floatingPoint) {
+            return floatingPoint.union(this);
+        }
+        if (typeHasNaN(type)) {
+            // See union(Collection)
+            return FloatingPointValueSet.fromRanges(this).union(other);
+        }
+        return union(checkCompatibility(other));
+    }
+
+    @Override
+    public ValueSet subtract(ValueSet other)
+    {
+        if (typeHasNaN(type) || other instanceof FloatingPointValueSet) {
+            // The complement of a proper subset excludes NaN even when this set includes it
+            return FloatingPointValueSet.fromRanges(this).subtract(other);
+        }
+        return intersect(other.complement());
+    }
+
+    public SortedRangeSet union(SortedRangeSet other)
     {
         SortedRangeSet that = checkCompatibility(other);
 
@@ -1140,6 +1287,16 @@ public final class SortedRangeSet
 
     @Override
     public boolean contains(ValueSet other)
+    {
+        // An unbounded end and an inclusive infinity denote the same ordered values
+        if (typeHasNaN(type) || other instanceof FloatingPointValueSet) {
+            return FloatingPointValueSet.fromRanges(this).contains(other);
+        }
+        return contains(checkCompatibility(other));
+    }
+
+    /// Compares the ranges of both sets without interpreting NaN membership.
+    boolean contains(SortedRangeSet other)
     {
         SortedRangeSet that = checkCompatibility(other);
 

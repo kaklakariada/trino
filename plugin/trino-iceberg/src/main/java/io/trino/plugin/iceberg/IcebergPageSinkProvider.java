@@ -32,6 +32,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.type.TypeManager;
 import org.apache.iceberg.MetadataColumns;
 import org.apache.iceberg.PartitionSpec;
@@ -62,6 +63,7 @@ public class IcebergPageSinkProvider
     private final DataSize sortingFileWriterBufferSize;
     private final int sortingFileWriterMaxOpenFiles;
     private final Optional<String> sortingFileWriterLocalStagingPath;
+    private final DataSize targetMaxFileSize;
     private final TypeManager typeManager;
     private final PageSorter pageSorter;
 
@@ -83,6 +85,7 @@ public class IcebergPageSinkProvider
         this.sortingFileWriterBufferSize = sortingFileWriterConfig.getWriterSortBufferSize();
         this.sortingFileWriterMaxOpenFiles = sortingFileWriterConfig.getMaxOpenSortFiles();
         this.sortingFileWriterLocalStagingPath = icebergConfig.getSortedWritingLocalStagingPath();
+        this.targetMaxFileSize = icebergConfig.getTargetMaxFileSize();
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.pageSorter = requireNonNull(pageSorter, "pageSorter is null");
     }
@@ -129,6 +132,7 @@ public class IcebergPageSinkProvider
                 maxPartitionsPerWriter(session),
                 tableHandle.sortFields(),
                 tableHandle.sortOrderId(),
+                targetMaxFileSize,
                 sortingFileWriterBufferSize,
                 sortingFileWriterMaxOpenFiles,
                 sortingFileWriterLocalStagingPath,
@@ -165,6 +169,7 @@ public class IcebergPageSinkProvider
                         maxPartitionsPerWriter(session),
                         optimizeHandle.sortFields(),
                         optimizeHandle.sortOrderId(),
+                        targetMaxFileSize,
                         sortingFileWriterBufferSize,
                         sortingFileWriterMaxOpenFiles,
                         sortingFileWriterLocalStagingPath,
@@ -179,7 +184,7 @@ public class IcebergPageSinkProvider
     }
 
     @Override
-    public ConnectorMergeSink createMergeSink(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorMergeTableHandle mergeHandle, Optional<ConnectorTableCredentials> tableCredentials, ConnectorPageSinkId pageSinkId)
+    public ConnectorMergeSink createMergeSink(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorMergeTableHandle mergeHandle, Optional<ConnectorTableCredentials> tableCredentials, ConnectorPageSinkId pageSinkId, MemoryContext memoryContext)
     {
         verify(tableCredentials.isPresent(), "tableCredentials is empty");
         IcebergMergeTableHandle merge = (IcebergMergeTableHandle) mergeHandle;
@@ -214,6 +219,7 @@ public class IcebergPageSinkProvider
                 tableHandle.storageProperties(),
                 partitionsSpecs,
                 pageSink,
-                schema.columns().size());
+                schema.columns().size(),
+                memoryContext);
     }
 }

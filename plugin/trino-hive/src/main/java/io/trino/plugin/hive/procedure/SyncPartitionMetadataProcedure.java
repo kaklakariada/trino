@@ -43,6 +43,7 @@ import io.trino.spi.procedure.Procedure.Argument;
 import java.io.IOException;
 import java.lang.invoke.MethodHandle;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -53,7 +54,11 @@ import static io.trino.plugin.base.util.Procedures.checkProcedureArgument;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_FILESYSTEM_ERROR;
 import static io.trino.plugin.hive.HiveMetadata.TRINO_QUERY_ID_NAME;
 import static io.trino.plugin.hive.HivePartitionManager.extractPartitionValues;
+import static io.trino.plugin.hive.util.HiveUtil.isDeltaLakeTable;
+import static io.trino.plugin.hive.util.HiveUtil.isHudiTable;
+import static io.trino.plugin.hive.util.HiveUtil.isIcebergTable;
 import static io.trino.spi.StandardErrorCode.INVALID_PROCEDURE_ARGUMENT;
+import static io.trino.spi.StandardErrorCode.UNSUPPORTED_TABLE_TYPE;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Boolean.TRUE;
@@ -110,14 +115,14 @@ public class SyncPartitionMetadataProcedure
                 SYNC_PARTITION_METADATA.bindTo(this));
     }
 
-    public void syncPartitionMetadata(ConnectorSession session, ConnectorAccessControl accessControl, String schemaName, String tableName, String mode, boolean caseSensitive)
+    public Map<String, Long> syncPartitionMetadata(ConnectorSession session, ConnectorAccessControl accessControl, String schemaName, String tableName, String mode, boolean caseSensitive)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(getClass().getClassLoader())) {
-            doSyncPartitionMetadata(session, accessControl, schemaName, tableName, mode, caseSensitive);
+            return doSyncPartitionMetadata(session, accessControl, schemaName, tableName, mode, caseSensitive);
         }
     }
 
-    private void doSyncPartitionMetadata(ConnectorSession session, ConnectorAccessControl accessControl, String schemaName, String tableName, String mode, boolean caseSensitive)
+    private Map<String, Long> doSyncPartitionMetadata(ConnectorSession session, ConnectorAccessControl accessControl, String schemaName, String tableName, String mode, boolean caseSensitive)
     {
         checkProcedureArgument(schemaName != null, "schema_name cannot be null");
         checkProcedureArgument(tableName != null, "table_name cannot be null");
@@ -132,6 +137,9 @@ public class SyncPartitionMetadataProcedure
 
             Table table = metastore.getTable(schemaName, tableName)
                     .orElseThrow(() -> new TableNotFoundException(schemaTableName));
+            if (isDeltaLakeTable(table) || isIcebergTable(table) || isHudiTable(table)) {
+                throw new TrinoException(UNSUPPORTED_TABLE_TYPE, "Not a Hive table '%s'".formatted(schemaTableName));
+            }
             if (table.getPartitionColumns().isEmpty()) {
                 throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "Table is not partitioned: " + schemaTableName);
             }
@@ -165,6 +173,11 @@ public class SyncPartitionMetadataProcedure
             Set<String> partitionsToDrop = difference(canonicalPartitionNamesInMetastore, partitionsInFileSystem);
 
             syncPartitions(partitionsToAdd, partitionsToDrop, syncMode, metastore, session, table);
+
+            return ImmutableMap.<String, Long>builder()
+                    .put("added_partitions_count", (long) partitionsToAdd.size())
+                    .put("dropped_partitions_count", (long) partitionsToDrop.size())
+                    .buildOrThrow();
         }
     }
 

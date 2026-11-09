@@ -23,6 +23,7 @@ import io.trino.orc.metadata.statistics.BooleanStatistics;
 import io.trino.orc.metadata.statistics.ColumnStatistics;
 import io.trino.orc.metadata.statistics.RangeStatistics;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.FloatingPointValueSet;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.CharType;
@@ -46,7 +47,6 @@ import java.util.function.Function;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.spi.type.Chars.truncateToLengthAndTrimSpaces;
 import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static io.trino.spi.type.DateType.DATE;
@@ -64,6 +64,7 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.TypeUtils.isFloatingPointNaN;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Float.intBitsToFloat;
 import static java.lang.Math.floorDiv;
@@ -125,6 +126,11 @@ public class TupleDomainOrcPredicate
             return true;
         }
 
+        // NaN payloads may hash differently, so the bloom filter cannot eliminate this overlap.
+        if (predicateDomain.getValues() instanceof FloatingPointValueSet floatingPoint && floatingPoint.isNaNAllowed()) {
+            return true;
+        }
+
         // extract the discrete values from the predicate
         Optional<Collection<Object>> discreteValues = extractDiscreteValues(predicateDomain.getValues());
         if (discreteValues.isEmpty()) {
@@ -155,6 +161,11 @@ public class TupleDomainOrcPredicate
     @VisibleForTesting
     public static boolean checkInBloomFilter(BloomFilter bloomFilter, Object predicateValue, Type sqlType)
     {
+        // Different NaN payloads have the same Trino membership but may hash differently.
+        if (isFloatingPointNaN(sqlType, predicateValue)) {
+            return true;
+        }
+
         if (sqlType == TINYINT || sqlType == SMALLINT || sqlType == INTEGER || sqlType == BIGINT || sqlType == DATE) {
             return bloomFilter.testLong(((Number) predicateValue).longValue());
         }
@@ -235,7 +246,7 @@ public class TupleDomainOrcPredicate
             return createDomain(type, hasNullValue, columnStatistics.getDecimalStatistics(), value -> Int128.valueOf(rescale(value, decimalType).unscaledValue()));
         }
         else if (type instanceof CharType && columnStatistics.getStringStatistics() != null) {
-            return createDomain(type, hasNullValue, columnStatistics.getStringStatistics(), value -> truncateToLengthAndTrimSpaces(value, type));
+            return Domain.create(ValueSet.all(type), hasNullValue);
         }
         else if (type instanceof VarcharType && columnStatistics.getStringStatistics() != null) {
             return createDomain(type, hasNullValue, columnStatistics.getStringStatistics());
@@ -288,10 +299,12 @@ public class TupleDomainOrcPredicate
             return createDomain(type, hasNullValue, columnStatistics.getIntegerStatistics());
         }
         else if (type.getJavaType() == double.class && columnStatistics.getDoubleStatistics() != null) {
-            return createDomain(type, hasNullValue, columnStatistics.getDoubleStatistics());
+            Domain ordered = createDomain(type, hasNullValue, columnStatistics.getDoubleStatistics());
+            return Domain.create(new FloatingPointValueSet(((FloatingPointValueSet) ordered.getValues()).getOrderedValues(), true), hasNullValue);
         }
         else if (REAL.equals(type) && columnStatistics.getDoubleStatistics() != null) {
-            return createDomain(type, hasNullValue, columnStatistics.getDoubleStatistics(), value -> (long) floatToRawIntBits(value.floatValue()));
+            Domain ordered = createDomain(type, hasNullValue, columnStatistics.getDoubleStatistics(), value -> (long) floatToRawIntBits(value.floatValue()));
+            return Domain.create(new FloatingPointValueSet(((FloatingPointValueSet) ordered.getValues()).getOrderedValues(), true), hasNullValue);
         }
         return Domain.create(ValueSet.all(type), hasNullValue);
     }

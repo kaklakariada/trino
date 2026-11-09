@@ -16,6 +16,7 @@ package io.trino.plugin.iceberg.catalog.glue;
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.iceberg.UnknownTableTypeException;
 import io.trino.plugin.iceberg.catalog.AbstractIcebergTableOperations;
+import io.trino.plugin.iceberg.encryption.EncryptionManagerFactory;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SchemaTableName;
@@ -23,8 +24,6 @@ import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.type.TypeManager;
 import jakarta.annotation.Nullable;
 import org.apache.iceberg.TableMetadata;
-import org.apache.iceberg.exceptions.CommitFailedException;
-import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.io.FileIO;
 import software.amazon.awssdk.services.glue.model.AlreadyExistsException;
 import software.amazon.awssdk.services.glue.model.ConcurrentModificationException;
@@ -35,6 +34,7 @@ import software.amazon.awssdk.services.glue.model.ResourceNumberLimitExceededExc
 import software.amazon.awssdk.services.glue.model.StorageDescriptor;
 import software.amazon.awssdk.services.glue.model.Table;
 import software.amazon.awssdk.services.glue.model.TableInput;
+import software.amazon.awssdk.services.glue.model.ValidationException;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -78,9 +78,10 @@ public class GlueIcebergTableOperations
             String database,
             String table,
             Optional<String> owner,
-            Optional<String> location)
+            Optional<String> location,
+            EncryptionManagerFactory encryptionManagerFactory)
     {
-        super(fileIo, session, database, table, owner, location);
+        super(fileIo, session, database, table, owner, location, encryptionManagerFactory);
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.cacheTableMetadata = cacheTableMetadata;
         this.glueClient = requireNonNull(glueClient, "glueClient is null");
@@ -131,14 +132,15 @@ public class GlueIcebergTableOperations
         }
         catch (GlueException e) {
             switch (e) {
+                // A retried create that went through reports AlreadyExists.
+                case AlreadyExistsException _ -> checkNewTableCommit(newMetadataLocation, metadata, e);
                 // clean up metadata files corresponding to the current transaction
-                case AlreadyExistsException _,
-                     EntityNotFoundException _,
+                case EntityNotFoundException _,
                      InvalidInputException _,
-                     ResourceNumberLimitExceededException _ -> io().deleteFile(newMetadataLocation);
-                default -> {}
+                     ResourceNumberLimitExceededException _,
+                     ValidationException _ -> throw deleteOrphanedMetadata(newMetadataLocation, e);
+                default -> throw new TrinoException(ICEBERG_COMMIT_ERROR, "Cannot commit table creation", e);
             }
-            throw new TrinoException(ICEBERG_COMMIT_ERROR, "Cannot commit table creation", e);
         }
         shouldRefresh = true;
     }
@@ -195,18 +197,12 @@ public class GlueIcebergTableOperations
         try {
             glueClient.updateTable(database, tableInput, Optional.ofNullable(glueVersionId));
         }
-        catch (ConcurrentModificationException e) {
-            // CommitFailedException is handled as a special case in the Iceberg library. This commit will automatically retry
-            throw new CommitFailedException(e, "Failed to commit to Glue table: %s.%s", database, tableName);
-        }
-        catch (EntityNotFoundException | InvalidInputException | ResourceNumberLimitExceededException e) {
+        catch (EntityNotFoundException | InvalidInputException | ResourceNumberLimitExceededException | ValidationException e) {
             // Signal a non-retriable commit failure and eventually clean up metadata files corresponding to the current transaction
             throw new TrinoException(ICEBERG_COMMIT_ERROR, "Cannot commit table update", e);
         }
         catch (RuntimeException e) {
-            // Cannot determine whether the `updateTable` operation was successful,
-            // regardless of the exception thrown (e.g. : timeout exception) or it actually failed
-            throw new CommitStateUnknownException(e);
+            checkExistingTableCommit(currentMetadataLocation, newMetadataLocation, e instanceof ConcurrentModificationException, e);
         }
         shouldRefresh = true;
     }

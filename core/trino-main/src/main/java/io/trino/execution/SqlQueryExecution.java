@@ -53,6 +53,7 @@ import io.trino.operator.ForScheduler;
 import io.trino.operator.RetryPolicy;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.DynamicFilterService;
+import io.trino.server.DynamicFilterService.DynamicFiltersStats;
 import io.trino.server.ResultQueryInfo;
 import io.trino.server.protocol.Slug;
 import io.trino.spi.QueryId;
@@ -100,7 +101,6 @@ import static io.trino.SystemSessionProperties.isEnableDynamicFiltering;
 import static io.trino.execution.ParameterExtractor.bindParameters;
 import static io.trino.execution.QueryState.FAILED;
 import static io.trino.execution.QueryState.PLANNING;
-import static io.trino.server.DynamicFilterService.DynamicFiltersStats;
 import static io.trino.spi.StandardErrorCode.STACK_OVERFLOW;
 import static io.trino.sql.planner.sanity.PlanSanityChecker.DISTRIBUTED_PLAN_SANITY_CHECKER;
 import static io.trino.tracing.ScopedSpan.scopedSpan;
@@ -707,10 +707,17 @@ public class SqlQueryExecution
     @Override
     public ResultQueryInfo getResultQueryInfo()
     {
+        // read state before acquiring reference to scheduler, because planning
+        // sets scheduler before the query starts.
+        QueryState state = stateMachine.getQueryState();
+        // acquire reference to scheduler before checking finalQueryInfo, because
+        // state change listener sets finalQueryInfo and then clears scheduler when
+        // the query finishes.
         Optional<QueryScheduler> scheduler = Optional.ofNullable(queryScheduler.get());
         return stateMachine.getFinalQueryInfo()
                 .map(ResultQueryInfo::new)
                 .orElseGet(() -> stateMachine.updateResultQueryInfo(
+                        state,
                         scheduler.map(QueryScheduler::getBasicStagesInfo),
                         () -> scheduler.map(QueryScheduler::getStagesInfo)));
     }

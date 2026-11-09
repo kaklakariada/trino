@@ -20,6 +20,7 @@ import com.google.common.collect.Multimap;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.opentelemetry.api.trace.Span;
+import io.trino.connector.DefaultNodeManager;
 import io.trino.cost.StatsAndCosts;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.execution.NodeTaskMap;
@@ -29,6 +30,7 @@ import io.trino.execution.StateMachine;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskState;
 import io.trino.execution.TaskStatus;
+import io.trino.execution.TestingRemoteTaskFactory.TestingRemoteTask;
 import io.trino.execution.buffer.OutputBufferStatus;
 import io.trino.metadata.Split;
 import io.trino.node.InternalNode;
@@ -57,7 +59,6 @@ import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.airlift.concurrent.Threads.threadsNamed;
-import static io.trino.execution.TestingRemoteTaskFactory.TestingRemoteTask;
 import static io.trino.node.TestingInternalNodeManager.CURRENT_NODE;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SOURCE_DISTRIBUTION;
@@ -222,7 +223,7 @@ public class TestScaledWriterScheduler
                 nodeManager,
                 new NodeSchedulerConfig().setIncludeCoordinator(true),
                 new NodeTaskMap(new FinalizerService()),
-                new ConsistentHashingAddressProvider(nodeManager, new ConsistentHashingAddressProviderConfig()));
+                new StableHostAddressProvider(new DefaultNodeManager(CURRENT_NODE, nodeManager, true), new StableHostAddressProviderConfig()));
     }
 
     private static TaskStatus buildTaskStatus(boolean isOutputBufferOverUtilized, long outputDataSize)

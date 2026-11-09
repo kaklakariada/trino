@@ -62,6 +62,7 @@ import static com.google.common.collect.Iterators.unmodifiableIterator;
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
+import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.operator.HashArraySizeSupplier.incrementalLoadFactorHashArraySizeSupplier;
 import static io.trino.operator.JoinOperatorType.innerJoin;
 import static io.trino.operator.OperatorFactories.spillingJoin;
@@ -79,14 +80,16 @@ public final class JoinTestUtils
     public static OperatorFactory innerJoinOperatorFactory(
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager,
             RowPagesBuilder probePages,
+            List<Integer> hashChannels,
             PartitioningSpillerFactory partitioningSpillerFactory)
     {
-        return innerJoinOperatorFactory(lookupSourceFactoryManager, probePages, partitioningSpillerFactory, false);
+        return innerJoinOperatorFactory(lookupSourceFactoryManager, probePages, hashChannels, partitioningSpillerFactory, false);
     }
 
     public static OperatorFactory innerJoinOperatorFactory(
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager,
             RowPagesBuilder probePages,
+            List<Integer> hashChannels,
             PartitioningSpillerFactory partitioningSpillerFactory,
             boolean outputSingleMatch)
     {
@@ -96,7 +99,7 @@ public final class JoinTestUtils
                 new PlanNodeId("test"),
                 lookupSourceFactoryManager,
                 probePages.getTypes(),
-                probePages.getHashChannels().orElseThrow(),
+                hashChannels,
                 Optional.empty(),
                 OptionalInt.of(1),
                 partitioningSpillerFactory,
@@ -127,6 +130,7 @@ public final class JoinTestUtils
             boolean parallelBuild,
             TaskContext taskContext,
             RowPagesBuilder buildPages,
+            List<Integer> hashChannels,
             Optional<InternalJoinFilterFunction> filterFunction,
             boolean spillEnabled,
             SingleStreamSpillerFactory singleStreamSpillerFactory)
@@ -135,7 +139,6 @@ public final class JoinTestUtils
                 .map(function -> (_, addresses, pages) -> new StandardJoinFilterFunction(function, addresses, pages));
 
         int partitionCount = parallelBuild ? PARTITION_COUNT : 1;
-        List<Integer> hashChannels = buildPages.getHashChannels().orElseThrow();
         List<Type> types = buildPages.getTypes();
         List<Type> hashChannelTypes = hashChannels.stream()
                 .map(types::get)
@@ -149,6 +152,7 @@ public final class JoinTestUtils
                 hashChannels,
                 hashChannelTypes,
                 DataSize.of(32, DataSize.Unit.MEGABYTE),
+                newSimpleAggregatedMemoryContext(),
                 HASH_COMPILER,
                 DataSize.of(32, DataSize.Unit.MEGABYTE),
                 () -> 0L);

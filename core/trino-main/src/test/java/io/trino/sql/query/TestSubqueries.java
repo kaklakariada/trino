@@ -689,6 +689,15 @@ public class TestSubqueries
     }
 
     @Test
+    public void testCorrelatedSubqueryWithCaseOnCorrelationKey()
+    {
+        assertThat(assertions.query(
+                "SELECT c.k, (SELECT max(o.v) FROM (VALUES (1, 10), (1, 11), (2, 20)) o(k, v) WHERE o.k = IF(c.f, NULL, c.k)) " +
+                        "FROM (VALUES (1, false), (2, true), (3, false)) c(k, f)"))
+                .matches("VALUES (1, 11), (2, NULL), (3, NULL)");
+    }
+
+    @Test
     public void testCorrelation()
     {
         // unqualified reference
@@ -1731,7 +1740,7 @@ public class TestSubqueries
                 .matches("SELECT CAST(ROW(1, 'a') AS row(a integer, b varchar(1)))");
 
         // The quoted identifiers are needed due to some pre-existing inconsistencies
-        // in how identifiers are canonicalized (see TypeSignatureTranslator.canonicalize())
+        // in how identifiers are canonicalized (see TypeDescriptorTranslator.canonicalize())
         assertThat(assertions.query(
                 "SELECT (SELECT t.* AS (x, y) FROM (SELECT 1, 'a') t)"))
                 .matches("SELECT CAST(ROW(1, 'a') AS row(\"X\" integer, \"Y\" varchar(1)))");

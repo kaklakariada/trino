@@ -56,7 +56,7 @@ import io.trino.execution.executor.dedicated.ThreadPerDriverTaskExecutor;
 import io.trino.execution.executor.timesharing.MultilevelSplitQueue;
 import io.trino.execution.executor.timesharing.TimeSharingTaskExecutor;
 import io.trino.execution.scheduler.NodeSchedulerConfig;
-import io.trino.json.ir.IrJsonPath;
+import io.trino.jsonpath.ir.IrJsonPath;
 import io.trino.memory.LocalMemoryManager;
 import io.trino.memory.LocalMemoryManagerExporter;
 import io.trino.memory.MemoryInfo;
@@ -109,11 +109,12 @@ import io.trino.spi.PageSorter;
 import io.trino.spi.VersionEmbedder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockEncodingSerde;
+import io.trino.spi.connector.ConnectorExpressionEvaluator;
 import io.trino.spi.function.FunctionBundle;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeOperators;
-import io.trino.spi.type.TypeSignature;
 import io.trino.spiller.FileSingleStreamSpillerFactory;
 import io.trino.spiller.GenericPartitioningSpillerFactory;
 import io.trino.spiller.GenericSpillerFactory;
@@ -137,8 +138,10 @@ import io.trino.sql.gen.JoinFilterFunctionCompiler;
 import io.trino.sql.gen.OrderingCompiler;
 import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.gen.columnar.ColumnarFilterCompiler;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.planner.CompilerConfig;
+import io.trino.sql.planner.InternalConnectorExpressionEvaluator;
 import io.trino.sql.planner.LocalExecutionPlanner;
 import io.trino.sql.planner.OptimizerConfig;
 import io.trino.sql.planner.PartitionFunctionProvider;
@@ -149,11 +152,11 @@ import io.trino.tracing.ForTracing;
 import io.trino.tracing.TracingMetadata;
 import io.trino.type.BlockTypeOperators;
 import io.trino.type.InternalTypeManager;
-import io.trino.type.JsonPath2016Type;
+import io.trino.type.SqlJsonPathType;
+import io.trino.type.TypeDescriptorDeserializer;
+import io.trino.type.TypeDescriptorKeyDeserializer;
 import io.trino.type.TypeDeserializer;
 import io.trino.type.TypeOperatorsCache;
-import io.trino.type.TypeSignatureDeserializer;
-import io.trino.type.TypeSignatureKeyDeserializer;
 import io.trino.util.EmbedVersion;
 import io.trino.util.FinalizerService;
 
@@ -169,6 +172,8 @@ import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.concurrent.Threads.virtualThreadsNamed;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.airlift.http.server.HttpServerBinder.httpServerBinder;
+import static io.airlift.http.server.ServerFeature.VIRTUAL_THREADS;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
 import static io.airlift.json.JsonBinder.jsonBinder;
 import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
@@ -209,6 +214,8 @@ public class ServerMainModule
         configBinder(binder).bindConfigDefaults(HttpServerConfig.class, httpServerConfig -> {
             httpServerConfig.setHttp2MaxConcurrentStreams(32 * 1024); // from the default 16K
         });
+        // Run request handlers on virtual threads so blocking handlers never starve the platform pool that reads connections
+        httpServerBinder(binder).withFeature(VIRTUAL_THREADS);
 
         binder.bind(PreparedStatementEncoder.class).in(Scopes.SINGLETON);
         binder.bind(HttpRequestSessionContextFactory.class).in(Scopes.SINGLETON);
@@ -381,6 +388,7 @@ public class ServerMainModule
         binder.bind(TableProceduresRegistry.class).in(Scopes.SINGLETON);
         binder.bind(TableFunctionRegistry.class).in(Scopes.SINGLETON);
         binder.bind(PlannerContext.class).in(Scopes.SINGLETON);
+        binder.bind(ConnectorExpressionEvaluator.class).to(InternalConnectorExpressionEvaluator.class).in(Scopes.SINGLETON);
         binder.bind(LanguageFunctionManager.class).in(Scopes.SINGLETON);
         binder.bind(LanguageFunctionEngineManager.class).in(Scopes.SINGLETON);
 
@@ -392,13 +400,14 @@ public class ServerMainModule
         // type
         jsonBinder(binder).addDeserializerBinding(Type.class).to(TypeDeserializer.class);
         jsonBinder(binder).addKeyDeserializerBinding(Symbol.class).to(SymbolKeyDeserializer.class);
-        jsonBinder(binder).addDeserializerBinding(TypeSignature.class).to(TypeSignatureDeserializer.class);
-        jsonBinder(binder).addKeyDeserializerBinding(TypeSignature.class).to(TypeSignatureKeyDeserializer.class);
+        jsonBinder(binder).addDeserializerBinding(TypeDescriptor.class).to(TypeDescriptorDeserializer.class);
+        jsonBinder(binder).addKeyDeserializerBinding(TypeDescriptor.class).to(TypeDescriptorKeyDeserializer.class);
         binder.bind(TypeRegistry.class).in(Scopes.SINGLETON);
         binder.bind(TypeManager.class).to(InternalTypeManager.class).in(Scopes.SINGLETON);
         newSetBinder(binder, Type.class);
+        jsonCodecBinder(binder).bindJsonCodec(Expression.class);
         jsonCodecBinder(binder).bindJsonCodec(IrJsonPath.class);
-        binder.bind(RegisterJsonPath2016Type.class).asEagerSingleton();
+        binder.bind(RegisterSqlJsonPathType.class).asEagerSingleton();
 
         // split manager
         binder.bind(SplitManager.class).in(Scopes.SINGLETON);
@@ -473,7 +482,7 @@ public class ServerMainModule
         configBinder(binder).bindConfig(DynamicFilterConfig.class);
 
         // dispatcher
-        // TODO remove dispatcher fromm ServerMainModule, and bind dependent components only on coordinators
+        // TODO remove dispatcher from ServerMainModule, and bind dependent components only on coordinators
         newOptionalBinder(binder, DispatchManager.class);
 
         // Added for RuleStatsSystemTable
@@ -532,12 +541,12 @@ public class ServerMainModule
     }
 
     // working around circular dependency Type <-> TypeManager
-    private static class RegisterJsonPath2016Type
+    private static class RegisterSqlJsonPathType
     {
         @Inject
-        public RegisterJsonPath2016Type(TypeRegistry typeRegistry, JsonCodec<IrJsonPath> jsonCodec)
+        public RegisterSqlJsonPathType(TypeRegistry typeRegistry, JsonCodec<IrJsonPath> jsonCodec)
         {
-            typeRegistry.addType(new JsonPath2016Type(jsonCodec));
+            typeRegistry.addType(new SqlJsonPathType(jsonCodec));
         }
     }
 

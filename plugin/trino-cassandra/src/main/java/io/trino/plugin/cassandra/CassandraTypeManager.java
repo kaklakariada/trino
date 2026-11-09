@@ -30,7 +30,6 @@ import com.datastax.oss.protocol.internal.util.Bytes;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.net.InetAddresses;
 import com.google.inject.Inject;
 import io.airlift.slice.Slice;
 import io.trino.spi.TrinoException;
@@ -51,8 +50,8 @@ import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
@@ -113,7 +112,7 @@ public class CassandraTypeManager
     public CassandraTypeManager(TypeManager typeManager)
     {
         requireNonNull(typeManager, "typeManager is null");
-        this.ipAddressType = typeManager.getType(new TypeSignature(StandardTypes.IPADDRESS));
+        this.ipAddressType = typeManager.getType(new TypeDescriptor(StandardTypes.IPADDRESS));
     }
 
     public Optional<CassandraType> toCassandraType(DataType dataType)
@@ -518,7 +517,7 @@ public class CassandraTypeManager
     {
         byte[] address;
         try {
-            address = InetAddresses.forString(slice.toStringUtf8()).getAddress();
+            address = InetAddress.ofLiteral(slice.toStringUtf8()).getAddress();
         }
         catch (IllegalArgumentException e) {
             throw new TrinoException(INVALID_CAST_ARGUMENT, "Cannot cast value to IPADDRESS: " + slice.toStringUtf8());

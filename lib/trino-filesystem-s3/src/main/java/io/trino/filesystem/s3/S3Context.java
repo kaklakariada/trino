@@ -14,6 +14,7 @@
 package io.trino.filesystem.s3;
 
 import io.trino.filesystem.s3.S3FileSystemConfig.ObjectCannedAcl;
+import io.trino.filesystem.s3.S3FileSystemConfig.S3ChecksumAlgorithm;
 import io.trino.filesystem.s3.S3FileSystemConfig.S3SseType;
 import io.trino.filesystem.s3.S3FileSystemConfig.StorageClassType;
 import io.trino.spi.security.ConnectorIdentity;
@@ -24,6 +25,7 @@ import software.amazon.awssdk.awscore.AwsRequestOverrideConfiguration;
 import software.amazon.awssdk.services.s3.model.RequestPayer;
 
 import java.util.Optional;
+import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.filesystem.s3.S3FileSystemConfig.S3SseType.CUSTOMER;
@@ -39,7 +41,8 @@ record S3Context(
         S3SseContext s3SseContext,
         Optional<AwsCredentialsProvider> credentialsProviderOverride,
         StorageClassType storageClass,
-        ObjectCannedAcl cannedAcl)
+        ObjectCannedAcl cannedAcl,
+        S3ChecksumAlgorithm checksumAlgorithm)
 {
     private static final int MIN_PART_SIZE = 5 * 1024 * 1024; // S3 requirement
 
@@ -48,6 +51,7 @@ record S3Context(
         checkArgument(partSize >= MIN_PART_SIZE, "partSize must be at least %s bytes", MIN_PART_SIZE);
         requireNonNull(s3SseContext, "sseContext is null");
         requireNonNull(credentialsProviderOverride, "credentialsProviderOverride is null");
+        requireNonNull(checksumAlgorithm, "checksumAlgorithm is null");
     }
 
     public RequestPayer requestPayer()
@@ -57,7 +61,7 @@ record S3Context(
 
     public S3Context withKmsKeyId(String kmsKeyId)
     {
-        return new S3Context(partSize, requesterPays, S3SseContext.withKmsKeyId(kmsKeyId), credentialsProviderOverride, storageClass, cannedAcl);
+        return new S3Context(partSize, requesterPays, S3SseContext.withKmsKeyId(kmsKeyId), credentialsProviderOverride, storageClass, cannedAcl, checksumAlgorithm);
     }
 
     public S3Context withCredentials(ConnectorIdentity identity)
@@ -72,9 +76,17 @@ record S3Context(
         return this;
     }
 
+    public S3Context withCredentials(ConnectorIdentity identity, Supplier<ConnectorIdentity> identitySupplier)
+    {
+        if (identity.getExtraCredentials().containsKey(EXTRA_CREDENTIALS_ACCESS_KEY_PROPERTY)) {
+            return withCredentialsProviderOverride(new IdentityAwsCredentialsProvider(identitySupplier));
+        }
+        return this;
+    }
+
     public S3Context withSseCustomerKey(String key)
     {
-        return new S3Context(partSize, requesterPays, S3SseContext.withSseCustomerKey(key), credentialsProviderOverride, storageClass, cannedAcl);
+        return new S3Context(partSize, requesterPays, S3SseContext.withSseCustomerKey(key), credentialsProviderOverride, storageClass, cannedAcl, checksumAlgorithm);
     }
 
     public S3Context withCredentialsProviderOverride(AwsCredentialsProvider credentialsProviderOverride)
@@ -85,7 +97,8 @@ record S3Context(
                 s3SseContext,
                 Optional.of(credentialsProviderOverride),
                 storageClass,
-                cannedAcl);
+                cannedAcl,
+                checksumAlgorithm);
     }
 
     public void applyCredentialProviderOverride(AwsRequestOverrideConfiguration.Builder builder)

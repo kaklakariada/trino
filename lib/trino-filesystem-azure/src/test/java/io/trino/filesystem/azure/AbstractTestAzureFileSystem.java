@@ -13,13 +13,11 @@
  */
 package io.trino.filesystem.azure;
 
+import com.azure.identity.ClientSecretCredentialBuilder;
 import com.azure.storage.blob.BlobContainerClient;
-import com.azure.storage.blob.BlobContainerClientBuilder;
 import com.azure.storage.blob.models.BlobItem;
 import com.azure.storage.blob.specialized.BlockBlobClient;
 import com.azure.storage.file.datalake.DataLakeFileSystemClient;
-import com.azure.storage.file.datalake.DataLakeServiceClient;
-import com.azure.storage.file.datalake.DataLakeServiceClientBuilder;
 import com.azure.storage.file.datalake.models.PathItem;
 import com.azure.storage.file.datalake.options.DataLakePathDeleteOptions;
 import com.google.common.collect.ImmutableList;
@@ -31,6 +29,7 @@ import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInput;
 import io.trino.filesystem.TrinoInputFile;
+import io.trino.filesystem.TrinoOutputStream;
 import io.trino.filesystem.encryption.EncryptionEnforcingFileSystem;
 import io.trino.filesystem.encryption.EncryptionKey;
 import io.trino.spi.security.ConnectorIdentity;
@@ -41,11 +40,14 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestInstance.Lifecycle;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.util.Locale.ROOT;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.abort;
@@ -62,13 +64,14 @@ public abstract class AbstractTestAzureFileSystem
     }
 
     private String account;
-    private AzureAuth azureAuth;
     private AccountKind accountKind;
+    private boolean multipartWriteEnabled;
     private String containerName;
     private Location rootLocation;
     private BlobContainerClient blobContainerClient;
+    private DataLakeFileSystemClient dataLakeFileSystemClient;
     private AzureFileSystemFactory fileSystemFactory;
-    private TrinoFileSystem fileSystem;
+    private AzureFileSystem fileSystem;
 
     protected void initializeWithAccessKey(String account, String accountKey, AccountKind accountKind)
             throws IOException
@@ -85,40 +88,48 @@ public abstract class AbstractTestAzureFileSystem
     protected void initializeWithOAuth(String account, String tenantId, String clientId, String clientSecret, AccountKind accountKind)
             throws IOException
     {
-        String clientEndpoint = "https://login.microsoftonline.com/%s/oauth2/v2.0/token".formatted(tenantId);
-        initialize(account, new AzureAuthOauth(clientEndpoint, tenantId, clientId, clientSecret), accountKind, false);
+        initialize(account, new AzureAuthOauth(oauthCredentialBuilder()
+                .tenantId(tenantId)
+                .clientId(clientId)
+                .clientSecret(clientSecret)
+                .build()), accountKind, false);
+    }
+
+    protected ClientSecretCredentialBuilder oauthCredentialBuilder()
+    {
+        return new ClientSecretCredentialBuilder();
+    }
+
+    protected AzureFileSystemFactory createFileSystemFactory(AzureAuth azureAuth, AzureFileSystemConfig config)
+    {
+        return new AzureFileSystemFactory(OpenTelemetry.noop(), azureAuth, config);
     }
 
     private void initialize(String account, AzureAuth azureAuth, AccountKind accountKind, boolean multipartWriteEnabled)
             throws IOException
     {
         this.account = requireNonNull(account, "account is null");
-        this.azureAuth = requireNonNull(azureAuth, "azureAuth is null");
+        requireNonNull(azureAuth, "azureAuth is null");
         this.accountKind = requireNonNull(accountKind, "accountKind is null");
+        this.multipartWriteEnabled = multipartWriteEnabled;
         containerName = "test-%s-%s".formatted(accountKind.name().toLowerCase(ROOT), randomUUID());
         rootLocation = Location.of("abfs://%s@%s.dfs.core.windows.net/".formatted(containerName, account));
 
-        BlobContainerClientBuilder builder = new BlobContainerClientBuilder()
-                .endpoint("https://%s.blob.core.windows.net".formatted(account))
-                .containerName(containerName);
-        azureAuth.setAuth(account, builder);
-        blobContainerClient = builder.buildClient();
+        fileSystemFactory = createFileSystemFactory(azureAuth, new AzureFileSystemConfig()
+                .setMultipartWriteEnabled(multipartWriteEnabled));
+        fileSystem = (AzureFileSystem) fileSystemFactory.create(ConnectorIdentity.ofUser("test"));
+        AzureLocation location = new AzureLocation(rootLocation);
+        blobContainerClient = fileSystem.createBlobContainerClient(location, Optional.empty());
         // this will fail if the container already exists, which is what we want
         blobContainerClient.create();
         boolean isHierarchicalNamespaceEnabled = isHierarchicalNamespaceEnabled();
         if (accountKind == AccountKind.HIERARCHICAL) {
             checkState(isHierarchicalNamespaceEnabled, "Expected hierarchical namespaces to be enabled for storage account %s and container %s with account kind %s".formatted(account, containerName, accountKind));
+            dataLakeFileSystemClient = fileSystem.createFileSystemClient(location, Optional.empty());
         }
         else {
             checkState(!isHierarchicalNamespaceEnabled, "Expected hierarchical namespaces to not be enabled for storage account %s and container %s with account kind %s".formatted(account, containerName, accountKind));
         }
-
-        fileSystemFactory = new AzureFileSystemFactory(
-                OpenTelemetry.noop(),
-                azureAuth,
-                new AzureFileSystemConfig()
-                        .setMultipartWriteEnabled(multipartWriteEnabled));
-        fileSystem = fileSystemFactory.create(ConnectorIdentity.ofUser("test"));
 
         cleanupFiles();
     }
@@ -140,15 +151,19 @@ public abstract class AbstractTestAzureFileSystem
     @AfterAll
     void tearDown()
     {
-        azureAuth = null;
-        if (fileSystemFactory != null) {
-            fileSystemFactory.destroy();
-            fileSystemFactory = null;
+        try {
+            if (blobContainerClient != null) {
+                blobContainerClient.deleteIfExists();
+            }
         }
-        fileSystem = null;
-        if (blobContainerClient != null) {
-            blobContainerClient.deleteIfExists();
+        finally {
+            if (fileSystemFactory != null) {
+                fileSystemFactory.destroy();
+                fileSystemFactory = null;
+            }
+            fileSystem = null;
             blobContainerClient = null;
+            dataLakeFileSystemClient = null;
         }
     }
 
@@ -161,29 +176,19 @@ public abstract class AbstractTestAzureFileSystem
     private void cleanupFiles()
     {
         if (accountKind == AccountKind.HIERARCHICAL) {
-            DataLakeFileSystemClient fileSystemClient = createDataLakeFileSystemClient();
             DataLakePathDeleteOptions deleteRecursiveOptions = new DataLakePathDeleteOptions().setIsRecursive(true);
-            for (PathItem pathItem : fileSystemClient.listPaths()) {
+            for (PathItem pathItem : dataLakeFileSystemClient.listPaths()) {
                 if (pathItem.isDirectory()) {
-                    fileSystemClient.deleteDirectoryIfExistsWithResponse(pathItem.getName(), deleteRecursiveOptions, null, null);
+                    dataLakeFileSystemClient.deleteDirectoryIfExistsWithResponse(pathItem.getName(), deleteRecursiveOptions, null, null);
                 }
                 else {
-                    fileSystemClient.deleteFileIfExists(pathItem.getName());
+                    dataLakeFileSystemClient.deleteFileIfExists(pathItem.getName());
                 }
             }
         }
         else {
             blobContainerClient.listBlobs().forEach(item -> blobContainerClient.getBlobClient(item.getName()).deleteIfExists());
         }
-    }
-
-    private DataLakeFileSystemClient createDataLakeFileSystemClient()
-    {
-        DataLakeServiceClientBuilder serviceClientBuilder = new DataLakeServiceClientBuilder()
-                .endpoint("https://%s.dfs.core.windows.net".formatted(account));
-        azureAuth.setAuth(account, serviceClientBuilder);
-        DataLakeServiceClient serviceClient = serviceClientBuilder.buildClient();
-        return serviceClient.getFileSystemClient(containerName);
     }
 
     @Override
@@ -226,6 +231,97 @@ public abstract class AbstractTestAzureFileSystem
     {
         // Azure file paths are always hierarchical
         testPathHierarchical();
+    }
+
+    @Test
+    @Override
+    public void testOutputStreamAbort()
+            throws IOException
+    {
+        super.testOutputStreamAbort();
+        if (!multipartWriteEnabled) {
+            // AzureOutputStream.abort() cancels block uploads that are already on the wire, and the service can
+            // still apply one after the aborted blob is deleted, which recreates the parent directory on
+            // hierarchical accounts. AzureMultipartOutputStream waits for its block uploads, so it leaves nothing.
+            waitForCancelledBlockUploads();
+        }
+    }
+
+    // waits until the container stays empty for a quiet period, removing what late block uploads recreate
+    private void waitForCancelledBlockUploads()
+            throws IOException
+    {
+        long quietPeriodNanos = SECONDS.toNanos(5);
+        long deadlineNanos = System.nanoTime() + SECONDS.toNanos(60);
+        long emptySinceNanos = System.nanoTime();
+        while (System.nanoTime() - emptySinceNanos < quietPeriodNanos) {
+            if (System.nanoTime() > deadlineNanos) {
+                throw new AssertionError("Container did not stay empty after aborted uploads");
+            }
+            try {
+                Thread.sleep(250);
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException();
+            }
+            if (blobContainerClient.listBlobs().iterator().hasNext()) {
+                cleanupFiles();
+                emptySinceNanos = System.nanoTime();
+            }
+        }
+    }
+
+    @Test
+    void testCloseAfterInterruptedWriteDoesNotCreateFile()
+            throws IOException
+    {
+        if (multipartWriteEnabled) {
+            abort("Multipart writes buffer data without blocking, so an interrupt does not fail the write");
+        }
+        // stays below the single upload threshold, so nothing reaches the service before commit
+        byte[] data = new byte[16 * 1024];
+        Location location = createLocation("interruptedWrite");
+        TrinoOutputStream outputStream = getFileSystem().newOutputFile(location).create();
+        outputStream.write(data);
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> outputStream.write(data))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining(location.toString());
+        }
+        finally {
+            Thread.interrupted();
+        }
+        assertThatThrownBy(outputStream::close)
+                .isInstanceOf(IOException.class)
+                .hasStackTraceContaining("after failed write");
+        assertThat(getFileSystem().newInputFile(location).exists()).isFalse();
+    }
+
+    @Test
+    void testCloseInterruptedWhileFlushingDoesNotCreateFile()
+            throws IOException
+    {
+        if (multipartWriteEnabled) {
+            abort("Multipart writes buffer data without blocking, so an interrupt does not fail the flush");
+        }
+        // stays inside the stream buffer, so close has data left to flush
+        byte[] data = new byte[100];
+        Location location = createLocation("interruptedClose");
+        TrinoOutputStream outputStream = getFileSystem().newOutputFile(location).create();
+        outputStream.write(data);
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(outputStream::close)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining(location.toString())
+                    .hasStackTraceContaining("after failed write");
+        }
+        finally {
+            Thread.interrupted();
+        }
+        assertThat(getFileSystem().newInputFile(location).exists()).isFalse();
     }
 
     @Test

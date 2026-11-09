@@ -10,14 +10,64 @@ These functions and operators operate on {ref}`date and time data types <date-ti
 | `+`      | `time '01:00' + interval '3' hour`                  | `04:00:00.000`            |
 | `+`      | `timestamp '2012-08-08 01:00' + interval '29' hour` | `2012-08-09 06:00:00.000` |
 | `+`      | `timestamp '2012-10-31 01:00' + interval '1' month` | `2012-11-30 01:00:00.000` |
-| `+`      | `interval '2' day + interval '3' hour`              | `2 03:00:00.000`          |
+| `+`      | `interval '2' day + interval '3' hour`              | `2 03:00:00`              |
 | `+`      | `interval '3' year + interval '5' month`            | `3-5`                     |
 | `-`      | `date '2012-08-08' - interval '2' day`              | `2012-08-06`              |
 | `-`      | `time '01:00' - interval '3' hour`                  | `22:00:00.000`            |
 | `-`      | `timestamp '2012-08-08 01:00' - interval '29' hour` | `2012-08-06 20:00:00.000` |
 | `-`      | `timestamp '2012-10-31 01:00' - interval '1' month` | `2012-09-30 01:00:00.000` |
-| `-`      | `interval '2' day - interval '3' hour`              | `1 21:00:00.000`          |
+| `-`      | `interval '2' day - interval '3' hour`              | `1 21:00:00`              |
 | `-`      | `interval '3' year - interval '5' month`            | `2-7`                     |
+
+Subtracting two datetimes produces an interval with the {ref}`field-maximum
+leading precision <interval-leading-precision>` and the {ref}`fractional-seconds
+precision <interval-fractional-seconds-precision>` of the datetimes, with a minimum
+of six fractional digits, so
+`timestamp1 - timestamp2` of two `timestamp(9)` values has the type
+`INTERVAL DAY(9) TO SECOND(9)` and keeps all nine fractional digits.
+
+Adding or subtracting a day-time interval preserves the greater fractional
+precision of the datetime and interval, with a minimum of three digits.
+For example, `timestamp(3) + INTERVAL '1' DAY` returns `timestamp(3)`, while
+adding `INTERVAL '0.000001' SECOND` returns `timestamp(6)`.
+
+For intervals, `EXTRACT` requires a field present in the qualifier. The leading
+field is not wrapped: `hour(INTERVAL '36' HOUR)` returns `36`, while the hour
+component of a day-leading interval remains between 0 and 23 in magnitude.
+`day_of_month` remains an alias for `day` on intervals.
+
+To express a datetime difference with a specific day-time qualifier, enclose
+its subtraction in parentheses and follow it with an interval qualifier:
+
+```sql
+(timestamp '2012-10-31 01:00' - timestamp '2012-10-30 01:00') DAY TO SECOND
+-- 1 00:00:00.000000, of type interval day(2) to second(6)
+
+(timestamp '2012-10-31 01:00' - timestamp '2012-01-01 00:00') DAY(9) TO SECOND
+```
+
+Both operands must be datetimes. Dates are compared as midnight timestamps.
+The expression inside the parentheses follows normal operator precedence and
+must have subtraction as its outermost operation. For example,
+`(ts1 - (ts2 + i)) DAY(3)` subtracts the adjusted second timestamp, while
+`(ts1 - ts2 + i) DAY(3)` is rejected because its outermost operation is addition.
+The qualifier uses the same precision rules as an interval type: an omitted
+leading precision is `2`, so a difference of 100 days overflows `DAY` but fits
+`DAY(3)`. Dropping trailing fields truncates toward zero, while reducing
+fractional seconds rounds with ties toward positive infinity. Overflow is
+checked after this conversion. Year-month (calendar) differences are not
+currently supported.
+
+A bare field after a SELECT expression can also be an implicit column alias.
+For compatibility, `SELECT (a - b) day FROM t` and `SELECT x + (a - b) day FROM t` continue to use `day` as an
+alias. This also applies to ROW field aliases and PIVOT aggregation and value
+aliases. Ordinary arithmetic grouping is preserved: `(a - b + c) day` gives
+the alias `day` to `(a - b) + c`. Add parentheses to select a qualified value:
+`SELECT ((a - b) DAY) FROM t`. An explicit precision or a separate alias also
+removes the ambiguity, as in `SELECT (a - b) DAY(3) FROM t` or
+`SELECT (a - b) DAY AS elapsed FROM t`.
+Interval literals retain their qualifiers: `SELECT INTERVAL '1' DAY` selects
+an interval value without an alias.
 
 (at-time-zone-operator)=
 ## Time zone conversion
@@ -32,12 +82,46 @@ SELECT timestamp '2012-10-31 01:00 UTC' AT TIME ZONE 'America/Los_Angeles';
 -- 2012-10-30 18:00:00.000 America/Los_Angeles
 ```
 
+An interval offset for `AT TIME ZONE` must be an exact whole number of minutes.
+Fractional seconds are rejected at the interval's full precision.
+
 The `AT LOCAL` operator renders a datetime in the current session time zone:
 
 ```
 SELECT timestamp '2012-10-31 01:00 UTC' AT LOCAL;
 -- 2012-10-30 18:00:00.000 America/Los_Angeles  (session zone)
 ```
+
+## OVERLAPS
+
+The `OVERLAPS` predicate tests whether two periods of time share any instant.
+Each operand is a row value of two elements:
+
+* The first element is the period's start point, a datetime value.
+* The second element is either the period's end point (a datetime value) or
+  the period's length (an interval value, in which case the end is computed
+  as `start + interval`).
+
+```
+SELECT (DATE '2020-01-01', DATE '2020-06-01') OVERLAPS (DATE '2020-05-01', DATE '2020-12-31');
+-- true
+
+SELECT (DATE '2020-01-01', DATE '2020-03-01') OVERLAPS (DATE '2020-05-01', DATE '2020-07-01');
+-- false
+
+SELECT (DATE '2020-01-01', INTERVAL '5' MONTH) OVERLAPS (DATE '2020-05-01', INTERVAL '7' MONTH);
+-- true
+```
+
+If the start and end of an operand are given in reverse, they are normalized
+before evaluation. The half-open semantics mean that periods which touch only
+at a boundary (one period's end equal to the other's start) do not overlap;
+however, two periods that share the same start point always overlap.
+
+If one endpoint of a period is `NULL`, the period is treated as open-ended on
+that side: its known endpoint still anchors the comparison, so the result is
+`true` whenever that known endpoint falls inside the other period, and `NULL`
+(unknown) only when the open side leaves the outcome undetermined.
 
 ## Date and time functions
 
@@ -78,6 +162,8 @@ This is an alias for `CAST(x AS date)`.
 
 :::{function} last_day_of_month(x) -> date
 Returns the last day of the month.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} from_iso8601_timestamp(string) -> timestamp(3) with time zone
@@ -127,8 +213,10 @@ SELECT from_iso8601_date('2020-123');
 ```
 :::
 
-:::{function} at_timezone(timestamp(p) with time zone, zone) -> timestamp(p) with time zone
-Converts a `timestamp(p) with time zone` to a time zone specified in `zone`.
+:::{function} at_timezone(x, zone) -> timestamp(p) with time zone
+Converts `x` to a time zone specified in `zone`.
+
+The type of `x` can be `time with time zone` or `timestamp with time zone`.
 
 In the following example, the input timezone is `GMT`, which is seven hours
 ahead of `America/Los_Angeles` in November 2022:
@@ -218,12 +306,16 @@ This is an alias for `current_timestamp`.
 :::
 
 :::{function} to_iso8601(x) -> varchar
-Formats `x` as an ISO 8601 string. `x` can be date, timestamp, or
-timestamp with time zone.
+Formats `x` as an ISO 8601 string.
+
+The type of `x` can be `date`, `time`, `time with timezone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} to_milliseconds(interval) -> bigint
-Returns the day-to-second `interval` as milliseconds.
+Returns the day-to-second `interval` as milliseconds, truncating any fractional
+millisecond toward zero. Intervals with up to twelve fractional-second digits
+are accepted.
 :::
 
 :::{function} to_unixtime(timestamp) -> double
@@ -356,6 +448,9 @@ SELECT parse_duration('5m');
 -- 0 00:05:00.000
 ```
 :::
+
+`parse_duration` rejects durations that exceed the interval's signed 64-bit
+microsecond range.
 
 :::{function} human_readable_seconds(double) -> varchar
 Formats the double value of `seconds` into a human-readable string containing
@@ -494,6 +589,8 @@ This SQL-standard function uses special syntax for specifying the arguments.
 
 :::{function} day(x) -> bigint
 Returns the day of the month from `x`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} day_of_month(x) -> bigint
@@ -503,11 +600,15 @@ This is an alias for {func}`day`.
 :::{function} day_of_week(x) -> bigint
 Returns the ISO day of the week from `x`.
 The value ranges from `1` (Monday) to `7` (Sunday).
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} day_of_year(x) -> bigint
 Returns the day of the year from `x`.
 The value ranges from `1` to `366`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} dow(x) -> bigint
@@ -521,27 +622,43 @@ This is an alias for {func}`day_of_year`.
 :::{function} hour(x) -> bigint
 Returns the hour of the day from `x`.
 The value ranges from `0` to `23`.
+
+The type of `x` can be `time`, `time with time zone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} millisecond(x) -> bigint
 Returns the millisecond of the second from `x`.
+
+The type of `x` can be `time`, `time with time zone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} minute(x) -> bigint
 Returns the minute of the hour from `x`.
+
+The type of `x` can be `time`, `time with time zone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} month(x) -> bigint
 Returns the month of the year from `x`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} quarter(x) -> bigint
 Returns the quarter of the year from `x`.
 The value ranges from `1` to `4`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} second(x) -> bigint
 Returns the second of the minute from `x`.
+
+The type of `x` can be `time`, `time with time zone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} timezone_hour(timestamp) -> bigint
@@ -555,6 +672,8 @@ Returns the minute of the time zone offset from `timestamp`.
 :::{function} week(x) -> bigint
 Returns the [ISO week] of the year from `x`.
 The value ranges from `1` to `53`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} week_of_year(x) -> bigint
@@ -563,10 +682,14 @@ This is an alias for {func}`week`.
 
 :::{function} year(x) -> bigint
 Returns the year from `x`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} year_of_week(x) -> bigint
 Returns the year of the [ISO week] from `x`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} yow(x) -> bigint

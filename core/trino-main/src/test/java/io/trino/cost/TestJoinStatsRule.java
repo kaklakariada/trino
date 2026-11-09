@@ -14,16 +14,23 @@
 package io.trino.cost;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.sql.ir.Comparison;
+import com.google.common.collect.ImmutableMap;
+import io.trino.spi.statistics.TableStatistics;
+import io.trino.sql.ir.ComparisonOperator;
 import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
+import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.JoinNode.EquiJoinClause;
 import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.PlanNode;
+import io.trino.sql.planner.plan.ValuesNode;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 
@@ -31,7 +38,11 @@ import static io.trino.SystemSessionProperties.JOIN_MULTI_CLAUSE_INDEPENDENCE_FA
 import static io.trino.cost.FilterStatsCalculator.UNKNOWN_FILTER_COEFFICIENT;
 import static io.trino.cost.PlanNodeStatsAssertion.assertThat;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.TestingPlannerContext.PLANNER_CONTEXT;
+import static io.trino.sql.planner.iterative.Lookup.noLookup;
+import static io.trino.sql.planner.plan.JoinNode.DistributionType.PARTITIONED;
+import static io.trino.sql.planner.plan.JoinNode.DistributionType.REPLICATED;
 import static io.trino.sql.planner.plan.JoinType.FULL;
 import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.sql.planner.plan.JoinType.LEFT;
@@ -90,6 +101,7 @@ public class TestJoinStatsRule
     private static final JoinStatsRule JOIN_STATS_RULE = new JoinStatsRule(
             new FilterStatsCalculator(PLANNER_CONTEXT, new ScalarStatsCalculator(PLANNER_CONTEXT), NORMALIZER),
             NORMALIZER,
+            PLANNER_CONTEXT.getMetadata(),
             1.0);
 
     @Test
@@ -204,7 +216,7 @@ public class TestJoinStatsRule
                             Symbol rightJoinColumnSymbol = pb.symbol(RIGHT_JOIN_COLUMN, DOUBLE);
                             Symbol leftJoinColumnSymbol2 = pb.symbol(LEFT_JOIN_COLUMN_2, DOUBLE);
                             Symbol rightJoinColumnSymbol2 = pb.symbol(RIGHT_JOIN_COLUMN_2, DOUBLE);
-                            Comparison leftJoinColumnLessThanTen = new Comparison(Comparison.Operator.LESS_THAN, leftJoinColumnSymbol.toSymbolReference(), new Constant(DOUBLE, 10.0));
+                            Expression leftJoinColumnLessThanTen = comparison(ComparisonOperator.LESS_THAN, leftJoinColumnSymbol.toSymbolReference(), new Constant(DOUBLE, 10.0));
                             return pb.join(
                                     INNER,
                                     pb.values(leftJoinColumnSymbol, leftJoinColumnSymbol2),
@@ -380,6 +392,59 @@ public class TestJoinStatsRule
         assertJoinStats(INNER, zeroLeftStats, RIGHT_STATS, zeroResultStats);
         assertJoinStats(INNER, LEFT_STATS, zeroRightStats, zeroResultStats);
         assertJoinStats(INNER, zeroLeftStats, zeroRightStats, zeroResultStats);
+    }
+
+    /**
+     * Flipped and re-distributed copies of an inner join get the same estimate.
+     */
+    @Test
+    public void testStatsDoNotDependOnDistributionTypeOrBuildSide()
+    {
+        PlanNodeStatsEstimate expected = joinStats(join -> join);
+
+        Assertions.assertThat(joinStats(JoinNode::flipChildren)).isEqualTo(expected);
+        Assertions.assertThat(joinStats(join -> join.withDistributionType(PARTITIONED))).isEqualTo(expected);
+        Assertions.assertThat(joinStats(join -> join.withDistributionType(REPLICATED))).isEqualTo(expected);
+        Assertions.assertThat(joinStats(join -> join.flipChildren().withDistributionType(PARTITIONED))).isEqualTo(expected);
+        Assertions.assertThat(joinStats(join -> join.flipChildren().withDistributionType(REPLICATED))).isEqualTo(expected);
+    }
+
+    /**
+     * Calculates the stats of a variant of one inner join, with the sources' stats supplied
+     * directly rather than through a provider.
+     */
+    private static PlanNodeStatsEstimate joinStats(Function<JoinNode, JoinNode> variant)
+    {
+        PlanNodeIdAllocator idAllocator = new PlanNodeIdAllocator();
+        Symbol leftJoinColumnSymbol = new Symbol(DOUBLE, LEFT_JOIN_COLUMN);
+        Symbol rightJoinColumnSymbol = new Symbol(DOUBLE, RIGHT_JOIN_COLUMN);
+        Symbol leftOtherColumnSymbol = new Symbol(DOUBLE, LEFT_OTHER_COLUMN);
+        Symbol rightOtherColumnSymbol = new Symbol(DOUBLE, RIGHT_OTHER_COLUMN);
+
+        PlanNode left = new ValuesNode(idAllocator.getNextId(), ImmutableList.of(leftJoinColumnSymbol, leftOtherColumnSymbol), ImmutableList.of());
+        PlanNode right = new ValuesNode(idAllocator.getNextId(), ImmutableList.of(rightJoinColumnSymbol, rightOtherColumnSymbol), ImmutableList.of());
+        JoinNode join = new JoinNode(
+                idAllocator.getNextId(),
+                INNER,
+                left,
+                right,
+                ImmutableList.of(new EquiJoinClause(leftJoinColumnSymbol, rightJoinColumnSymbol)),
+                left.getOutputSymbols(),
+                right.getOutputSymbols(),
+                false,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                ImmutableMap.of(),
+                Optional.empty());
+
+        Map<PlanNode, PlanNodeStatsEstimate> sourceStats = ImmutableMap.of(left, LEFT_STATS, right, RIGHT_STATS);
+        StatsProvider statsProvider = node -> sourceStats.getOrDefault(node, PlanNodeStatsEstimate.unknown());
+        return JOIN_STATS_RULE
+                .calculate(
+                        variant.apply(join),
+                        new StatsCalculator.Context(statsProvider, noLookup(), testSessionBuilder().build(), _ -> TableStatistics.empty(), RuntimeInfoProvider.noImplementation()))
+                .orElseThrow();
     }
 
     private void assertJoinStats(JoinType joinType, PlanNodeStatsEstimate leftStats, PlanNodeStatsEstimate rightStats, PlanNodeStatsEstimate resultStats)

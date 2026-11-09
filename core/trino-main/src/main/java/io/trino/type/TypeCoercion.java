@@ -17,17 +17,19 @@ import com.google.common.collect.ImmutableList;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.IntervalField;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.NumberType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.RowType.Field;
 import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimeWithTimeZoneType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeParameter;
-import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarcharType;
 
 import java.util.List;
@@ -39,11 +41,11 @@ import static com.google.common.base.Preconditions.checkState;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.CharType.createCharType;
 import static io.trino.spi.type.DecimalType.createDecimalType;
+import static io.trino.spi.type.Decimals.longTenToNth;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.HyperLogLogType.HYPER_LOG_LOG;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
-import static io.trino.spi.type.RowType.Field;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimeType.createTimeType;
 import static io.trino.spi.type.TimeWithTimeZoneType.createTimeWithTimeZoneType;
@@ -51,7 +53,11 @@ import static io.trino.spi.type.TimestampType.createTimestampType;
 import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.type.CharVarcharCoercion.LEGACY;
+import static io.trino.type.CharVarcharCoercion.SQL_STANDARD;
 import static io.trino.type.CodePointsType.CODE_POINTS;
+import static io.trino.type.IntervalDayTimeType.createIntervalDayTimeType;
+import static io.trino.type.IntervalYearMonthType.createIntervalYearMonthType;
 import static io.trino.type.JoniRegexpType.JONI_REGEXP;
 import static io.trino.type.JsonPathType.JSON_PATH;
 import static io.trino.type.Re2JRegexpType.RE2J_REGEXP_SIGNATURE;
@@ -59,11 +65,13 @@ import static java.util.Objects.requireNonNull;
 
 public final class TypeCoercion
 {
-    private final Function<TypeSignature, Type> lookupType;
+    private final Function<TypeDescriptor, Type> lookupType;
+    private final CharVarcharCoercion charVarcharCoercion;
 
-    public TypeCoercion(Function<TypeSignature, Type> lookupType)
+    public TypeCoercion(Function<TypeDescriptor, Type> lookupType, CharVarcharCoercion charVarcharCoercion)
     {
         this.lookupType = requireNonNull(lookupType, "lookupType is null");
+        this.charVarcharCoercion = requireNonNull(charVarcharCoercion, "charVarcharCoercion is null");
     }
 
     public boolean isTypeOnlyCoercion(Type source, Type result)
@@ -86,6 +94,16 @@ public final class TypeCoercion
             boolean sameScale = sourceDecimal.getScale() == resultDecimal.getScale();
             boolean sourcePrecisionIsLessOrEqualToResultPrecision = sourceDecimal.getPrecision() <= resultDecimal.getPrecision();
             return sameDecimalSubtype && sameScale && sourcePrecisionIsLessOrEqualToResultPrecision;
+        }
+
+        // Widening an interval to a coarser qualifier in the same class keeps the same physical value
+        if (source instanceof IntervalYearMonthType && result instanceof IntervalYearMonthType) {
+            return true;
+        }
+        // A day-time interval keeps its physical value only while it stays on the same side of the
+        // short/long fractional-precision boundary; crossing it re-encodes micros as (micros, picos).
+        if (source instanceof IntervalDayTimeType sourceInterval && result instanceof IntervalDayTimeType resultInterval) {
+            return sourceInterval.isShort() == resultInterval.isShort();
         }
 
         if (source instanceof RowType sourceType && result instanceof RowType resultType) {
@@ -121,7 +139,7 @@ public final class TypeCoercion
         return false;
     }
 
-    // based on `UnwrapCastInComparison.Visitor.hasInjectiveImplicitCoercion()`
+    // based on `the comparison-preimage cast eligibility rules`
     public boolean isInjectiveCoercion(Type source, Type result)
     {
         if ((source.equals(BIGINT) && result.equals(DOUBLE)) ||
@@ -158,6 +176,18 @@ public final class TypeCoercion
     {
         TypeCompatibility typeCompatibility = compatibility(fromType, toType);
         return typeCompatibility.isCompatible();
+    }
+
+    /// Whether a value of `sourceType` may be assigned to a column of `targetType` in a store-assignment
+    /// context such as `INSERT`, `UPDATE` or `MERGE`.
+    ///
+    /// Store assignment is broader than implicit coercion: a value may be assignable even when its type does
+    /// not implicitly coerce to the target. A positive result means only that the assignment is permitted,
+    /// not that it always succeeds — at execution it may fail rather than silently lose data (for example,
+    /// storing a longer string into a shorter character column).
+    public boolean isStoreAssignable(Type sourceType, Type targetType)
+    {
+        return isCompatible(sourceType, targetType);
     }
 
     public boolean canCoerce(Type fromType, Type toType)
@@ -214,6 +244,14 @@ public final class TypeCoercion
                 Type commonSuperType = createTimeWithTimeZoneType(Math.max(((TimeWithTimeZoneType) fromType).getPrecision(), ((TimeWithTimeZoneType) toType).getPrecision()));
                 return TypeCompatibility.compatible(commonSuperType, commonSuperType.equals(toType));
             }
+            if (fromTypeBaseName.equals(StandardTypes.INTERVAL_YEAR_TO_MONTH)) {
+                Type commonSuperType = getCommonSuperTypeForIntervalYearMonth((IntervalYearMonthType) fromType, (IntervalYearMonthType) toType);
+                return TypeCompatibility.compatible(commonSuperType, commonSuperType.equals(toType));
+            }
+            if (fromTypeBaseName.equals(StandardTypes.INTERVAL_DAY_TO_SECOND)) {
+                Type commonSuperType = getCommonSuperTypeForIntervalDayTime((IntervalDayTimeType) fromType, (IntervalDayTimeType) toType);
+                return TypeCompatibility.compatible(commonSuperType, commonSuperType.equals(toType));
+            }
 
             if (isCovariantParametrizedType(fromType)) {
                 return typeCompatibilityForCovariantParametrizedType(fromType, toType);
@@ -236,6 +274,69 @@ public final class TypeCoercion
         }
 
         return TypeCompatibility.incompatible();
+    }
+
+    private static Type getCommonSuperTypeForIntervalYearMonth(IntervalYearMonthType firstType, IntervalYearMonthType secondType)
+    {
+        IntervalField startField = mostSignificant(firstType.getStartField(), secondType.getStartField());
+        IntervalField endField = leastSignificant(firstType.getEndField(), secondType.getEndField());
+        // Size each operand in the result leading field using the actual unit conversion.
+        int leadingPrecision = Math.max(
+                leadingPrecisionIn(firstType, startField),
+                leadingPrecisionIn(secondType, startField));
+        return createIntervalYearMonthType(startField, endField, leadingPrecision);
+    }
+
+    private static Type getCommonSuperTypeForIntervalDayTime(IntervalDayTimeType firstType, IntervalDayTimeType secondType)
+    {
+        IntervalField startField = mostSignificant(firstType.getStartField(), secondType.getStartField());
+        IntervalField endField = leastSignificant(firstType.getEndField(), secondType.getEndField());
+        // The supertype takes the wider leading and fractional-seconds precision, so a narrower interval
+        // coerces to a wider one (day(1) to day(2)), matching timestamp(p)/decimal(p). Convert each
+        // operand's leading range into the result field before comparing its decimal width.
+        int leadingPrecision = Math.max(
+                leadingPrecisionIn(firstType, startField),
+                leadingPrecisionIn(secondType, startField));
+        int fractionalPrecision = endField == IntervalField.SECOND ? Math.max(firstType.getFractionalPrecision(), secondType.getFractionalPrecision()) : 0;
+        return createIntervalDayTimeType(startField, endField, leadingPrecision, fractionalPrecision);
+    }
+
+    private static int leadingPrecisionIn(IntervalDayTimeType type, IntervalField supertypeStartField)
+    {
+        return convertedLeadingPrecision(type.getLeadingPrecision(), unitsPerDay(type.getStartField()) / unitsPerDay(supertypeStartField), IntervalDayTimeType.maxLeadingPrecision(supertypeStartField));
+    }
+
+    private static int leadingPrecisionIn(IntervalYearMonthType type, IntervalField supertypeStartField)
+    {
+        return convertedLeadingPrecision(type.getLeadingPrecision(), type.getStartField() == supertypeStartField ? 1 : 12, IntervalYearMonthType.maxLeadingPrecision(supertypeStartField));
+    }
+
+    private static int convertedLeadingPrecision(int precision, long unitsPerTargetUnit, int maximumPrecision)
+    {
+        // Trailing fields are less than one source leading unit, so they cannot increase this bound.
+        long maximumLeadingValue = (longTenToNth(precision) - 1) / unitsPerTargetUnit;
+        return Math.min(maximumPrecision, Long.toString(maximumLeadingValue).length());
+    }
+
+    private static long unitsPerDay(IntervalField field)
+    {
+        return switch (field) {
+            case DAY -> 1;
+            case HOUR -> 24;
+            case MINUTE -> 24 * 60;
+            case SECOND -> 24 * 60 * 60;
+            default -> throw new IllegalArgumentException("Not a day-time field: " + field);
+        };
+    }
+
+    private static IntervalField mostSignificant(IntervalField first, IntervalField second)
+    {
+        return first.code() <= second.code() ? first : second;
+    }
+
+    private static IntervalField leastSignificant(IntervalField first, IntervalField second)
+    {
+        return first.code() >= second.code() ? first : second;
     }
 
     private static Type getCommonSuperTypeForDecimal(DecimalType firstType, DecimalType secondType)
@@ -310,10 +411,10 @@ public final class TypeCoercion
                 return TypeCompatibility.incompatible();
             }
             coercible &= compatibility.isCoercible();
-            commonParameterTypes.add(TypeParameter.typeParameter(compatibility.getCommonSuperType().getTypeSignature()));
+            commonParameterTypes.add(TypeParameter.typeParameter(compatibility.getCommonSuperType().getTypeDescriptor()));
         }
         String typeBase = fromType.getBaseName();
-        return TypeCompatibility.compatible(lookupType.apply(new TypeSignature(typeBase, commonParameterTypes.build())), coercible);
+        return TypeCompatibility.compatible(lookupType.apply(new TypeDescriptor(typeBase, commonParameterTypes.build())), coercible);
     }
 
     /**
@@ -350,7 +451,7 @@ public final class TypeCoercion
                      JoniRegexpType.NAME,
                      JsonPathType.NAME,
                      ColorType.NAME,
-                     CodePointsType.NAME -> Optional.of(lookupType.apply(new TypeSignature(resultTypeBase)));
+                     CodePointsType.NAME -> Optional.of(lookupType.apply(new TypeDescriptor(resultTypeBase)));
                 case StandardTypes.VARCHAR -> Optional.of(createVarcharType(0));
                 case StandardTypes.CHAR -> Optional.of(createCharType(0));
                 case StandardTypes.DECIMAL -> Optional.of(createDecimalType(1, 0));
@@ -415,6 +516,9 @@ public final class TypeCoercion
             };
             case StandardTypes.VARCHAR -> switch (resultTypeBase) {
                 case StandardTypes.CHAR -> {
+                    if (charVarcharCoercion == SQL_STANDARD) {
+                        yield Optional.empty();
+                    }
                     VarcharType varcharType = (VarcharType) sourceType;
                     if (varcharType.isUnbounded()) {
                         yield Optional.of(createCharType(CharType.MAX_LENGTH));
@@ -428,10 +532,12 @@ public final class TypeCoercion
                 default -> Optional.empty();
             };
             case StandardTypes.CHAR -> switch (resultTypeBase) {
-                // CHAR could be coercible to VARCHAR, but they cannot be both coercible to each other.
-                // VARCHAR to CHAR coercion provides natural semantics when comparing VARCHAR literals to CHAR columns.
-                // WITH CHAR to VARCHAR coercion one would need to pad literals with spaces: char_column_len_5 = 'abc  ', so we would not run unmodified TPC-DS queries.
-                case StandardTypes.VARCHAR -> Optional.empty();
+                case StandardTypes.VARCHAR -> {
+                    if (charVarcharCoercion == LEGACY) {
+                        yield Optional.empty();
+                    }
+                    yield Optional.of(createVarcharType(((CharType) sourceType).getLength()));
+                }
                 case JoniRegexpType.NAME -> Optional.of(JONI_REGEXP);
                 case Re2JRegexpType.NAME -> Optional.of(lookupType.apply(RE2J_REGEXP_SIGNATURE));
                 case JsonPathType.NAME -> Optional.of(JSON_PATH);

@@ -15,7 +15,8 @@ package io.trino.operator.window;
 
 import org.junit.jupiter.api.Test;
 
-import static io.trino.SessionTestUtils.TEST_SESSION;
+import java.util.Optional;
+
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -25,11 +26,17 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 public class TestCumulativeDistributionFunction
         extends AbstractTestWindowFunction
 {
+    @Override
+    protected Optional<WindowFunctionUnderTest> windowFunctionUnderTest()
+    {
+        return Optional.of(new WindowFunctionUnderTest("cume_dist", "cume_dist()"));
+    }
+
     @Test
     public void testCumulativeDistribution()
     {
         assertWindowQuery("cume_dist() OVER (PARTITION BY orderstatus ORDER BY orderkey)",
-                resultBuilder(TEST_SESSION, INTEGER, VARCHAR, DOUBLE)
+                resultBuilder(INTEGER, VARCHAR, DOUBLE)
                         .row(3, "F", 0.25)
                         .row(5, "F", 0.5)
                         .row(6, "F", 0.75)
@@ -42,7 +49,7 @@ public class TestCumulativeDistributionFunction
                         .row(34, "O", 1.0)
                         .build());
         assertWindowQueryWithNulls("cume_dist() OVER (PARTITION BY orderstatus ORDER BY orderkey)",
-                resultBuilder(TEST_SESSION, BIGINT, VARCHAR, DOUBLE)
+                resultBuilder(BIGINT, VARCHAR, DOUBLE)
                         .row(3L, "F", 0.25)
                         .row(5L, "F", 0.5)
                         .row(6L, "F", 0.75)
@@ -56,7 +63,7 @@ public class TestCumulativeDistributionFunction
                         .build());
 
         assertWindowQuery("cume_dist() OVER (ORDER BY orderkey)",
-                resultBuilder(TEST_SESSION, INTEGER, VARCHAR, DOUBLE)
+                resultBuilder(INTEGER, VARCHAR, DOUBLE)
                         .row(1, "O", 0.1)
                         .row(2, "O", 0.2)
                         .row(3, "F", 0.3)
@@ -69,7 +76,7 @@ public class TestCumulativeDistributionFunction
                         .row(34, "O", 1.0)
                         .build());
         assertWindowQueryWithNulls("cume_dist() OVER (ORDER BY orderkey)",
-                resultBuilder(TEST_SESSION, BIGINT, VARCHAR, DOUBLE)
+                resultBuilder(BIGINT, VARCHAR, DOUBLE)
                         .row(1L, null, 0.1)
                         .row(3L, "F", 0.2)
                         .row(5L, "F", 0.3)
@@ -83,7 +90,7 @@ public class TestCumulativeDistributionFunction
                         .build());
 
         assertWindowQuery("cume_dist() OVER (ORDER BY orderstatus)",
-                resultBuilder(TEST_SESSION, INTEGER, VARCHAR, DOUBLE)
+                resultBuilder(INTEGER, VARCHAR, DOUBLE)
                         .row(3, "F", 0.4)
                         .row(5, "F", 0.4)
                         .row(6, "F", 0.4)
@@ -96,7 +103,7 @@ public class TestCumulativeDistributionFunction
                         .row(34, "O", 1.0)
                         .build());
         assertWindowQueryWithNulls("cume_dist() OVER (ORDER BY orderstatus)",
-                resultBuilder(TEST_SESSION, BIGINT, VARCHAR, DOUBLE)
+                resultBuilder(BIGINT, VARCHAR, DOUBLE)
                         .row(3L, "F", 0.4)
                         .row(5L, "F", 0.4)
                         .row(6L, "F", 0.4)
@@ -110,7 +117,7 @@ public class TestCumulativeDistributionFunction
                         .build());
 
         assertWindowQuery("cume_dist() OVER (PARTITION BY orderkey)",
-                resultBuilder(TEST_SESSION, INTEGER, VARCHAR, DOUBLE)
+                resultBuilder(INTEGER, VARCHAR, DOUBLE)
                         .row(1, "O", 1.0)
                         .row(2, "O", 1.0)
                         .row(3, "F", 1.0)
@@ -123,7 +130,7 @@ public class TestCumulativeDistributionFunction
                         .row(34, "O", 1.0)
                         .build());
         assertWindowQueryWithNulls("cume_dist() OVER (PARTITION BY orderkey)",
-                resultBuilder(TEST_SESSION, BIGINT, VARCHAR, DOUBLE)
+                resultBuilder(BIGINT, VARCHAR, DOUBLE)
                         .row(1L, null, 1.0)
                         .row(3L, "F", 1.0)
                         .row(5L, "F", 1.0)

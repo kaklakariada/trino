@@ -20,6 +20,9 @@ import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.spi.security.ConnectorIdentity;
 import jakarta.annotation.PreDestroy;
 
+import java.util.Optional;
+import java.util.function.Supplier;
+
 import static com.google.common.util.concurrent.MoreExecutors.listeningDecorator;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.lang.Math.toIntExact;
@@ -33,6 +36,7 @@ public class GcsFileSystemFactory
     private final long writeBlockSizeBytes;
     private final int pageSize;
     private final int batchSize;
+    private final Optional<String> endpoint;
     private final ListeningExecutorService executorService;
     private final GcsStorageFactory storageFactory;
 
@@ -43,6 +47,7 @@ public class GcsFileSystemFactory
         this.writeBlockSizeBytes = config.getWriteBlockSize().toBytes();
         this.pageSize = config.getPageSize();
         this.batchSize = config.getBatchSize();
+        this.endpoint = config.getEndpoint();
         this.storageFactory = requireNonNull(storageFactory, "storageFactory is null");
         this.executorService = listeningDecorator(newCachedThreadPool(daemonThreadsNamed("trino-filesystem-gcs-%S")));
     }
@@ -56,6 +61,12 @@ public class GcsFileSystemFactory
     @Override
     public TrinoFileSystem create(ConnectorIdentity identity)
     {
-        return new GcsFileSystem(executorService, storageFactory.create(identity), readBlockSizeBytes, writeBlockSizeBytes, pageSize, batchSize);
+        return new GcsFileSystem(executorService, storageFactory.create(identity), readBlockSizeBytes, writeBlockSizeBytes, pageSize, batchSize, endpoint);
+    }
+
+    @Override
+    public TrinoFileSystem create(Supplier<ConnectorIdentity> identitySupplier)
+    {
+        return new GcsFileSystem(executorService, storageFactory.create(identitySupplier), readBlockSizeBytes, writeBlockSizeBytes, pageSize, batchSize, endpoint);
     }
 }

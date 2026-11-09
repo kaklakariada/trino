@@ -55,7 +55,8 @@ may need to manually register and configure the driver.
 ## Registering and configuring the driver
 
 Drivers are commonly loaded automatically by applications once they are added to
-its classpath. If your application does not, such as is the case for some
+the application classpath. If your application does not, such as is the case
+for some
 GUI-based SQL editors, read this section. The steps to register the JDBC driver
 in a UI or on the command line depend upon the specific application you are
 using. Please check your application's documentation.
@@ -255,6 +256,23 @@ may not be specified using both methods.
     allowing it to be reused across separate CLI or JDBC processes. If the JDBC
     driver is used in a shared mode by different users, the first registered
     token is stored and authenticates all users.
+* - `oauth2ClientId`
+  - OAuth2 client ID for non-interactive (machine-to-machine) authentication using the client
+    credentials flow. Unlike browser-based authentication, the client authenticates directly
+    using a client ID and secret without user involvement. Requires `oauth2ClientSecret` to also
+    be set.
+* - `oauth2ClientSecret`
+  - OAuth2 client secret for client credentials authentication.
+* - `oauth2TokenEndpoint`
+  - Optional `https://` URL of the OAuth2 token endpoint that the client credentials are exchanged
+    at. When set, the secret is only ever sent to this endpoint: if the server advertises a token
+    endpoint in its authentication challenge, it is used only when it matches this value, and a
+    mismatch is rejected. When not set, the token endpoint advertised by the server is used, and it
+    must be an `https://` URL.
+* - `oauth2Scope`
+  - Optional OAuth2 scope requested for client credentials authentication. When set, it overrides
+    the scope advertised by the server in its authentication challenge. When not set, the scope from
+    the challenge is used.
 * - `disableCompression`
   -  Whether HTTP compression should be disabled. Defaults to `false`.
 * - `disallowLocalRedirect`

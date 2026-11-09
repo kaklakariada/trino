@@ -21,7 +21,6 @@ import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
-import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.metadata.Split;
 import io.trino.metadata.TableHandle;
 import io.trino.operator.WorkProcessor.ProcessState;
@@ -81,10 +80,10 @@ public class ScanFilterAndProjectOperator
     private long readTimeNanos;
     private long dynamicFilterSplitsProcessed;
     private Metrics metrics = Metrics.EMPTY;
+    private boolean released;
 
     private ScanFilterAndProjectOperator(
-            Session session,
-            MemoryTrackingContext memoryTrackingContext,
+            OperatorContext operatorContext,
             DriverYieldSignal yieldSignal,
             WorkProcessor<Split> split,
             PageSourceProvider pageSourceProvider,
@@ -100,7 +99,7 @@ public class ScanFilterAndProjectOperator
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
         pages = split.flatTransform(
                 new SplitToPages(
-                        session,
+                        operatorContext.getSession(),
                         yieldSignal,
                         pageSourceProvider,
                         pageProcessor,
@@ -109,7 +108,7 @@ public class ScanFilterAndProjectOperator
                         columns,
                         dynamicFilter,
                         types,
-                        memoryTrackingContext.aggregateUserMemoryContext(),
+                        operatorContext.aggregateUserMemoryContext(),
                         minOutputPageSize,
                         minOutputPageRowCount));
     }
@@ -171,13 +170,19 @@ public class ScanFilterAndProjectOperator
     @Override
     public void close()
     {
-        if (pageSource != null) {
-            try {
+        try {
+            if (pageSource != null) {
                 pageSource.close();
                 metrics = pageSource.getMetrics();
             }
-            catch (IOException e) {
-                throw new UncheckedIOException(e);
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        finally {
+            if (!released) {
+                released = true;
+                pageSourceProvider.release();
             }
         }
     }
@@ -194,9 +199,9 @@ public class ScanFilterAndProjectOperator
         final List<ColumnHandle> columns;
         final DynamicFilter dynamicFilter;
         final List<Type> types;
+        final LocalMemoryContext pageSourceMemoryContext;
         final LocalMemoryContext memoryContext;
         final AggregatedMemoryContext localAggregatedMemoryContext;
-        final LocalMemoryContext pageSourceMemoryContext;
         final LocalMemoryContext outputMemoryContext;
         final DataSize minOutputPageSize;
         final int minOutputPageRowCount;
@@ -224,9 +229,9 @@ public class ScanFilterAndProjectOperator
             this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
             this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilter is null");
             this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
+            this.pageSourceMemoryContext = aggregatedMemoryContext.newLocalMemoryContext(ScanFilterAndProjectOperator.class.getSimpleName() + "-ConnectorPageSource");
             this.memoryContext = aggregatedMemoryContext.newLocalMemoryContext(ScanFilterAndProjectOperator.class.getSimpleName());
             this.localAggregatedMemoryContext = newSimpleAggregatedMemoryContext();
-            this.pageSourceMemoryContext = localAggregatedMemoryContext.newLocalMemoryContext(ScanFilterAndProjectOperator.class.getSimpleName());
             this.outputMemoryContext = localAggregatedMemoryContext.newLocalMemoryContext(ScanFilterAndProjectOperator.class.getSimpleName());
             this.minOutputPageSize = requireNonNull(minOutputPageSize, "minOutputPageSize is null");
             this.minOutputPageRowCount = minOutputPageRowCount;
@@ -251,7 +256,7 @@ public class ScanFilterAndProjectOperator
                 source = new EmptyPageSource();
             }
             else {
-                source = pageSourceProvider.createPageSource(session, split, table, tableCredentials, columns, dynamicFilter);
+                source = pageSourceProvider.createPageSource(session, split, table, tableCredentials, columns, dynamicFilter, pageSourceMemoryContext::setBytes);
             }
 
             pageSource = source;
@@ -262,12 +267,11 @@ public class ScanFilterAndProjectOperator
         {
             ConnectorSession connectorSession = session.toConnectorSession();
             return WorkProcessor
-                    .create(new ConnectorPageSourceToPages(pageSourceMemoryContext))
+                    .create(new ConnectorPageSourceToPages())
                     .yielding(yieldSignal::isSet)
                     .flatMap(page -> {
                         WorkProcessor<Page> workProcessor = pageProcessor.createWorkProcessor(
                                 connectorSession,
-                                yieldSignal,
                                 outputMemoryContext,
                                 pageProcessorMetrics,
                                 page);
@@ -311,13 +315,6 @@ public class ScanFilterAndProjectOperator
     private class ConnectorPageSourceToPages
             implements WorkProcessor.Process<SourcePage>
     {
-        final LocalMemoryContext pageSourceMemoryContext;
-
-        ConnectorPageSourceToPages(LocalMemoryContext pageSourceMemoryContext)
-        {
-            this.pageSourceMemoryContext = pageSourceMemoryContext;
-        }
-
         @Override
         public ProcessState<SourcePage> process()
         {
@@ -331,7 +328,6 @@ public class ScanFilterAndProjectOperator
             }
 
             SourcePage page = pageSource.getNextSourcePage();
-            pageSourceMemoryContext.setBytes(pageSource.getMemoryUsage() + pageSourceProvider.getMemoryUsage());
 
             // update operator stats
             processedPositions += page == null ? 0 : page.getPositionCount();
@@ -385,7 +381,8 @@ public class ScanFilterAndProjectOperator
                 DynamicFilter dynamicFilter,
                 List<Type> types,
                 DataSize minOutputPageSize,
-                int minOutputPageRowCount)
+                int minOutputPageRowCount,
+                AggregatedMemoryContext pageSourceProviderMemoryContext)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
@@ -398,7 +395,7 @@ public class ScanFilterAndProjectOperator
             this.types = requireNonNull(types, "types is null");
             this.minOutputPageSize = requireNonNull(minOutputPageSize, "minOutputPageSize is null");
             this.minOutputPageRowCount = minOutputPageRowCount;
-            this.pageSourceProvider = pageSourceProvider.createPageSourceProvider(table.catalogHandle());
+            this.pageSourceProvider = pageSourceProvider.createPageSourceProvider(table.catalogHandle(), pageSourceProviderMemoryContext);
         }
 
         @Override
@@ -445,13 +442,11 @@ public class ScanFilterAndProjectOperator
         @Override
         public WorkProcessorSourceOperator create(
                 OperatorContext operatorContext,
-                MemoryTrackingContext memoryTrackingContext,
                 DriverYieldSignal yieldSignal,
                 WorkProcessor<Split> split)
         {
-            return new ScanFilterAndProjectOperator(
-                    operatorContext.getSession(),
-                    memoryTrackingContext,
+            ScanFilterAndProjectOperator operator = new ScanFilterAndProjectOperator(
+                    operatorContext,
                     yieldSignal,
                     split,
                     pageSourceProvider,
@@ -463,12 +458,18 @@ public class ScanFilterAndProjectOperator
                     types,
                     minOutputPageSize,
                     minOutputPageRowCount);
+            pageSourceProvider.retain();
+            return operator;
         }
 
         @Override
         public void noMoreOperators()
         {
+            if (closed) {
+                return;
+            }
             closed = true;
+            pageSourceProvider.release();
         }
     }
 }

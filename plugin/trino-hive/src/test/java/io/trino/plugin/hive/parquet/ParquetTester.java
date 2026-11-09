@@ -23,6 +23,7 @@ import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.local.LocalInputFile;
 import io.trino.parquet.ParquetReaderOptions;
+import io.trino.parquet.ParquetWriteValidation.ParquetWriteValidationBuilder;
 import io.trino.parquet.writer.ParquetSchemaConverter;
 import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
@@ -82,6 +83,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -99,7 +101,6 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Iterables.transform;
 import static io.airlift.slice.Slices.utf8Slice;
-import static io.trino.parquet.ParquetWriteValidation.ParquetWriteValidationBuilder;
 import static io.trino.parquet.writer.ParquetSchemaConverter.HIVE_PARQUET_USE_INT96_TIMESTAMP_ENCODING;
 import static io.trino.parquet.writer.ParquetSchemaConverter.HIVE_PARQUET_USE_LEGACY_DECIMAL_ENCODING;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_WRITE_VALIDATION_FAILED;
@@ -332,7 +333,7 @@ class ParquetTester
                 try (TempFile tempFile = new TempFile("test", "parquet")) {
                     OptionalInt min = stream(writeValues).mapToInt(Iterables::size).min();
                     checkState(min.isPresent());
-                    writeParquetColumnTrino(tempFile.getFile(), columnTypes, columnNames, getIterators(readValues), min.getAsInt(), compressionCodec, schemaOptions);
+                    writeParquetColumnTrino(tempFile.getFile(), columnTypes, columnNames, getIterators(readValues), min.orElseThrow(), compressionCodec, schemaOptions);
                     assertFileContents(
                             session,
                             tempFile.getFile(),
@@ -489,9 +490,6 @@ class ParquetTester
                 continue;
             }
 
-            maxReadBlockSize.ifPresent(max ->
-                    assertThat(page.getPositionCount() == 1 || page.getSizeInBytes() <= max).isTrue());
-
             for (int field = 0; field < page.getChannelCount(); field++) {
                 Block block = page.getBlock(field);
                 for (int i = 0; i < block.getPositionCount(); i++) {
@@ -501,6 +499,10 @@ class ParquetTester
                     assertThat(actual).isEqualTo(expected);
                 }
             }
+
+            // The page is lazy and reports only the size of its loaded blocks
+            maxReadBlockSize.ifPresent(max ->
+                    assertThat(page.getPositionCount() == 1 || page.getSizeInBytes() <= max).isTrue());
         }
     }
 
@@ -562,7 +564,7 @@ class ParquetTester
         public TempFile(String prefix, String suffix)
         {
             try {
-                file = File.createTempFile(prefix, suffix);
+                file = Files.createTempFile(prefix, suffix).toFile();
                 verify(file.delete());
             }
             catch (IOException e) {

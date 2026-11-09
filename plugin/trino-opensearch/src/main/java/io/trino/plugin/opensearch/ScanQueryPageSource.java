@@ -140,12 +140,6 @@ public class ScanQueryPageSource
     }
 
     @Override
-    public long getMemoryUsage()
-    {
-        return 0;
-    }
-
-    @Override
     public void close()
     {
         iterator.close();
@@ -299,7 +293,7 @@ public class ScanQueryPageSource
         @Override
         protected SearchHit computeNext()
         {
-            if (limit.isPresent() && totalRecordCount == limit.getAsLong()) {
+            if (limit.isPresent() && totalRecordCount == limit.orElseThrow()) {
                 // No more record is necessary.
                 return endOfData();
             }

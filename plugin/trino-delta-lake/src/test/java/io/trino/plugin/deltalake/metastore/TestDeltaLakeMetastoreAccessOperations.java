@@ -24,7 +24,6 @@ import io.trino.metastore.HiveMetastore;
 import io.trino.metastore.HiveMetastoreFactory;
 import io.trino.metastore.Table;
 import io.trino.plugin.deltalake.DeltaLakeQueryRunner;
-import io.trino.plugin.deltalake.TestingDeltaLakeUtils;
 import io.trino.plugin.hive.metastore.MetastoreMethod;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
@@ -40,6 +39,7 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.deltalake.DeltaLakeQueryRunner.TPCH_SCHEMA;
+import static io.trino.plugin.deltalake.TestingDeltaLakeUtils.getConnectorService;
 import static io.trino.plugin.hive.metastore.MetastoreInvocations.filterInvocations;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.CREATE_TABLE;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.DROP_TABLE;
@@ -73,9 +73,9 @@ public class TestDeltaLakeMetastoreAccessOperations
                 .addDeltaProperty("delta.metastore.store-table-metadata-interval", "30m") // Use a large interval to avoid interference with the test
                 .build();
 
-        metastore = TestingDeltaLakeUtils.getConnectorService(queryRunner, HiveMetastoreFactory.class)
+        metastore = getConnectorService(queryRunner, HiveMetastoreFactory.class)
                 .createMetastore(Optional.empty());
-        metadataScheduler = TestingDeltaLakeUtils.getConnectorService(queryRunner, DeltaLakeTableMetadataScheduler.class);
+        metadataScheduler = getConnectorService(queryRunner, DeltaLakeTableMetadataScheduler.class);
 
         return queryRunner;
     }
@@ -415,6 +415,129 @@ public class TestDeltaLakeMetastoreAccessOperations
                         .add(GET_ALL_DATABASES)
                         .add(GET_TABLES)
                         .build());
+    }
+
+    @Test
+    public void testInsert()
+    {
+        try (TestTable table = newTrinoTable("test_insert", "(col int)")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "INSERT INTO " + table.getName() + " VALUES 1",
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testUpdate()
+    {
+        try (TestTable table = newTrinoTable("test_update", "AS SELECT 1 AS col")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "UPDATE " + table.getName() + " SET col = 2",
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testMerge()
+    {
+        try (TestTable table = newTrinoTable("test_merge", "AS SELECT 1 AS col")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "MERGE INTO " + table.getName() + " t " +
+                            "USING (SELECT * FROM (VALUES 1)) AS s(col) " +
+                            "ON (t.col = s.col) " +
+                            "WHEN MATCHED THEN UPDATE SET col = 2",
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testDelete()
+    {
+        try (TestTable table = newTrinoTable("test_delete", "AS SELECT 1 AS col")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "DELETE FROM " + table.getName() + " WHERE col = 1",
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testDeleteWithoutWhereClause()
+    {
+        try (TestTable table = newTrinoTable("test_delete_all", "AS SELECT 1 AS col")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "DELETE FROM " + table.getName(),
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testTruncateTable()
+    {
+        try (TestTable table = newTrinoTable("test_truncate", "AS SELECT 1 AS col")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "TRUNCATE TABLE " + table.getName(),
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testCommentTable()
+    {
+        try (TestTable table = newTrinoTable("test_comment_table", "(col int)")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "COMMENT ON TABLE " + table.getName() + " IS 'test comment'",
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testCommentColumn()
+    {
+        try (TestTable table = newTrinoTable("test_comment_column", "(col int)")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "COMMENT ON COLUMN " + table.getName() + ".col IS 'test comment'",
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testAddColumn()
+    {
+        try (TestTable table = newTrinoTable("test_add_column", "(col int)")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "ALTER TABLE " + table.getName() + " ADD COLUMN new_col int",
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
+    }
+
+    @Test
+    public void testDropColumn()
+    {
+        try (TestTable table = newTrinoTable("test_drop_column", "(col int, col2 int) WITH (column_mapping_mode = 'name')")) {
+            assertMetastoreInvocations(
+                    getSession(),
+                    "ALTER TABLE " + table.getName() + " DROP COLUMN col2",
+                    ImmutableMultiset.of(GET_TABLE),
+                    asyncInvocations(true));
+        }
     }
 
     @Test

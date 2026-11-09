@@ -15,9 +15,11 @@ package io.trino.plugin.iceberg.catalog.snowflake;
 
 import com.google.inject.Inject;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.iceberg.catalog.AbstractTrinoCatalog;
 import io.trino.plugin.iceberg.catalog.IcebergTableOperations;
 import io.trino.plugin.iceberg.catalog.IcebergTableOperationsProvider;
 import io.trino.plugin.iceberg.catalog.TrinoCatalog;
+import io.trino.plugin.iceberg.encryption.EncryptionManagerFactory;
 import io.trino.plugin.iceberg.fileio.ForwardingFileIoFactory;
 import io.trino.spi.connector.ConnectorSession;
 import org.apache.iceberg.snowflake.SnowflakeIcebergTableOperations;
@@ -33,16 +35,19 @@ public class SnowflakeIcebergTableOperationsProvider
     private final TrinoFileSystemFactory fileSystemFactory;
     private final ForwardingFileIoFactory fileIoFactory;
     private final String snowflakeDatabase;
+    private final EncryptionManagerFactory encryptionManagerFactory;
 
     @Inject
     public SnowflakeIcebergTableOperationsProvider(
             TrinoFileSystemFactory fileSystemFactory,
             ForwardingFileIoFactory fileIoFactory,
-            IcebergSnowflakeCatalogConfig icebergSnowflakeCatalogConfig)
+            IcebergSnowflakeCatalogConfig icebergSnowflakeCatalogConfig,
+            EncryptionManagerFactory encryptionManagerFactory)
     {
         this.snowflakeDatabase = requireNonNull(icebergSnowflakeCatalogConfig.getDatabase(), "database is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fileIoFactory = requireNonNull(fileIoFactory, "fileIoFactory is null");
+        this.encryptionManagerFactory = requireNonNull(encryptionManagerFactory, "encryptionManagerFactory is null");
     }
 
     @Override
@@ -56,12 +61,13 @@ public class SnowflakeIcebergTableOperationsProvider
     {
         return new SnowflakeIcebergTableOperations(
                 (TrinoSnowflakeCatalog) catalog,
-                fileIoFactory.create(fileSystemFactory.create(session), isUseFileSizeFromMetadata(session)),
+                fileIoFactory.create(((AbstractTrinoCatalog) catalog).measureFileSystem(fileSystemFactory.create(session)), isUseFileSizeFromMetadata(session)),
                 session,
                 snowflakeDatabase,
                 database,
                 table,
                 owner,
-                location);
+                location,
+                encryptionManagerFactory);
     }
 }

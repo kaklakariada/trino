@@ -19,7 +19,6 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.metadata.TestingFunctionResolution;
-import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.WorkProcessor;
 import io.trino.operator.project.PageProcessor;
 import io.trino.operator.project.PageProcessorMetrics;
@@ -53,6 +52,8 @@ import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.function.OperatorType.LESS_THAN;
@@ -105,6 +106,7 @@ public class BenchmarkAndColumnarFilterTpchData
         ExpressionCompiler expressionCompiler = FUNCTION_RESOLUTION.getExpressionCompiler();
         List<? extends Expression> projections = ImmutableList.of(new Reference(DOUBLE, COL_EXTENDED_PRICE));
         processor = expressionCompiler.compilePageProcessor(
+                        getCharVarcharCoercion(TEST_SESSION),
                         columnarEvaluationEnabled,
                         true,
                         Optional.of(filterExpression),
@@ -124,7 +126,6 @@ public class BenchmarkAndColumnarFilterTpchData
         for (Page inputPage : inputPages) {
             WorkProcessor<Page> workProcessor = processor.createWorkProcessor(
                     null,
-                    new DriverYieldSignal(),
                     context,
                     new PageProcessorMetrics(),
                     SourcePage.create(inputPage));

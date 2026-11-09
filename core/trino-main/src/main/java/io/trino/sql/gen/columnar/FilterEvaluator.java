@@ -13,17 +13,13 @@
  */
 package io.trino.sql.gen.columnar;
 
-import com.google.common.collect.ImmutableList;
-import io.trino.metadata.ResolvedFunction;
 import io.trino.operator.project.SelectedPositions;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.function.CatalogSchemaFunctionName;
-import io.trino.spi.type.Type;
 import io.trino.sql.PlannerContext;
-import io.trino.sql.ir.Between;
+import io.trino.sql.gen.columnar.DynamicPageFilter.DynamicFilterEvaluator;
 import io.trino.sql.ir.Call;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.In;
@@ -32,6 +28,7 @@ import io.trino.sql.ir.Logical;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.DeterminismEvaluator;
 import io.trino.sql.planner.Symbol;
+import io.trino.type.CharVarcharCoercion;
 
 import java.util.List;
 import java.util.Map;
@@ -40,13 +37,11 @@ import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.metadata.GlobalFunctionCatalog.isBuiltinFunctionName;
-import static io.trino.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.sql.gen.columnar.AndFilterEvaluator.createAndExpressionEvaluator;
-import static io.trino.sql.gen.columnar.DynamicPageFilter.DynamicFilterEvaluator;
 import static io.trino.sql.gen.columnar.OrFilterEvaluator.createOrExpressionEvaluator;
-import static io.trino.sql.ir.IrExpressions.call;
 import static io.trino.sql.ir.IrExpressions.mayFail;
-import static io.trino.type.UnknownType.UNKNOWN;
+import static io.trino.type.BooleanOperators.NOT_FUNCTION_NAME;
 
 /**
  * Used by PageProcessor to evaluate filter expression on input Page.
@@ -67,6 +62,7 @@ public sealed interface FilterEvaluator
     record SelectionResult(SelectedPositions selectedPositions, long filterTimeNanos) {}
 
     static Optional<Supplier<FilterEvaluator>> createColumnarFilterEvaluator(
+            CharVarcharCoercion charVarcharCoercion,
             boolean columnarFilterEvaluationEnabled,
             Optional<Expression> filter,
             Map<Symbol, Integer> layout,
@@ -74,32 +70,35 @@ public sealed interface FilterEvaluator
             boolean filterReorderingEnabled)
     {
         if (columnarFilterEvaluationEnabled && filter.isPresent()) {
-            return createColumnarFilterEvaluator(filter.get(), layout, columnarFilterCompiler, filterReorderingEnabled);
+            return createColumnarFilterEvaluator(charVarcharCoercion, filter.get(), layout, columnarFilterCompiler, filterReorderingEnabled, false);
         }
         return Optional.empty();
     }
 
-    static Optional<Supplier<FilterEvaluator>> createColumnarFilterEvaluator(Expression expression, Map<Symbol, Integer> layout, ColumnarFilterCompiler compiler, boolean filterReorderingEnabled)
+    static Optional<Supplier<FilterEvaluator>> createColumnarFilterEvaluator(CharVarcharCoercion charVarcharCoercion, Expression expression, Map<Symbol, Integer> layout, ColumnarFilterCompiler compiler, boolean filterReorderingEnabled, boolean dynamicFilter)
     {
         return switch (expression) {
             case Constant constant when constant.value() instanceof Boolean booleanValue -> booleanValue ? Optional.of(SelectAllEvaluator::new) : Optional.of(SelectNoneEvaluator::new);
-            case Comparison comparison -> createComparisonExpressionEvaluator(compiler, comparison, layout);
+            case Constant constant when constant.type().equals(BOOLEAN) && constant.value() == null -> Optional.of(SelectNoneEvaluator::new);
+            case Reference reference when reference.type().equals(BOOLEAN) -> createReferenceExpressionEvaluator(charVarcharCoercion, compiler, reference, layout, dynamicFilter);
             case Call call -> {
                 if (isNotExpression(call)) {
                     // "not(is_null(reference))" is handled explicitly as it is easy.
                     // more generic cases like "not(equal(reference, constant))" are not handled yet
-                    if (call.arguments().getFirst() instanceof IsNull isNull) {
-                        yield createIsNotNullExpressionEvaluator(compiler, call, isNull, layout);
+                    if (call.arguments().getFirst() instanceof IsNull) {
+                        yield createIsNotNullExpressionEvaluator(charVarcharCoercion, compiler, call, layout, dynamicFilter);
+                    }
+                    if (call.arguments().getFirst() instanceof Reference reference && reference.type().equals(BOOLEAN)) {
+                        yield createReferenceExpressionEvaluator(charVarcharCoercion, compiler, call, layout, dynamicFilter);
                     }
                     yield Optional.empty();
                 }
-                yield createCallExpressionEvaluator(compiler, call, layout);
+                yield createCallExpressionEvaluator(charVarcharCoercion, compiler, call, layout, dynamicFilter);
             }
-            case IsNull isNull -> createIsNullExpressionEvaluator(compiler, isNull, layout);
-            case Logical logical when logical.operator() == Logical.Operator.AND -> createAndExpressionEvaluator(compiler, logical, layout, filterReorderingEnabled);
-            case Logical logical when logical.operator() == Logical.Operator.OR -> createOrExpressionEvaluator(compiler, logical, layout, filterReorderingEnabled);
-            case Between between -> createBetweenEvaluator(compiler, between, layout, filterReorderingEnabled);
-            case In in -> createInExpressionEvaluator(compiler, in, layout);
+            case IsNull isNull -> createIsNullExpressionEvaluator(charVarcharCoercion, compiler, isNull, layout, dynamicFilter);
+            case Logical logical when logical.operator() == Logical.Operator.AND -> createAndExpressionEvaluator(charVarcharCoercion, compiler, logical, layout, filterReorderingEnabled, dynamicFilter);
+            case Logical logical when logical.operator() == Logical.Operator.OR -> createOrExpressionEvaluator(charVarcharCoercion, compiler, logical, layout, filterReorderingEnabled, dynamicFilter);
+            case In in -> createInExpressionEvaluator(charVarcharCoercion, compiler, in, layout, dynamicFilter);
             default -> Optional.empty();
         };
     }
@@ -107,53 +106,39 @@ public sealed interface FilterEvaluator
     static boolean isNotExpression(Call call)
     {
         CatalogSchemaFunctionName functionName = call.function().name();
-        return isBuiltinFunctionName(functionName) && functionName.functionName().equals("$not");
+        return isBuiltinFunctionName(functionName) && functionName.functionName().equals(NOT_FUNCTION_NAME);
     }
 
     // Reordering can expose a term that may fail to rows that an earlier term would have filtered out,
     // changing SQL short-circuit semantics. Only reorder when every term is guaranteed not to fail.
-    static boolean isReorderingSafe(PlannerContext plannerContext, List<Expression> terms)
+    static boolean isReorderingSafe(PlannerContext plannerContext, CharVarcharCoercion charVarcharCoercion, List<Expression> terms)
     {
-        return terms.stream().noneMatch(term -> mayFail(plannerContext, term));
+        return terms.stream().noneMatch(term -> mayFail(plannerContext, charVarcharCoercion, term));
     }
 
-    private static Optional<Supplier<FilterEvaluator>> createBetweenEvaluator(ColumnarFilterCompiler compiler, Between between, Map<Symbol, Integer> layout, boolean filterReorderingEnabled)
+    private static Optional<Supplier<FilterEvaluator>> createInExpressionEvaluator(CharVarcharCoercion charVarcharCoercion, ColumnarFilterCompiler compiler, In in, Map<Symbol, Integer> layout, boolean dynamicFilter)
     {
-        // Between requires evaluate once semantic for the value being tested
-        // Until we can pre-project it into a temporary variable, we apply columnar evaluation only on Reference
-        Expression valueExpression = between.value();
-        if (!(valueExpression instanceof Reference)) {
-            return Optional.empty();
-        }
-
-        // When the min and max arguments of a BETWEEN expression are both constants, evaluating them inline is cheaper than AND-ing subexpressions
-        if (between.min() instanceof Constant && between.max() instanceof Constant) {
-            Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(between, layout);
-            return compiledFilter.map(filterSupplier -> () -> createDictionaryAwareEvaluator(filterSupplier.get()));
-        }
-        ResolvedFunction lessThanOrEqual = compiler.getMetadata().resolveOperator(
-                LESS_THAN_OR_EQUAL,
-                ImmutableList.of(valueExpression.type(), valueExpression.type()));
-        return createAndExpressionEvaluator(
-                compiler,
-                new Logical(
-                        Logical.Operator.AND,
-                        ImmutableList.of(
-                                call(lessThanOrEqual, between.min(), valueExpression),
-                                call(lessThanOrEqual, valueExpression, between.max()))),
-                layout,
-                filterReorderingEnabled);
-    }
-
-    private static Optional<Supplier<FilterEvaluator>> createInExpressionEvaluator(ColumnarFilterCompiler compiler, In in, Map<Symbol, Integer> layout)
-    {
-        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(in, layout);
+        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(charVarcharCoercion, in, layout, dynamicFilter);
         return compiledFilter.map(filterSupplier -> () -> createDictionaryAwareEvaluator(filterSupplier.get()));
     }
 
-    private static Optional<Supplier<FilterEvaluator>> createCallExpressionEvaluator(ColumnarFilterCompiler compiler, Call call, Map<Symbol, Integer> layout)
+    // Same evaluator as the one created for the IN expression over the reference and the values, which must be distinct and not null.
+    // Returns empty when that IN expression would not be compiled to the dynamic filter IN.
+    static Optional<Supplier<FilterEvaluator>> createInSetDynamicFilterEvaluator(CharVarcharCoercion charVarcharCoercion, ColumnarFilterCompiler compiler, Reference reference, List<Object> distinctNonNullValues, Map<Symbol, Integer> layout)
     {
-        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(call, layout);
+        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateInSetDynamicFilter(charVarcharCoercion, reference, distinctNonNullValues, layout);
+        return compiledFilter.map(filterSupplier -> () -> createDictionaryAwareEvaluator(filterSupplier.get()));
+    }
+
+    private static Optional<Supplier<FilterEvaluator>> createReferenceExpressionEvaluator(CharVarcharCoercion charVarcharCoercion, ColumnarFilterCompiler compiler, Expression expression, Map<Symbol, Integer> layout, boolean dynamicFilter)
+    {
+        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(charVarcharCoercion, expression, layout, dynamicFilter);
+        return compiledFilter.map(filterSupplier -> () -> createDictionaryAwareEvaluator(filterSupplier.get()));
+    }
+
+    private static Optional<Supplier<FilterEvaluator>> createCallExpressionEvaluator(CharVarcharCoercion charVarcharCoercion, ColumnarFilterCompiler compiler, Call call, Map<Symbol, Integer> layout, boolean dynamicFilter)
+    {
+        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(charVarcharCoercion, call, layout, dynamicFilter);
         boolean isDeterministic = DeterminismEvaluator.isDeterministic(call);
         return compiledFilter.map(filterSupplier -> () -> {
             ColumnarFilter filter = filterSupplier.get();
@@ -161,34 +146,18 @@ public sealed interface FilterEvaluator
         });
     }
 
-    private static Optional<Supplier<FilterEvaluator>> createIsNotNullExpressionEvaluator(ColumnarFilterCompiler compiler, Call call, IsNull isNull, Map<Symbol, Integer> layout)
+    private static Optional<Supplier<FilterEvaluator>> createIsNotNullExpressionEvaluator(CharVarcharCoercion charVarcharCoercion, ColumnarFilterCompiler compiler, Call call, Map<Symbol, Integer> layout, boolean dynamicFilter)
     {
         checkArgument(isNotExpression(call), "call %s should be not", call);
         checkArgument(call.arguments().size() == 1);
-        Type argumentType = isNull.value().type();
-        checkArgument(!argumentType.equals(UNKNOWN), "argumentType %s should not be UNKNOWN", argumentType);
-
-        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(call, layout);
+        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(charVarcharCoercion, call, layout, dynamicFilter);
         return compiledFilter.map(filterSupplier -> () -> createDictionaryAwareEvaluator(filterSupplier.get()));
     }
 
-    private static Optional<Supplier<FilterEvaluator>> createIsNullExpressionEvaluator(ColumnarFilterCompiler compiler, IsNull isNull, Map<Symbol, Integer> layout)
+    private static Optional<Supplier<FilterEvaluator>> createIsNullExpressionEvaluator(CharVarcharCoercion charVarcharCoercion, ColumnarFilterCompiler compiler, IsNull isNull, Map<Symbol, Integer> layout, boolean dynamicFilter)
     {
-        Type argumentType = isNull.value().type();
-        checkArgument(!argumentType.equals(UNKNOWN), "argumentType %s should not be UNKNOWN", argumentType);
-
-        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(isNull, layout);
+        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(charVarcharCoercion, isNull, layout, dynamicFilter);
         return compiledFilter.map(filterSupplier -> () -> createDictionaryAwareEvaluator(filterSupplier.get()));
-    }
-
-    private static Optional<Supplier<FilterEvaluator>> createComparisonExpressionEvaluator(ColumnarFilterCompiler compiler, Comparison comparison, Map<Symbol, Integer> layout)
-    {
-        Optional<Supplier<ColumnarFilter>> compiledFilter = compiler.generateFilter(comparison, layout);
-        return compiledFilter.map(filterSupplier -> () -> {
-            ColumnarFilter filter = filterSupplier.get();
-            // comparison operators are always deterministic
-            return filter.getInputChannels().size() == 1 ? createDictionaryAwareEvaluator(filter) : new ColumnarFilterEvaluator(filter);
-        });
     }
 
     private static FilterEvaluator createDictionaryAwareEvaluator(ColumnarFilter filter)

@@ -148,13 +148,16 @@ public abstract class AbstractDistributedEngineOnlyQueries
     @Test
     public void testTooManyStages()
     {
-        @Language("SQL") String query = "WITH\n" +
-                "  t1 AS (SELECT nationkey AS x FROM nation where name='UNITED STATES'),\n" +
-                "  t2 AS (SELECT a.x+b.x+c.x+d.x AS x FROM t1 a, t1 b, t1 c, t1 d),\n" +
-                "  t3 AS (SELECT a.x+b.x+c.x+d.x AS x FROM t2 a, t2 b, t2 c, t2 d),\n" +
-                "  t4 AS (SELECT a.x+b.x+c.x+d.x AS x FROM t3 a, t3 b, t3 c, t3 d),\n" +
-                "  t5 AS (SELECT a.x+b.x+c.x+d.x AS x FROM t4 a, t4 b, t4 c, t4 d)\n" +
-                "SELECT x FROM t5\n";
+        @Language("SQL") String query =
+                """
+                WITH
+                  t1 AS (SELECT nationkey AS x FROM nation where name='UNITED STATES'),
+                  t2 AS (SELECT a.x+b.x+c.x+d.x AS x FROM t1 a, t1 b, t1 c, t1 d),
+                  t3 AS (SELECT a.x+b.x+c.x+d.x AS x FROM t2 a, t2 b, t2 c, t2 d),
+                  t4 AS (SELECT a.x+b.x+c.x+d.x AS x FROM t3 a, t3 b, t3 c, t3 d),
+                  t5 AS (SELECT a.x+b.x+c.x+d.x AS x FROM t4 a, t4 b, t4 c, t4 d)
+                SELECT x FROM t5
+                """;
         assertQueryFails(query, "Number of stages in the query \\([0-9]+\\) exceeds the allowed maximum \\([0-9]+\\).*");
     }
 
@@ -287,6 +290,46 @@ public abstract class AbstractDistributedEngineOnlyQueries
         assertQueryFails("INSERT INTO " + tableName + " (integer_column) VALUES (3e9)", "Out of range for integer: 3.0E9");
         assertQueryFails("INSERT INTO " + tableName + " (char_column) VALUES ('abcd')", "\\QCannot truncate non-space characters when casting from varchar(4) to char(3) on INSERT");
         assertQueryFails("INSERT INTO " + tableName + " (bounded_varchar_column) VALUES ('abcd')", "\\QCannot truncate non-space characters when casting from varchar(4) to varchar(3) on INSERT");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testInsertWithCoercionIntoNestedCharacterType()
+    {
+        String tableName = "test_insert_nested_char_coercion_" + randomNameSuffix();
+
+        assertUpdate("CREATE TABLE " + tableName + " (" +
+                "array_column array(char(3)), " +
+                "map_column map(char(3), char(3)), " +
+                "row_column row(field char(3)))");
+
+        // varchar values are assignable to character types nested in array, map and row, trimming/padding to the target length
+        assertUpdate("INSERT INTO " + tableName + " VALUES (" +
+                "ARRAY[VARCHAR 'aa     ', NULL], " +
+                "MAP(ARRAY[VARCHAR 'k'], ARRAY[VARCHAR 'v     ']), " +
+                "CAST(ROW(VARCHAR 'r') AS row(field varchar)))", 1);
+        // a null structural value stays null rather than becoming a structure of null fields
+        assertUpdate("INSERT INTO " + tableName + " VALUES (NULL, NULL, NULL)", 1);
+
+        assertThat(query("SELECT * FROM " + tableName))
+                .skippingTypesCheck()
+                .matches("VALUES " +
+                        "(ARRAY[CAST('aa' AS char(3)), NULL], MAP(ARRAY[CAST('k' AS char(3))], ARRAY[CAST('v' AS char(3))]), CAST(ROW('r') AS row(field char(3)))), " +
+                        "(NULL, NULL, NULL)");
+
+        // the no-truncation guard recurses into character types nested in array, map and row, covering every branch:
+        // the array element, the map value (transform_values), the map key (transform_keys) and the row field
+        assertQueryFails("INSERT INTO " + tableName + " (array_column) VALUES (ARRAY['abcd'])",
+                "\\QCannot truncate non-space characters when casting from varchar(4) to char(3) on INSERT");
+        assertQueryFails("INSERT INTO " + tableName + " (map_column) VALUES (MAP(ARRAY['k'], ARRAY['abcd']))",
+                "\\QCannot truncate non-space characters when casting from varchar(4) to char(3) on INSERT");
+        assertQueryFails("INSERT INTO " + tableName + " (map_column) VALUES (MAP(ARRAY['abcd'], ARRAY['k']))",
+                "\\QCannot truncate non-space characters when casting from varchar(4) to char(3) on INSERT");
+        // the row field is exercised via a full-table INSERT: a single-column VALUES of a one-field row would flatten to
+        // the field type, so the other (non-truncating) columns are supplied to keep the row value a row
+        assertQueryFails("INSERT INTO " + tableName + " VALUES (ARRAY[VARCHAR 'a'], MAP(ARRAY[VARCHAR 'k'], ARRAY[VARCHAR 'v']), CAST(ROW('abcd') AS row(field varchar(4))))",
+                "\\QCannot truncate non-space characters when casting from varchar(4) to char(3) on INSERT");
 
         assertUpdate("DROP TABLE " + tableName);
     }

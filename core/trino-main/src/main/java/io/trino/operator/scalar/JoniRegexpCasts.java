@@ -34,6 +34,7 @@ public final class JoniRegexpCasts
 {
     private JoniRegexpCasts() {}
 
+    // fallible
     @LiteralParameters("x")
     @ScalarOperator(OperatorType.CAST)
     @SqlType(JoniRegexpType.NAME)
@@ -42,12 +43,13 @@ public final class JoniRegexpCasts
         return joniRegexp(pattern);
     }
 
+    // fallible
     @ScalarOperator(OperatorType.CAST)
     @LiteralParameters("x")
     @SqlType(JoniRegexpType.NAME)
-    public static JoniRegexp castCharToJoniRegexp(@LiteralParameter("x") Long charLength, @SqlType("char(x)") Slice pattern)
+    public static JoniRegexp castCharToJoniRegexp(@LiteralParameter("x") int charLength, @SqlType("char(x)") Slice pattern)
     {
-        return joniRegexp(padSpaces(pattern, charLength.intValue()));
+        return joniRegexp(padSpaces(pattern, charLength));
     }
 
     public static JoniRegexp joniRegexp(Slice pattern)

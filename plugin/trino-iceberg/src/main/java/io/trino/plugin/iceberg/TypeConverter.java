@@ -31,9 +31,9 @@ import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeParameter;
-import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
@@ -69,6 +69,8 @@ import static org.apache.iceberg.types.EdgeAlgorithm.SPHERICAL;
 
 public final class TypeConverter
 {
+    private static final TypeDescriptor UNKNOWN_TYPE = new TypeDescriptor("unknown");
+
     private TypeConverter() {}
 
     public static Type toTrinoType(org.apache.iceberg.types.Type type, TypeManager typeManager)
@@ -96,8 +98,8 @@ public final class TypeConverter
             }
             case MAP -> {
                 Types.MapType mapType = (Types.MapType) type;
-                TypeSignature keyType = toTrinoType(mapType.keyType(), typeManager).getTypeSignature();
-                TypeSignature valueType = toTrinoType(mapType.valueType(), typeManager).getTypeSignature();
+                TypeDescriptor keyType = toTrinoType(mapType.keyType(), typeManager).getTypeDescriptor();
+                TypeDescriptor valueType = toTrinoType(mapType.valueType(), typeManager).getTypeDescriptor();
                 yield typeManager.getParameterizedType(StandardTypes.MAP, ImmutableList.of(TypeParameter.typeParameter(keyType), TypeParameter.typeParameter(valueType)));
             }
             case STRUCT -> {
@@ -134,7 +136,7 @@ public final class TypeConverter
                 }
                 yield getSphericalGeographyType(typeManager);
             }
-            case UNKNOWN -> throw new TrinoException(NOT_SUPPORTED, format("Cannot convert from Iceberg type '%s' (%s) to Trino type", type, type.typeId()));
+            case UNKNOWN -> typeManager.getType(UNKNOWN_TYPE);
         };
     }
 

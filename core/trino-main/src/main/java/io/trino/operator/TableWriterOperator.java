@@ -40,6 +40,8 @@ import io.trino.split.PageSinkId;
 import io.trino.split.PageSinkManager;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.TableWriterNode;
+import io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
+import io.trino.sql.planner.plan.TableWriterNode.InsertTarget;
 import io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
 
 import java.util.Collection;
@@ -61,8 +63,6 @@ import static io.trino.SystemSessionProperties.getCloseIdleWritersTriggerDuratio
 import static io.trino.SystemSessionProperties.getIdleWriterMinDataSizeThreshold;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
-import static io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
-import static io.trino.sql.planner.plan.TableWriterNode.InsertTarget;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
@@ -376,7 +376,9 @@ public class TableWriterOperator
     public void close()
             throws Exception
     {
+        // closer runs in reverse registration order, so the sink memory is released after the abort completes
         AutoCloseableCloser closer = AutoCloseableCloser.create();
+        closer.register(pageSinkMemoryContext::close);
         if (!closed) {
             closed = true;
             if (!committed) {
@@ -385,7 +387,6 @@ public class TableWriterOperator
         }
         closer.register(() -> statisticAggregationOperator.getOperatorContext().destroy());
         closer.register(statisticAggregationOperator);
-        closer.register(pageSinkMemoryContext::close);
         closer.close();
     }
 
@@ -400,7 +401,7 @@ public class TableWriterOperator
     {
         long physicalWrittenDataSize = getTaskContext().getPhysicalWrittenDataSize();
         OptionalInt writerCount = getTaskContext().getMaxWriterCount();
-        if (writerCount.isEmpty() || physicalWrittenDataSize - lastPhysicalWrittenDataSize <= idleWriterMinDataSizeThreshold.toBytes() * writerCount.getAsInt()) {
+        if (writerCount.isEmpty() || physicalWrittenDataSize - lastPhysicalWrittenDataSize <= idleWriterMinDataSizeThreshold.toBytes() * writerCount.orElseThrow()) {
             return;
         }
         pageSink.closeIdleWriters();

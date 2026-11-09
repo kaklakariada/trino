@@ -15,7 +15,6 @@ package io.trino.sql.gen.columnar;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.primitives.Primitives;
 import io.airlift.bytecode.BytecodeBlock;
 import io.airlift.bytecode.ClassDefinition;
 import io.airlift.bytecode.FieldDefinition;
@@ -28,7 +27,6 @@ import io.airlift.bytecode.control.IfStatement;
 import io.airlift.bytecode.control.SwitchStatement;
 import io.airlift.bytecode.expression.BytecodeExpression;
 import io.airlift.bytecode.instruction.LabelNode;
-import io.airlift.slice.Slice;
 import io.trino.metadata.FunctionManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.ResolvedFunction;
@@ -39,14 +37,17 @@ import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import io.trino.sql.gen.Binding;
 import io.trino.sql.gen.CallSiteBinder;
+import io.trino.sql.gen.ClassTemplateCache;
 import io.trino.sql.gen.InCodeGenerator;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.In;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
+import io.trino.type.CharVarcharCoercion;
 import io.trino.util.FastutilSetHelper;
 
 import java.lang.invoke.MethodHandle;
@@ -72,6 +73,7 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.constantTrue;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
 import static io.airlift.bytecode.expression.BytecodeExpressions.lessThan;
 import static io.airlift.bytecode.instruction.JumpInstruction.jump;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
@@ -79,9 +81,10 @@ import static io.trino.spi.function.InvocationConvention.simpleConvention;
 import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
 import static io.trino.spi.function.OperatorType.INDETERMINATE;
+import static io.trino.spi.type.TypeUtils.isDirectLongComparisonValidType;
+import static io.trino.sql.gen.BytecodeUtils.invoke;
 import static io.trino.sql.gen.BytecodeUtils.loadConstant;
-import static io.trino.sql.gen.SqlTypeBytecodeExpression.constantType;
-import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.createClassInstance;
+import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.createClassInstanceWithoutTemplate;
 import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.declareBlockVariables;
 import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.generateBlockMayHaveNull;
 import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.generateBlockPositionNotNull;
@@ -94,16 +97,20 @@ import static java.util.Objects.requireNonNull;
 
 public class InColumnarFilterGenerator
 {
+    // Lookup in Set is generally faster than switch case for not super tiny IN lists.
+    // Tipping point is between 5 and 10 (using round 8)
+    static final int MAX_SWITCH_CASE_VALUES = 8;
+
     private final Reference valueReference;
     private final Map<Symbol, Integer> layout;
-    private final int valueChannel;
+    private final TypeOperators typeOperators;
     private final boolean useSwitchCase;
     private final Set<Object> constantValues;
 
     private final MethodHandle equalsMethodHandle;
     private final MethodHandle hashCodeMethodHandle;
 
-    public InColumnarFilterGenerator(In in, Map<Symbol, Integer> layout, Metadata metadata, FunctionManager functionManager)
+    public InColumnarFilterGenerator(In in, Map<Symbol, Integer> layout, Metadata metadata, CharVarcharCoercion charVarcharCoercion, FunctionManager functionManager, TypeOperators typeOperators)
     {
         checkArgument(!in.valueList().isEmpty(), "At least one value is required in IN list");
         if (!(in.value() instanceof Reference)) {
@@ -111,9 +118,7 @@ public class InColumnarFilterGenerator
         }
         valueReference = (Reference) in.value();
         this.layout = requireNonNull(layout, "layout is null");
-        Integer channel = layout.get(Symbol.from(valueReference));
-        checkState(channel != null, "Reference not in layout: %s", valueReference.name());
-        valueChannel = channel;
+        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
         List<Expression> expressions = in.valueList();
         expressions.forEach(expression -> {
             if (!(expression instanceof Constant)) {
@@ -125,9 +130,9 @@ public class InColumnarFilterGenerator
                 .collect(toImmutableList());
 
         Type valueType = valueReference.type();
-        ResolvedFunction resolvedEqualsFunction = metadata.resolveOperator(EQUAL, ImmutableList.of(valueType, valueType));
-        ResolvedFunction resolvedHashCodeFunction = metadata.resolveOperator(HASH_CODE, ImmutableList.of(valueType));
-        ResolvedFunction resolvedIsIndeterminate = metadata.resolveOperator(INDETERMINATE, ImmutableList.of(valueType));
+        ResolvedFunction resolvedEqualsFunction = metadata.resolveOperator(charVarcharCoercion, EQUAL, ImmutableList.of(valueType, valueType));
+        ResolvedFunction resolvedHashCodeFunction = metadata.resolveOperator(charVarcharCoercion, HASH_CODE, ImmutableList.of(valueType));
+        ResolvedFunction resolvedIsIndeterminate = metadata.resolveOperator(charVarcharCoercion, INDETERMINATE, ImmutableList.of(valueType));
         equalsMethodHandle = functionManager.getScalarFunctionImplementation(resolvedEqualsFunction, simpleConvention(NULLABLE_RETURN, NEVER_NULL, NEVER_NULL)).getMethodHandle();
         hashCodeMethodHandle = functionManager.getScalarFunctionImplementation(resolvedHashCodeFunction, simpleConvention(FAIL_ON_NULL, NEVER_NULL)).getMethodHandle();
         MethodHandle indeterminateMethodHandle = functionManager.getScalarFunctionImplementation(resolvedIsIndeterminate, simpleConvention(FAIL_ON_NULL, NEVER_NULL)).getMethodHandle();
@@ -142,14 +147,21 @@ public class InColumnarFilterGenerator
         useSwitchCase = useSwitchCaseGeneration(valueType, expressions);
     }
 
-    public Class<? extends ColumnarFilter> generateColumnarFilter()
+    public Class<? extends ColumnarFilter> generateColumnarFilter(ClassTemplateCache<ColumnarFilter> templates, Expression filter)
+    {
+        // the bound lookup set and any switch labels derive from the constant values, so this
+        // could never serve as a template; skip the template key's structural traversal and
+        // expression copy, which for a large IN list is wasted work on every compilation
+        return createClassInstanceWithoutTemplate(templates, filter, this::defineFilterClass);
+    }
+
+    private ClassDefinition defineFilterClass(CallSiteBinder callSiteBinder)
     {
         ClassDefinition classDefinition = new ClassDefinition(
                 a(PUBLIC, FINAL),
                 makeClassName(ColumnarFilter.class.getSimpleName() + "_in", Optional.empty()),
                 type(Object.class),
                 type(ColumnarFilter.class));
-        CallSiteBinder callSiteBinder = new CallSiteBinder();
 
         FieldDefinition inputChannelsField = generateGetInputChannels(classDefinition);
         generateConstructor(classDefinition, inputChannelsField);
@@ -158,10 +170,15 @@ public class InColumnarFilterGenerator
         Set<?> constantValuesSet = toFastutilHashSet(constantValues, valueType, hashCodeMethodHandle, equalsMethodHandle);
         Binding constant = callSiteBinder.bind(constantValuesSet, constantValuesSet.getClass());
 
-        generateFilterRangeMethod(callSiteBinder, classDefinition, constantValuesSet, constant);
-        generateFilterListMethod(callSiteBinder, classDefinition, constantValuesSet, constant);
+        generateInFilterMethods(
+                classDefinition,
+                callSiteBinder,
+                typeOperators,
+                valueReference,
+                layout,
+                (scope, value, result) -> generateSetContainsCall(scope, constantValuesSet, constant, value, result));
 
-        return createClassInstance(callSiteBinder, classDefinition);
+        return classDefinition;
     }
 
     private static void generateConstructor(ClassDefinition classDefinition, FieldDefinition inputChannelsField)
@@ -180,124 +197,11 @@ public class InColumnarFilterGenerator
         body.ret();
     }
 
-    private void generateFilterRangeMethod(CallSiteBinder binder, ClassDefinition classDefinition, Set<?> constantValuesSet, Binding constant)
+    private BytecodeBlock generateSetContainsCall(Scope scope, Set<?> constantValuesSet, Binding constant, BytecodeExpression value, Variable result)
     {
-        Parameter session = arg("session", ConnectorSession.class);
-        Parameter outputPositions = arg("outputPositions", int[].class);
-        Parameter offset = arg("offset", int.class);
-        Parameter size = arg("size", int.class);
-        Parameter page = arg("page", SourcePage.class);
-
-        MethodDefinition method = classDefinition.declareMethod(
-                a(PUBLIC),
-                "filterPositionsRange",
-                type(int.class),
-                ImmutableList.of(session, outputPositions, offset, size, page));
-        Scope scope = method.getScope();
-        BytecodeBlock body = method.getBody();
-
-        declareBlockVariables(ImmutableList.of(valueReference), layout, page, scope, body);
-
-        Variable outputPositionsCount = scope.declareVariable("outputPositionsCount", body, constantInt(0));
-        Variable position = scope.declareVariable(int.class, "position");
-        Variable result = scope.declareVariable(boolean.class, "result");
-
-        IfStatement ifStatement = new IfStatement()
-                .condition(generateBlockMayHaveNull(ImmutableList.of(valueReference), layout, scope));
-        body.append(ifStatement);
-
-        ifStatement.ifTrue(new ForLoop("nullable range based loop")
-                .initialize(position.set(offset))
-                .condition(lessThan(position, add(offset, size)))
-                .update(position.increment())
-                .body(new IfStatement()
-                        .condition(generateBlockPositionNotNull(ImmutableList.of(valueReference), layout, scope, position))
-                        .ifTrue(new BytecodeBlock()
-                                .append(generateSetContainsCall(binder, scope, constantValuesSet, constant, position, result))
-                                .append(updateOutputPositions(result, position, outputPositions, outputPositionsCount)))));
-
-        ifStatement.ifFalse(new ForLoop("non-nullable range based loop")
-                .initialize(position.set(offset))
-                .condition(lessThan(position, add(offset, size)))
-                .update(position.increment())
-                .body(new BytecodeBlock()
-                        .append(generateSetContainsCall(binder, scope, constantValuesSet, constant, position, result))
-                        .append(updateOutputPositions(result, position, outputPositions, outputPositionsCount))));
-
-        body.append(outputPositionsCount.ret());
-    }
-
-    private void generateFilterListMethod(CallSiteBinder binder, ClassDefinition classDefinition, Set<?> constantValuesSet, Binding constant)
-    {
-        Parameter session = arg("session", ConnectorSession.class);
-        Parameter outputPositions = arg("outputPositions", int[].class);
-        Parameter activePositions = arg("activePositions", int[].class);
-        Parameter offset = arg("offset", int.class);
-        Parameter size = arg("size", int.class);
-        Parameter page = arg("page", SourcePage.class);
-
-        MethodDefinition method = classDefinition.declareMethod(
-                a(PUBLIC),
-                "filterPositionsList",
-                type(int.class),
-                ImmutableList.of(session, outputPositions, activePositions, offset, size, page));
-        Scope scope = method.getScope();
-        BytecodeBlock body = method.getBody();
-
-        declareBlockVariables(ImmutableList.of(valueReference), layout, page, scope, body);
-
-        Variable outputPositionsCount = scope.declareVariable("outputPositionsCount", body, constantInt(0));
-        Variable index = scope.declareVariable(int.class, "index");
-        Variable position = scope.declareVariable(int.class, "position");
-        Variable result = scope.declareVariable(boolean.class, "result");
-
-        IfStatement ifStatement = new IfStatement()
-                .condition(generateBlockMayHaveNull(ImmutableList.of(valueReference), layout, scope));
-        body.append(ifStatement);
-
-        ifStatement.ifTrue(new ForLoop("nullable positions loop")
-                .initialize(index.set(offset))
-                .condition(lessThan(index, add(offset, size)))
-                .update(index.increment())
-                .body(new BytecodeBlock()
-                        .append(position.set(activePositions.getElement(index)))
-                        .append(new IfStatement()
-                                .condition(generateBlockPositionNotNull(ImmutableList.of(valueReference), layout, scope, position))
-                                .ifTrue(new BytecodeBlock()
-                                        .append(generateSetContainsCall(binder, scope, constantValuesSet, constant, position, result))
-                                        .append(updateOutputPositions(result, position, outputPositions, outputPositionsCount))))));
-
-        ifStatement.ifFalse(new ForLoop("non-nullable positions loop")
-                .initialize(index.set(offset))
-                .condition(lessThan(index, add(offset, size)))
-                .update(index.increment())
-                .body(new BytecodeBlock()
-                        .append(position.set(activePositions.getElement(index)))
-                        .append(generateSetContainsCall(binder, scope, constantValuesSet, constant, position, result))
-                        .append(updateOutputPositions(result, position, outputPositions, outputPositionsCount))));
-
-        body.append(outputPositionsCount.ret());
-    }
-
-    private BytecodeBlock generateSetContainsCall(CallSiteBinder binder, Scope scope, Set<?> constantValuesSet, Binding constant, BytecodeExpression position, Variable result)
-    {
-        Type valueType = valueReference.type();
-        Class<?> javaType = valueType.getJavaType();
-
-        Class<?> callType = javaType;
-        if (!callType.isPrimitive() && callType != Slice.class) {
-            callType = Object.class;
-        }
-        String methodName = "get" + Primitives.wrap(callType).getSimpleName();
-        BytecodeExpression value = constantType(binder, valueType)
-                .invoke(methodName, callType, scope.getVariable("block_" + valueChannel), position);
-        if (callType != javaType) {
-            value = value.cast(javaType);
-        }
+        Class<?> javaType = valueReference.type().getJavaType();
 
         if (useSwitchCase) {
-            // A white-list is used to select types eligible for DIRECT_SWITCH.
-            // For these types, it's safe to not use Trino HASH_CODE and EQUAL operator.
             LabelNode end = new LabelNode("end");
             LabelNode match = new LabelNode("match");
             LabelNode defaultLabel = new LabelNode("default");
@@ -371,13 +275,14 @@ public class InColumnarFilterGenerator
         if (type instanceof ArrayType || type instanceof MapType || type instanceof RowType) {
             throw new UnsupportedOperationException("Structural type not supported");
         }
-        if (values.size() >= 8) {
-            // Lookup in Set is generally faster than switch case for not super tiny IN lists.
-            // Tipping point is between 5 and 10 (using round 8)
+        if (values.size() >= MAX_SWITCH_CASE_VALUES) {
             return false;
         }
 
-        if (type.getJavaType() != long.class) {
+        // A white-list is used to select types eligible for switch case generation.
+        // For other types the long representation is not a faithful identity, e.g. REAL NaN
+        // is equal to itself bit-wise, but the EQUAL operator returns false for it.
+        if (!isDirectLongComparisonValidType(type)) {
             return false;
         }
         for (Expression expression : values) {
@@ -396,5 +301,130 @@ public class InColumnarFilterGenerator
             }
         }
         return true;
+    }
+
+    // Emits the membership test of the current row's value for a single-column IN filter, setting result to the outcome.
+    @FunctionalInterface
+    interface ContainsCallGenerator
+    {
+        BytecodeBlock generate(Scope scope, BytecodeExpression value, Variable result);
+    }
+
+    // Generates filterPositionsRange and filterPositionsList, both reading the row value through the type's read operator.
+    static void generateInFilterMethods(ClassDefinition classDefinition, CallSiteBinder callSiteBinder, TypeOperators typeOperators, Reference valueReference, Map<Symbol, Integer> layout, ContainsCallGenerator containsCall)
+    {
+        MethodHandle readValue = typeOperators.getReadValueOperator(valueReference.type(), simpleConvention(FAIL_ON_NULL, BLOCK_POSITION_NOT_NULL));
+        Binding readValueBinding = callSiteBinder.bind(readValue);
+        generateInFilterRangeMethod(classDefinition, readValueBinding, valueReference, layout, containsCall);
+        generateInFilterListMethod(classDefinition, readValueBinding, valueReference, layout, containsCall);
+    }
+
+    // Reads the row value at the given position through the bound read operator.
+    private static BytecodeExpression generateReadValue(Binding readValueBinding, Reference valueReference, Map<Symbol, Integer> layout, Scope scope, Variable position)
+    {
+        Integer field = layout.get(Symbol.from(valueReference));
+        checkState(field != null, "Reference not in layout: %s", valueReference.name());
+        return invoke(readValueBinding, "readValue", scope.getVariable("block_" + field), position);
+    }
+
+    private static void generateInFilterRangeMethod(ClassDefinition classDefinition, Binding readValueBinding, Reference valueReference, Map<Symbol, Integer> layout, ContainsCallGenerator containsCall)
+    {
+        Parameter session = arg("session", ConnectorSession.class);
+        Parameter outputPositions = arg("outputPositions", int[].class);
+        Parameter offset = arg("offset", int.class);
+        Parameter size = arg("size", int.class);
+        Parameter page = arg("page", SourcePage.class);
+
+        MethodDefinition method = classDefinition.declareMethod(
+                a(PUBLIC),
+                "filterPositionsRange",
+                type(int.class),
+                ImmutableList.of(session, outputPositions, offset, size, page));
+        Scope scope = method.getScope();
+        BytecodeBlock body = method.getBody();
+
+        declareBlockVariables(ImmutableList.of(valueReference), layout, page, scope, body);
+
+        Variable outputPositionsCount = scope.declareVariable("outputPositionsCount", body, constantInt(0));
+        Variable position = scope.declareVariable(int.class, "position");
+        Variable result = scope.declareVariable(boolean.class, "result");
+        BytecodeExpression value = generateReadValue(readValueBinding, valueReference, layout, scope, position);
+
+        IfStatement ifStatement = new IfStatement()
+                .condition(generateBlockMayHaveNull(ImmutableList.of(valueReference), layout, scope));
+        body.append(ifStatement);
+
+        ifStatement.ifTrue(new ForLoop("nullable range based loop")
+                .initialize(position.set(offset))
+                .condition(lessThan(position, add(offset, size)))
+                .update(position.increment())
+                .body(new IfStatement()
+                        .condition(generateBlockPositionNotNull(ImmutableList.of(valueReference), layout, scope, position))
+                        .ifTrue(new BytecodeBlock()
+                                .append(containsCall.generate(scope, value, result))
+                                .append(updateOutputPositions(result, position, outputPositions, outputPositionsCount)))));
+
+        ifStatement.ifFalse(new ForLoop("non-nullable range based loop")
+                .initialize(position.set(offset))
+                .condition(lessThan(position, add(offset, size)))
+                .update(position.increment())
+                .body(new BytecodeBlock()
+                        .append(containsCall.generate(scope, value, result))
+                        .append(updateOutputPositions(result, position, outputPositions, outputPositionsCount))));
+
+        body.append(outputPositionsCount.ret());
+    }
+
+    private static void generateInFilterListMethod(ClassDefinition classDefinition, Binding readValueBinding, Reference valueReference, Map<Symbol, Integer> layout, ContainsCallGenerator containsCall)
+    {
+        Parameter session = arg("session", ConnectorSession.class);
+        Parameter outputPositions = arg("outputPositions", int[].class);
+        Parameter activePositions = arg("activePositions", int[].class);
+        Parameter offset = arg("offset", int.class);
+        Parameter size = arg("size", int.class);
+        Parameter page = arg("page", SourcePage.class);
+
+        MethodDefinition method = classDefinition.declareMethod(
+                a(PUBLIC),
+                "filterPositionsList",
+                type(int.class),
+                ImmutableList.of(session, outputPositions, activePositions, offset, size, page));
+        Scope scope = method.getScope();
+        BytecodeBlock body = method.getBody();
+
+        declareBlockVariables(ImmutableList.of(valueReference), layout, page, scope, body);
+
+        Variable outputPositionsCount = scope.declareVariable("outputPositionsCount", body, constantInt(0));
+        Variable index = scope.declareVariable(int.class, "index");
+        Variable position = scope.declareVariable(int.class, "position");
+        Variable result = scope.declareVariable(boolean.class, "result");
+        BytecodeExpression value = generateReadValue(readValueBinding, valueReference, layout, scope, position);
+
+        IfStatement ifStatement = new IfStatement()
+                .condition(generateBlockMayHaveNull(ImmutableList.of(valueReference), layout, scope));
+        body.append(ifStatement);
+
+        ifStatement.ifTrue(new ForLoop("nullable positions loop")
+                .initialize(index.set(offset))
+                .condition(lessThan(index, add(offset, size)))
+                .update(index.increment())
+                .body(new BytecodeBlock()
+                        .append(position.set(activePositions.getElement(index)))
+                        .append(new IfStatement()
+                                .condition(generateBlockPositionNotNull(ImmutableList.of(valueReference), layout, scope, position))
+                                .ifTrue(new BytecodeBlock()
+                                        .append(containsCall.generate(scope, value, result))
+                                        .append(updateOutputPositions(result, position, outputPositions, outputPositionsCount))))));
+
+        ifStatement.ifFalse(new ForLoop("non-nullable positions loop")
+                .initialize(index.set(offset))
+                .condition(lessThan(index, add(offset, size)))
+                .update(index.increment())
+                .body(new BytecodeBlock()
+                        .append(position.set(activePositions.getElement(index)))
+                        .append(containsCall.generate(scope, value, result))
+                        .append(updateOutputPositions(result, position, outputPositions, outputPositionsCount))));
+
+        body.append(outputPositionsCount.ret());
     }
 }

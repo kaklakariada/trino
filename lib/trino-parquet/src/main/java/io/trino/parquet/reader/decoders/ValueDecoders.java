@@ -17,7 +17,33 @@ import io.airlift.slice.Slice;
 import io.trino.parquet.ParquetEncoding;
 import io.trino.parquet.PrimitiveField;
 import io.trino.parquet.reader.SimpleSliceInputStream;
+import io.trino.parquet.reader.decoders.ApacheParquetValueDecoders.BooleanApacheParquetValueDecoder;
+import io.trino.parquet.reader.decoders.ApacheParquetValueDecoders.DoubleApacheParquetValueDecoder;
+import io.trino.parquet.reader.decoders.ApacheParquetValueDecoders.FloatApacheParquetValueDecoder;
+import io.trino.parquet.reader.decoders.DeltaBinaryPackedDecoders.DeltaBinaryPackedByteDecoder;
+import io.trino.parquet.reader.decoders.DeltaBinaryPackedDecoders.DeltaBinaryPackedIntDecoder;
+import io.trino.parquet.reader.decoders.DeltaBinaryPackedDecoders.DeltaBinaryPackedLongDecoder;
+import io.trino.parquet.reader.decoders.DeltaBinaryPackedDecoders.DeltaBinaryPackedShortDecoder;
+import io.trino.parquet.reader.decoders.DeltaByteArrayDecoders.BinaryDeltaByteArrayDecoder;
+import io.trino.parquet.reader.decoders.DeltaByteArrayDecoders.BoundedVarcharDeltaByteArrayDecoder;
+import io.trino.parquet.reader.decoders.DeltaByteArrayDecoders.CharDeltaByteArrayDecoder;
+import io.trino.parquet.reader.decoders.DeltaLengthByteArrayDecoders.BinaryDeltaLengthDecoder;
+import io.trino.parquet.reader.decoders.DeltaLengthByteArrayDecoders.BoundedVarcharDeltaLengthDecoder;
+import io.trino.parquet.reader.decoders.DeltaLengthByteArrayDecoders.CharDeltaLengthDecoder;
+import io.trino.parquet.reader.decoders.PlainByteArrayDecoders.BinaryPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainByteArrayDecoders.BoundedVarcharPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainByteArrayDecoders.CharPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.FixedLengthPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.Int96TimestampPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.IntPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.IntToBytePlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.IntToShortPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.LongDecimalPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.LongPlainValueDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.ShortDecimalFixedLengthByteArrayDecoder;
+import io.trino.parquet.reader.decoders.PlainValueDecoders.UuidPlainValueDecoder;
 import io.trino.parquet.reader.flat.BinaryBuffer;
+import io.trino.parquet.reader.flat.BitBuffer;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalConversions;
@@ -33,6 +59,7 @@ import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.values.ValuesReader;
 import org.apache.parquet.io.ParquetDecodingException;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType;
 import org.joda.time.DateTimeZone;
 
@@ -45,32 +72,7 @@ import static io.trino.parquet.ParquetReaderUtils.toShortExact;
 import static io.trino.parquet.ParquetTypeUtils.checkBytesFitInShortDecimal;
 import static io.trino.parquet.ParquetTypeUtils.getShortDecimalValue;
 import static io.trino.parquet.ValuesType.VALUES;
-import static io.trino.parquet.reader.decoders.ApacheParquetValueDecoders.BooleanApacheParquetValueDecoder;
-import static io.trino.parquet.reader.decoders.ApacheParquetValueDecoders.DoubleApacheParquetValueDecoder;
-import static io.trino.parquet.reader.decoders.ApacheParquetValueDecoders.FloatApacheParquetValueDecoder;
 import static io.trino.parquet.reader.decoders.BooleanPlainValueDecoders.createBooleanPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.DeltaBinaryPackedDecoders.DeltaBinaryPackedByteDecoder;
-import static io.trino.parquet.reader.decoders.DeltaBinaryPackedDecoders.DeltaBinaryPackedIntDecoder;
-import static io.trino.parquet.reader.decoders.DeltaBinaryPackedDecoders.DeltaBinaryPackedLongDecoder;
-import static io.trino.parquet.reader.decoders.DeltaBinaryPackedDecoders.DeltaBinaryPackedShortDecoder;
-import static io.trino.parquet.reader.decoders.DeltaByteArrayDecoders.BinaryDeltaByteArrayDecoder;
-import static io.trino.parquet.reader.decoders.DeltaByteArrayDecoders.BoundedVarcharDeltaByteArrayDecoder;
-import static io.trino.parquet.reader.decoders.DeltaByteArrayDecoders.CharDeltaByteArrayDecoder;
-import static io.trino.parquet.reader.decoders.DeltaLengthByteArrayDecoders.BinaryDeltaLengthDecoder;
-import static io.trino.parquet.reader.decoders.DeltaLengthByteArrayDecoders.BoundedVarcharDeltaLengthDecoder;
-import static io.trino.parquet.reader.decoders.DeltaLengthByteArrayDecoders.CharDeltaLengthDecoder;
-import static io.trino.parquet.reader.decoders.PlainByteArrayDecoders.BinaryPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainByteArrayDecoders.BoundedVarcharPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainByteArrayDecoders.CharPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.FixedLengthPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.Int96TimestampPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.IntPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.IntToBytePlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.IntToShortPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.LongDecimalPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.LongPlainValueDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.ShortDecimalFixedLengthByteArrayDecoder;
-import static io.trino.parquet.reader.decoders.PlainValueDecoders.UuidPlainValueDecoder;
 import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.trino.spi.block.Fixed12Block.decodeFixed12First;
 import static io.trino.spi.block.Fixed12Block.decodeFixed12Second;
@@ -95,7 +97,6 @@ import static java.lang.Math.floorMod;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
 
 /**
  * This class provides API for creating value decoders for given fields and encodings.
@@ -210,7 +211,7 @@ public final class ValueDecoders
         };
     }
 
-    public ValueDecoder<byte[]> getBooleanDecoder(ParquetEncoding encoding)
+    public ValueDecoder<BitBuffer> getBooleanDecoder(ParquetEncoding encoding)
     {
         return switch (encoding) {
             case PLAIN -> createBooleanPlainValueDecoder(vectorizedDecodingEnabled);
@@ -533,7 +534,7 @@ public final class ValueDecoders
                 });
     }
 
-    public ValueDecoder<long[]> getInt64TimestampMillsToShortTimestampWithTimeZoneDecoder(ParquetEncoding encoding)
+    public ValueDecoder<long[]> getInt64TimestampMillisToShortTimestampWithTimeZoneDecoder(ParquetEncoding encoding)
     {
         checkArgument(
                 field.getType() instanceof TimestampWithTimeZoneType timestampWithTimeZoneType && timestampWithTimeZoneType.isShort(),
@@ -733,6 +734,40 @@ public final class ValueDecoders
         };
     }
 
+    public ValueDecoder<int[]> getInt64TimestampMillisToLongTimestampWithTimeZoneDecoder(ParquetEncoding encoding)
+    {
+        ValueDecoder<long[]> delegate = getLongDecoder(encoding);
+        return new ValueDecoder<>()
+        {
+            @Override
+            public void init(SimpleSliceInputStream input)
+            {
+                delegate.init(input);
+            }
+
+            @Override
+            public void read(int[] values, int offset, int length)
+            {
+                long[] buffer = new long[length];
+                delegate.read(buffer, 0, length);
+                // decoded values are epochMillis, convert to (packed epochMillisUtc, picosOfMilli=0)
+                for (int i = 0; i < length; i++) {
+                    encodeFixed12(
+                            packDateTimeWithZone(buffer[i], UTC_KEY),
+                            0,
+                            values,
+                            i + offset);
+                }
+            }
+
+            @Override
+            public void skip(int n)
+            {
+                delegate.skip(n);
+            }
+        };
+    }
+
     public ValueDecoder<int[]> getInt64TimestampMicrosToLongTimestampWithTimeZoneDecoder(ParquetEncoding encoding)
     {
         ValueDecoder<long[]> delegate = getLongDecoder(encoding);
@@ -915,7 +950,9 @@ public final class ValueDecoders
                 BinaryBuffer buffer = new BinaryBuffer(length);
                 delegate.read(buffer, 0, length);
                 int[] offsets = buffer.getOffsets();
-                byte[] inputBytes = buffer.asSlice().byteArray();
+                Slice inputSlice = buffer.asSlice();
+                byte[] inputBytes = inputSlice.byteArray();
+                int inputBytesOffset = inputSlice.byteArrayOffset();
 
                 for (int i = 0; i < length; i++) {
                     int positionOffset = offsets[i];
@@ -925,7 +962,7 @@ public final class ValueDecoders
                     }
                     // No need for checkBytesFitInShortDecimal as the standard requires variable binary decimals
                     // to be stored in minimum possible number of bytes
-                    values[offset + i] = getShortDecimalValue(inputBytes, positionOffset, positionLength);
+                    values[offset + i] = getShortDecimalValue(inputBytes, inputBytesOffset + positionOffset, positionLength);
                 }
             }
 
@@ -973,10 +1010,12 @@ public final class ValueDecoders
                     bytesLength = Long.BYTES;
                 }
 
-                byte[] inputBytes = buffer.asSlice().byteArray();
+                Slice inputSlice = buffer.asSlice();
+                byte[] inputBytes = inputSlice.byteArray();
+                int inputBytesOffset = inputSlice.byteArrayOffset();
                 int[] offsets = buffer.getOffsets();
                 for (int i = 0; i < length; i++) {
-                    int inputOffset = offsets[i];
+                    int inputOffset = inputBytesOffset + offsets[i];
                     checkBytesFitInShortDecimal(inputBytes, inputOffset, bytesOffset, descriptor);
                     values[offset + i] = getShortDecimalValue(inputBytes, inputOffset + bytesOffset, bytesLength);
                 }
@@ -1118,7 +1157,7 @@ public final class ValueDecoders
                 int[] buffer = new int[length];
                 delegate.read(buffer, 0, length);
                 for (int i = 0; i < length; i++) {
-                    if (overflows(buffer[i], decimalType.getPrecision())) {
+                    if (overflows(buffer[i], decimalType.getPrecision() - decimalType.getScale())) {
                         throw new TrinoException(
                                 INVALID_CAST_ARGUMENT,
                                 format("Cannot read parquet INT32 value '%s' as DECIMAL(%s, %s)", buffer[i], decimalType.getPrecision(), decimalType.getScale()));

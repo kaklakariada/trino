@@ -42,6 +42,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static io.airlift.log.Level.WARN;
@@ -53,6 +54,7 @@ import static io.trino.plugin.tpch.DecimalTypeMapping.DOUBLE;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.spi.security.SelectedRole.Type.ROLE;
 import static io.trino.testing.QueryAssertions.copyTpchTables;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
 import static java.nio.file.Files.createDirectories;
@@ -153,6 +155,13 @@ public final class HiveQueryRunner
         }
 
         @CanIgnoreReturnValue
+        public SELF addHiveProperties(Map<String, String> hiveProperties)
+        {
+            this.hiveProperties.putAll(requireNonNull(hiveProperties, "hiveProperties is null"));
+            return self();
+        }
+
+        @CanIgnoreReturnValue
         public SELF setInitialTables(Iterable<TpchTable<?>> initialTables)
         {
             this.initialTables = ImmutableList.copyOf(requireNonNull(initialTables, "initialTables is null"));
@@ -201,26 +210,17 @@ public final class HiveQueryRunner
             return self();
         }
 
-        @SuppressWarnings("unused")
-        @CanIgnoreReturnValue
-        public SELF setTpchColumnNaming(ColumnNaming tpchColumnNaming)
-        {
-            this.tpchColumnNaming = requireNonNull(tpchColumnNaming, "tpchColumnNaming is null");
-            return self();
-        }
-
-        @SuppressWarnings("unused")
-        @CanIgnoreReturnValue
-        public SELF setTpchDecimalTypeMapping(DecimalTypeMapping tpchDecimalTypeMapping)
-        {
-            this.tpchDecimalTypeMapping = requireNonNull(tpchDecimalTypeMapping, "tpchDecimalTypeMapping is null");
-            return self();
-        }
-
         @CanIgnoreReturnValue
         public SELF setDecryptionKeyRetriever(DecryptionKeyRetriever decryptionKeyRetriever)
         {
             this.decryptionKeyRetriever = Optional.of(requireNonNull(decryptionKeyRetriever, "decryptionKeyRetriever is null"));
+            return self();
+        }
+
+        @CanIgnoreReturnValue
+        public SELF apply(Consumer<SELF> consumer)
+        {
+            requireNonNull(consumer, "consumer is null").accept(self());
             return self();
         }
 
@@ -246,11 +246,6 @@ public final class HiveQueryRunner
                 Optional<HiveMetastore> metastore = this.metastore.map(factory -> factory.apply(queryRunner));
                 Path dataDir = queryRunner.getCoordinator().getBaseDataDir().resolve("hive_data");
 
-                if (hiveProperties.buildOrThrow().keySet().stream().noneMatch(key ->
-                        key.matches("fs\\.(azure|gcs|s3|local|hadoop)\\.enabled"))) {
-                    hiveProperties.put("fs.hadoop.enabled", "true");
-                }
-
                 queryRunner.installPlugin(new TestingHivePlugin(dataDir, metastore, metastoreImpersonationEnabled, decryptionKeyRetriever));
 
                 Map<String, String> hiveProperties = new HashMap<>();
@@ -267,13 +262,9 @@ public final class HiveQueryRunner
                 hiveProperties.putAll(this.hiveProperties.buildOrThrow());
 
                 if (tpchBucketedCatalogEnabled) {
-                    Map<String, String> hiveBucketedProperties = ImmutableMap.<String, String>builder()
-                            .putAll(hiveProperties)
-                            .put("hive.max-initial-split-size", "10kB") // so that each bucket has multiple splits
-                            .put("hive.max-split-size", "10kB") // so that each bucket has multiple splits
-                            .put("hive.storage-format", "TEXTFILE") // so that there's no minimum split size for the file
-                            .buildOrThrow();
-                    hiveBucketedProperties = new HashMap<>(hiveBucketedProperties);
+                    Map<String, String> hiveBucketedProperties = new HashMap<>(hiveProperties);
+                    hiveBucketedProperties.put("hive.max-split-size", "10kB"); // so that each bucket has multiple splits
+                    hiveBucketedProperties.put("hive.storage-format", "TEXTFILE"); // so that there's no minimum split size for the file
                     hiveBucketedProperties.put("hive.compression-codec", "NONE"); // so that the file is splittable
                     queryRunner.createCatalog(HIVE_BUCKETED_CATALOG, "hive", hiveBucketedProperties);
                 }
@@ -441,6 +432,40 @@ public final class HiveQueryRunner
                     .build();
 
             Logger log = Logger.get(HiveGlueQueryRunnerMain.class);
+            log.info("======== SERVER STARTED ========");
+            log.info("\n====\n%s\n====", queryRunner.getCoordinator().getBaseUrl());
+        }
+    }
+
+    public static final class HiveGlueFlociQueryRunnerMain
+    {
+        private HiveGlueFlociQueryRunnerMain() {}
+
+        static void main()
+                throws Exception
+        {
+            //noinspection resource
+            FlociS3AndGlue floci = new FlociS3AndGlue();
+            String bucketName = "hive-glue-floci-" + randomNameSuffix();
+            floci.createBucket(bucketName);
+
+            //noinspection resource
+            DistributedQueryRunner queryRunner = HiveQueryRunner.builder(testSessionBuilder()
+                            .setCatalog("hive")
+                            .setSchema("tpch")
+                            .build())
+                    .addCoordinatorProperty("http-server.http.port", "8080")
+                    .addHiveProperty("hive.metastore", "glue")
+                    .addHiveProperty("hive.metastore.glue.default-warehouse-dir", "s3://" + bucketName + "/glue")
+                    .addHiveProperty("hive.security", "allow-all")
+                    .addHiveProperty("hive.non-managed-table-writes-enabled", "true")
+                    .addHiveProperty("fs.s3.enabled", "true")
+                    .addHiveProperties(floci.s3AndGlueProperties())
+                    .setSkipTimezoneSetup(true)
+                    .setCreateTpchSchemas(false)
+                    .build();
+
+            Logger log = Logger.get(HiveGlueFlociQueryRunnerMain.class);
             log.info("======== SERVER STARTED ========");
             log.info("\n====\n%s\n====", queryRunner.getCoordinator().getBaseUrl());
         }

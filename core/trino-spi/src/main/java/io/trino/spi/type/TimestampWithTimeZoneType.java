@@ -29,7 +29,7 @@ public abstract sealed class TimestampWithTimeZoneType
         implements FixedWidthType
         permits LongTimestampWithTimeZoneType, ShortTimestampWithTimeZoneType
 {
-    public static final String NAME = "timestamp with time zone";
+    public static final String NAME = "$timestamp_tz";
     public static final int MAX_PRECISION = 12;
 
     public static final int MAX_SHORT_PRECISION = 3;
@@ -63,7 +63,7 @@ public abstract sealed class TimestampWithTimeZoneType
 
     TimestampWithTimeZoneType(int precision, Class<?> javaType, Class<? extends ValueBlock> valueBlockType)
     {
-        super(new TypeSignature(NAME, TypeParameter.numericParameter(precision)), javaType, valueBlockType);
+        super(new TypeDescriptor(NAME, TypeParameter.numericParameter(precision)), javaType, valueBlockType);
 
         if (precision < 0 || precision > MAX_PRECISION) {
             throw new IllegalArgumentException(format("Precision must be in the range [0, %s]", MAX_PRECISION));
@@ -80,12 +80,6 @@ public abstract sealed class TimestampWithTimeZoneType
     public final boolean isShort()
     {
         return precision <= MAX_SHORT_PRECISION;
-    }
-
-    @Override
-    public String getDisplayName()
-    {
-        return "timestamp(" + precision + ") with time zone";
     }
 
     @Override

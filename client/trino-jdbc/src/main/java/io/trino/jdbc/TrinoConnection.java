@@ -20,7 +20,6 @@ import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import io.airlift.units.Duration;
 import io.trino.client.ClientSelectedRole;
@@ -84,6 +83,7 @@ import static com.google.common.base.Throwables.getCausalChain;
 import static com.google.common.collect.Maps.fromProperties;
 import static io.airlift.units.Duration.nanosSince;
 import static io.trino.client.JsonResponse.execute;
+import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static io.trino.client.StatementClientFactory.newStatementClient;
 import static io.trino.client.TrinoJsonCodec.jsonCodec;
 import static io.trino.jdbc.ClientInfoProperty.APPLICATION_NAME;
@@ -119,7 +119,7 @@ public class TrinoConnection
     private final AtomicReference<String> schema = new AtomicReference<>();
     private final AtomicReference<List<String>> path = new AtomicReference<>(ImmutableList.of());
     private final AtomicReference<String> authorizationUser = new AtomicReference<>();
-    private final Set<ClientSelectedRole> originalRoles = Sets.newConcurrentHashSet();
+    private final Set<ClientSelectedRole> originalRoles = ConcurrentHashMap.newKeySet();
     private final AtomicReference<ZoneId> timeZoneId = new AtomicReference<>();
     private final AtomicReference<Locale> locale = new AtomicReference<>();
     private final AtomicReference<Integer> networkTimeoutMillis = new AtomicReference<>(Ints.saturatedCast(MINUTES.toMillis(2)));
@@ -237,10 +237,11 @@ public class TrinoConnection
                 .encodedPath("/v1/statement")
                 .build();
 
-        Request headRequest = new Request.Builder()
+        Request.Builder headRequestBuilder = new Request.Builder()
                 .url(url)
-                .head()
-                .build();
+                .head();
+        user.ifPresent(requestUser -> headRequestBuilder.addHeader(TRINO_HEADERS.requestUser(), requestUser));
+        Request headRequest = headRequestBuilder.build();
 
         Exception lastException = null;
         Duration timeoutDuration = new Duration(timeout, TimeUnit.SECONDS);

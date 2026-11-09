@@ -29,9 +29,14 @@ import java.util.function.BiFunction;
 
 import static com.google.common.base.Preconditions.checkState;
 import static io.trino.server.testing.TestingTrinoServer.SESSION_START_TIME_PROPERTY;
+import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.INVALID_LITERAL;
+import static io.trino.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
 import static io.trino.spi.function.OperatorType.ADD;
+import static io.trino.spi.function.OperatorType.EQUAL;
+import static io.trino.spi.function.OperatorType.LESS_THAN;
+import static io.trino.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
 import static io.trino.spi.function.OperatorType.SUBTRACT;
 import static io.trino.spi.type.TimeZoneKey.getTimeZoneKey;
 import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
@@ -467,6 +472,26 @@ public class TestTimestampWithTimeZone
         assertThat(assertions.operator(ADD, "INTERVAL '3' month", "TIMESTAMP '2001-1-22 03:04:05.321 +05:09'"))
                 .matches("TIMESTAMP '2001-04-22 03:04:05.321 +05:09'");
 
+        // the time zone is packed into the low bits of the epoch millis, so the representable range is the same at every precision
+        assertTrinoExceptionThrownBy(assertions.operator(ADD, "TIMESTAMP '73326-09-11 20:14:45.247 UTC'", "INTERVAL '1' second")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+        assertTrinoExceptionThrownBy(assertions.operator(ADD, "TIMESTAMP '73326-09-11 20:14:45.2470000 UTC'", "INTERVAL '1' second")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+        assertTrinoExceptionThrownBy(assertions.operator(ADD, "TIMESTAMP '73326-09-11 20:14:45.247 UTC'", "INTERVAL '1' month")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+        assertTrinoExceptionThrownBy(assertions.operator(ADD, "TIMESTAMP '73326-09-11 20:14:45.2470000 UTC'", "INTERVAL '1' month")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+        assertTrinoExceptionThrownBy(assertions.operator(ADD, "INTERVAL '1' second", "TIMESTAMP '73326-09-11 20:14:45.2470000 UTC'")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+        assertTrinoExceptionThrownBy(assertions.operator(ADD, "INTERVAL '1' month", "TIMESTAMP '73326-09-11 20:14:45.2470000 UTC'")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+
         assertThat(assertions.operator(ADD, "TIMESTAMP '2001-1-22 03:04:05.321 +05:09'", "INTERVAL '3' year"))
                 .matches("TIMESTAMP '2004-01-22 03:04:05.321 +05:09'");
 
@@ -482,6 +507,20 @@ public class TestTimestampWithTimeZone
 
         assertThat(assertions.operator(SUBTRACT, "TIMESTAMP '2001-1-22 03:04:05.321 +05:09'", "INTERVAL '3' month"))
                 .matches("TIMESTAMP '2000-10-22 03:04:05.321 +05:09'");
+
+        // subtracting a negative interval runs past the largest representable value
+        assertTrinoExceptionThrownBy(assertions.operator(SUBTRACT, "TIMESTAMP '73326-09-11 20:14:45.247 UTC'", "INTERVAL '-1' second")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+        assertTrinoExceptionThrownBy(assertions.operator(SUBTRACT, "TIMESTAMP '73326-09-11 20:14:45.2470000 UTC'", "INTERVAL '-1' second")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+        assertTrinoExceptionThrownBy(assertions.operator(SUBTRACT, "TIMESTAMP '73326-09-11 20:14:45.247 UTC'", "INTERVAL '-1' month")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
+        assertTrinoExceptionThrownBy(assertions.operator(SUBTRACT, "TIMESTAMP '73326-09-11 20:14:45.2470000 UTC'", "INTERVAL '-1' month")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Timestamp out of range");
     }
 
     @Test
@@ -1954,6 +1993,11 @@ public class TestTimestampWithTimeZone
         assertThat(assertions.expression("CAST(CHAR '-12001-05-01 12:34:56.111111111111 Asia/Kathmandu' AS TIMESTAMP(10) WITH TIME ZONE)")).matches("TIMESTAMP '-12001-05-01 12:34:56.1111111111 Asia/Kathmandu'");
         assertThat(assertions.expression("CAST(CHAR '-12001-05-01 12:34:56.111111111111 Asia/Kathmandu' AS TIMESTAMP(11) WITH TIME ZONE)")).matches("TIMESTAMP '-12001-05-01 12:34:56.11111111111 Asia/Kathmandu'");
         assertThat(assertions.expression("CAST(CHAR '-12001-05-01 12:34:56.111111111111 Asia/Kathmandu' AS TIMESTAMP(12) WITH TIME ZONE)")).matches("TIMESTAMP '-12001-05-01 12:34:56.111111111111 Asia/Kathmandu'");
+
+        assertTrinoExceptionThrownBy(assertions.expression("CAST(a AS TIMESTAMP(3) WITH TIME ZONE)")
+                .binding("a", "CHAR 'invalid'")::evaluate)
+                .hasErrorCode(INVALID_CAST_ARGUMENT)
+                .hasMessage("Value cannot be cast to timestamp: invalid");
     }
 
     @Test
@@ -2564,6 +2608,105 @@ public class TestTimestampWithTimeZone
     }
 
     @Test
+    public void testDateDiffNonUtc()
+    {
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.000000 America/New_York', TIMESTAMP '2024-03-11 00:00:00.000000 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.000000 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.000000 Asia/Tokyo')")).matches("BIGINT '1'");
+
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00 America/New_York', TIMESTAMP '2024-03-11 00:00:00 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.1 America/New_York', TIMESTAMP '2024-03-11 00:00:00.1 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.11 America/New_York', TIMESTAMP '2024-03-11 00:00:00.11 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.1111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.1111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.11111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.11111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.111111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.1111111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.1111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.11111111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.11111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.111111111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.111111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.1111111111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.1111111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.11111111111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.11111111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-10 00:00:00.111111111111 America/New_York', TIMESTAMP '2024-03-11 00:00:00.111111111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00 America/New_York', TIMESTAMP '2024-03-10 00:00:00 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.1 America/New_York', TIMESTAMP '2024-03-10 00:00:00.1 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.11 America/New_York', TIMESTAMP '2024-03-10 00:00:00.11 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.1111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.1111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.11111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.11111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.111111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.111111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.1111111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.1111111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.11111111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.11111111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.111111111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.111111111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.1111111111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.1111111111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.11111111111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.11111111111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-03-11 00:00:00.111111111111 America/New_York', TIMESTAMP '2024-03-10 00:00:00.111111111111 America/New_York')")).matches("BIGINT '-1'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00 America/New_York', TIMESTAMP '2024-11-03 23:30:00 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.1 America/New_York', TIMESTAMP '2024-11-03 23:30:00.1 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.11 America/New_York', TIMESTAMP '2024-11-03 23:30:00.11 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.1111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.1111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.11111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.11111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.111111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.111111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.1111111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.1111111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.11111111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.11111111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.111111111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.111111111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.1111111111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.1111111111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.11111111111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.11111111111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('day', TIMESTAMP '2024-11-03 00:00:00.111111111111 America/New_York', TIMESTAMP '2024-11-03 23:30:00.111111111111 America/New_York')")).matches("BIGINT '0'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00 America/New_York', TIMESTAMP '2024-03-10 12:00:00 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.1 America/New_York', TIMESTAMP '2024-03-10 12:00:00.1 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.11 America/New_York', TIMESTAMP '2024-03-10 12:00:00.11 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.1111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.1111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.11111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.11111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.111111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.1111111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.1111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.11111111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.11111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.111111111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.111111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.1111111111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.1111111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.11111111111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.11111111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('week', TIMESTAMP '2024-03-03 12:00:00.111111111111 America/New_York', TIMESTAMP '2024-03-10 12:00:00.111111111111 America/New_York')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.1 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.1 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.11 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.11 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.1111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.1111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.11111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.11111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.111111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.1111111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.1111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.11111111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.11111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.111111111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.1111111111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.1111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.11111111111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.11111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('month', TIMESTAMP '2024-01-31 08:00:00.111111111111 Asia/Tokyo', TIMESTAMP '2024-02-29 08:00:00.111111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.1 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.1 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.11 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.11 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.1111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.1111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.11111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.11111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.111111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.1111111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.1111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.11111111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.11111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.111111111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.1111111111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.1111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.11111111111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.11111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('quarter', TIMESTAMP '2024-01-31 08:00:00.111111111111 Asia/Tokyo', TIMESTAMP '2024-04-30 08:00:00.111111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.1 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.1 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.11 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.11 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.1111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.1111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.11111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.11111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.111111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.1111111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.1111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.11111111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.11111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.111111111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.1111111111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.1111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.11111111111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.11111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+        assertThat(assertions.expression("date_diff('year', TIMESTAMP '2024-02-29 08:00:00.111111111111 Asia/Tokyo', TIMESTAMP '2025-02-28 08:00:00.111111111111 Asia/Tokyo')")).matches("BIGINT '1'");
+    }
+
+    @Test
     public void testDateAdd()
     {
         assertThat(assertions.expression("date_add('millisecond', 1, TIMESTAMP '2020-05-10 12:34:56 Asia/Kathmandu')")).matches("TIMESTAMP '2020-05-10 12:34:56 Asia/Kathmandu'");
@@ -2700,17 +2843,20 @@ public class TestTimestampWithTimeZone
         assertTrinoExceptionThrownBy(assertions.expression("date_add('day', " + value + ", TIMESTAMP '0001-01-01 00:00:00 Asia/Kathmandu')")::evaluate)
                 .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
                 .hasMessageMatching("Millis overflow: .*");
-        assertThatThrownBy(() -> assertions.expression("date_add('day', " + value + ", TIMESTAMP '0001-01-01 00:00:00.000000000000 Asia/Kathmandu')").evaluate())
+        assertTrinoExceptionThrownBy(assertions.expression("date_add('day', " + value + ", TIMESTAMP '0001-01-01 00:00:00.000000000000 Asia/Kathmandu')")::evaluate)
+                .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
                 .hasMessageMatching("Millis overflow: .*");
         assertTrinoExceptionThrownBy(assertions.expression("date_add('week', " + value + ", TIMESTAMP '0001-01-01 00:00:00 Asia/Kathmandu')")::evaluate)
                 .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
                 .hasMessageMatching("Millis overflow: .*");
-        assertThatThrownBy(() -> assertions.expression("date_add('week', " + value + ", TIMESTAMP '0001-01-01 00:00:00.000000000000 Asia/Kathmandu')").evaluate())
+        assertTrinoExceptionThrownBy(assertions.expression("date_add('week', " + value + ", TIMESTAMP '0001-01-01 00:00:00.000000000000 Asia/Kathmandu')")::evaluate)
+                .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
                 .hasMessageMatching("Millis overflow: .*");
         assertTrinoExceptionThrownBy(assertions.expression("date_add('month', " + value + ", TIMESTAMP '0001-01-01 00:00:00 Asia/Kathmandu')")::evaluate)
                 .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
                 .hasMessageMatching("Millis overflow: .*");
-        assertThatThrownBy(() -> assertions.expression("date_add('month', " + value + ", TIMESTAMP '0001-01-01 00:00:00.000000000000 Asia/Kathmandu')").evaluate())
+        assertTrinoExceptionThrownBy(assertions.expression("date_add('month', " + value + ", TIMESTAMP '0001-01-01 00:00:00.000000000000 Asia/Kathmandu')")::evaluate)
+                .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
                 .hasMessageMatching("Millis overflow: .*");
         assertTrinoExceptionThrownBy(assertions.expression("date_add('quarter', " + value + ", TIMESTAMP '0001-01-01 00:00:00 Asia/Kathmandu')")::evaluate)
                 .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
@@ -2815,7 +2961,7 @@ public class TestTimestampWithTimeZone
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.12 Asia/Kathmandu')")).matches("1589093396.12e0");
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.123 Asia/Kathmandu')")).matches("1589093396.123e0");
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.1234 Asia/Kathmandu')")).matches("1589093396.1234e0");
-        assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.12345 Asia/Kathmandu')")).matches("1589093396.1234498e0");
+        assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.12345 Asia/Kathmandu')")).matches("1589093396.12345e0");
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.123456 Asia/Kathmandu')")).matches("1589093396.123456e0");
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.1234567 Asia/Kathmandu')")).matches("1589093396.1234567e0");
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.12345678 Asia/Kathmandu')")).matches("1589093396.1234567e0");
@@ -2823,6 +2969,12 @@ public class TestTimestampWithTimeZone
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.1234567890 Asia/Kathmandu')")).matches("1589093396.1234567e0");
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.12345678901 Asia/Kathmandu')")).matches("1589093396.1234567e0");
         assertThat(assertions.expression("to_unixtime(TIMESTAMP '2020-05-10 12:34:56.123456789012 Asia/Kathmandu')")).matches("1589093396.1234567e0");
+
+        assertThat(assertions.expression("to_unixtime(TIMESTAMP '1975-05-10 12:34:56.001002 UTC')")).matches("168957296.001002e0");
+        assertThat(assertions.expression("to_unixtime(TIMESTAMP '1970-01-02 12:34:56.001002 UTC')")).matches("131696.001002e0");
+        assertThat(assertions.expression("to_unixtime(TIMESTAMP '1969-12-31 23:59:59.001083 UTC')")).matches("-0.998917e0");
+        assertThat(assertions.expression("to_unixtime(TIMESTAMP '1969-12-31 23:59:58.533673 UTC')")).matches("-1.466327e0");
+        assertThat(assertions.expression("to_unixtime(TIMESTAMP '1960-05-10 12:34:56.001003 UTC')")).matches("-304341903.998997e0");
     }
 
     @Test
@@ -2948,6 +3100,75 @@ public class TestTimestampWithTimeZone
                 .hasMessageContaining("is not a valid TIMESTAMP literal");
         assertThatThrownBy(() -> assertions.expression("timezone(TIMESTAMP '2024-01-01 12:00:00 asia/tokyo')").evaluate())
                 .hasMessageContaining("is not a valid TIMESTAMP literal");
+    }
+
+    @Test
+    public void testComparisonOperators()
+    {
+        // short (precision <= 3 → ShortTimestampWithTimeZoneType)
+        assertThat(assertions.expression("a = b")
+                .binding("a", "TIMESTAMP '2020-05-01 12:34:56 UTC'")
+                .binding("b", "TIMESTAMP '2020-05-01 12:34:56 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.operator(EQUAL, "TIMESTAMP '2020-05-01 12:34:56 UTC'", "TIMESTAMP '2020-05-01 12:34:56 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.expression("a < b")
+                .binding("a", "TIMESTAMP '2020-05-01 12:34:56 UTC'")
+                .binding("b", "TIMESTAMP '2020-05-01 12:34:56 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.operator(LESS_THAN, "TIMESTAMP '2020-05-01 12:34:56 UTC'", "TIMESTAMP '2020-05-01 12:34:56 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.expression("a <= b")
+                .binding("a", "TIMESTAMP '2020-05-01 12:34:56 UTC'")
+                .binding("b", "TIMESTAMP '2020-05-01 12:34:56 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.operator(LESS_THAN_OR_EQUAL, "TIMESTAMP '2020-05-01 12:34:56 UTC'", "TIMESTAMP '2020-05-01 12:34:56 UTC'"))
+                .neverFails();
+
+        // long (precision > 3 → LongTimestampWithTimeZoneType)
+        assertThat(assertions.expression("a = b")
+                .binding("a", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'")
+                .binding("b", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.operator(EQUAL, "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.expression("a < b")
+                .binding("a", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'")
+                .binding("b", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.operator(LESS_THAN, "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.expression("a <= b")
+                .binding("a", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'")
+                .binding("b", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'"))
+                .neverFails();
+
+        assertThat(assertions.operator(LESS_THAN_OR_EQUAL, "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'", "TIMESTAMP '2020-05-01 12:34:56.123456789 UTC'"))
+                .neverFails();
+    }
+
+    @Test
+    public void testIn()
+    {
+        // A short IN list of values close to the epoch makes the compiler switch over the raw long representation,
+        // which packs the time zone, while equality compares the instant only.
+        // A single-element list would be rewritten to an equality comparison.
+        assertThat(assertions.expression("a IN (TIMESTAMP '1970-01-01 01:00:00 Europe/Warsaw', TIMESTAMP '1970-01-01 00:00:02 UTC')")
+                .binding("a", "TIMESTAMP '1970-01-01 00:00:00 UTC'"))
+                .isEqualTo(true);
+
+        assertThat(assertions.expression("a IN (TIMESTAMP '1970-01-01 01:00:00 Europe/Warsaw', TIMESTAMP '1970-01-01 00:00:02 UTC')")
+                .binding("a", "TIMESTAMP '1970-01-01 00:00:01 UTC'"))
+                .isEqualTo(false);
     }
 
     private BiFunction<Session, QueryRunner, Object> timestampWithTimeZone(int precision, int year, int month, int day, int hour, int minute, int second, long picoOfSecond, TimeZoneKey timeZoneKey)

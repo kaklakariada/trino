@@ -27,6 +27,7 @@ import io.trino.plugin.hive.acid.AcidTransaction;
 import io.trino.plugin.hive.coercions.CoercionUtils.CoercionContext;
 import io.trino.plugin.hive.coercions.TypeCoercer;
 import io.trino.plugin.hive.util.HiveBucketing.BucketingVersion;
+import io.trino.plugin.hive.util.HiveBucketing.HiveBucketFilter;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -38,6 +39,7 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
@@ -71,7 +73,6 @@ import static io.trino.plugin.hive.HiveSessionProperties.getTimestampPrecision;
 import static io.trino.plugin.hive.coercions.CoercionUtils.createCoercer;
 import static io.trino.plugin.hive.coercions.CoercionUtils.createTypeFromCoercer;
 import static io.trino.plugin.hive.coercions.CoercionUtils.extractHiveStorageFormat;
-import static io.trino.plugin.hive.util.HiveBucketing.HiveBucketFilter;
 import static io.trino.plugin.hive.util.HiveBucketing.getHiveBucketFilter;
 import static io.trino.plugin.hive.util.HiveTypeUtil.getHiveTypeForDereferences;
 import static io.trino.plugin.hive.util.HiveUtil.getInputFormatName;
@@ -110,7 +111,8 @@ public class HivePageSourceProvider
             ConnectorTableHandle tableHandle,
             Optional<ConnectorTableCredentials> tableCredentials,
             List<ColumnHandle> columns,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            MemoryContext memoryContext)
     {
         HiveTableHandle hiveTable = (HiveTableHandle) tableHandle;
         HiveSplit hiveSplit = (HiveSplit) split;
@@ -161,7 +163,8 @@ public class HivePageSourceProvider
                 hiveSplit.getAcidInfo(),
                 originalFile,
                 hiveTable.getTransaction(),
-                columnMappings);
+                columnMappings,
+                memoryContext);
 
         if (pageSource.isPresent()) {
             return pageSource.get();
@@ -191,7 +194,8 @@ public class HivePageSourceProvider
             Optional<AcidInfo> acidInfo,
             boolean originalFile,
             AcidTransaction transaction,
-            List<ColumnMapping> columnMappings)
+            List<ColumnMapping> columnMappings,
+            MemoryContext memoryContext)
     {
         if (effectivePredicate.isNone()) {
             return Optional.of(new EmptyPageSource());
@@ -220,7 +224,8 @@ public class HivePageSourceProvider
                     acidInfo,
                     tableBucketNumber,
                     originalFile,
-                    transaction);
+                    transaction,
+                    memoryContext);
 
             if (pageSource.isPresent()) {
                 return Optional.of(createHivePageSource(
@@ -298,7 +303,7 @@ public class HivePageSourceProvider
             return false;
         }
         Optional<HiveBucketFilter> hiveBucketFilter = getHiveBucketFilter(hiveTable, dynamicFilter.getCurrentPredicate());
-        return hiveBucketFilter.map(filter -> !filter.bucketsToKeep().contains(hiveSplit.getTableBucketNumber().getAsInt())).orElse(false);
+        return hiveBucketFilter.map(filter -> !filter.bucketsToKeep().contains(hiveSplit.getTableBucketNumber().orElseThrow())).orElse(false);
     }
 
     private static boolean shouldSkipSplit(List<ColumnMapping> columnMappings, DynamicFilter dynamicFilter)
@@ -451,7 +456,7 @@ public class HivePageSourceProvider
         public int getIndex()
         {
             checkState(kind == ColumnMappingKind.REGULAR || kind == ColumnMappingKind.INTERIM || isRowIdColumnHandle(hiveColumnHandle));
-            return index.getAsInt();
+            return index.orElseThrow();
         }
 
         public Optional<HiveType> getBaseTypeCoercionFrom()
@@ -620,7 +625,7 @@ public class HivePageSourceProvider
                     conversion.bucketingVersion(),
                     conversion.tableBucketCount(),
                     conversion.partitionBucketCount(),
-                    bucketNumber.getAsInt());
+                    bucketNumber.orElseThrow());
         });
     }
 

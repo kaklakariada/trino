@@ -21,6 +21,7 @@ import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.optimizer.IrOptimizerRule;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.SymbolAllocator;
 
 import java.util.HashSet;
 import java.util.List;
@@ -28,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.sql.ir.IrExpressions.mayBeNull;
 import static io.trino.sql.planner.DeterminismEvaluator.isDeterministic;
 import static java.util.Objects.requireNonNull;
@@ -51,7 +53,7 @@ public class RemoveRedundantCoalesceArguments
     }
 
     @Override
-    public Optional<Expression> apply(Expression expression, Session session, Map<Symbol, Expression> bindings)
+    public Optional<Expression> apply(Expression expression, Session session, SymbolAllocator symbolAllocator, Map<Symbol, Expression> bindings)
     {
         if (!(expression instanceof Coalesce(List<Expression> operands))) {
             return Optional.empty();
@@ -76,7 +78,7 @@ public class RemoveRedundantCoalesceArguments
                 }
             }
 
-            if (!mayBeNull(plannerContext, argument)) {
+            if (!mayBeNull(plannerContext, getCharVarcharCoercion(session), argument)) {
                 break;
             }
         }

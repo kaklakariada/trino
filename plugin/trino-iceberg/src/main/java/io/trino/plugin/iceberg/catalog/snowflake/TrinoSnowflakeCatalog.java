@@ -175,9 +175,15 @@ public class TrinoSnowflakeCatalog
     }
 
     @Override
-    public List<SchemaTableName> listIcebergTables(ConnectorSession session, Optional<String> namespace)
+    public List<SchemaTableName> listIcebergTables(ConnectorSession session, List<String> filter)
     {
-        return listTables(session, namespace).stream()
+        if (filter.isEmpty()) {
+            return listTables(session, Optional.empty()).stream()
+                    .map(TableInfo::tableName)
+                    .collect(toImmutableList());
+        }
+        return filter.stream()
+                .flatMap(namespace -> listTables(session, Optional.of(namespace)).stream())
                 .map(TableInfo::tableName)
                 .collect(toImmutableList());
     }
@@ -204,6 +210,12 @@ public class TrinoSnowflakeCatalog
 
     @Override
     public Transaction newTransaction(Table icebergTable)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "Snowflake managed Iceberg tables do not support modifications");
+    }
+
+    @Override
+    public void verifyTableWritable(Table icebergTable)
     {
         throw new TrinoException(NOT_SUPPORTED, "Snowflake managed Iceberg tables do not support modifications");
     }
@@ -329,7 +341,7 @@ public class TrinoSnowflakeCatalog
     }
 
     @Override
-    public void createView(ConnectorSession session, SchemaTableName schemaViewName, ConnectorViewDefinition definition, boolean replace)
+    public void createView(ConnectorSession session, SchemaTableName schemaViewName, ConnectorViewDefinition definition, Map<String, Object> viewProperties, boolean replace)
     {
         throw new TrinoException(NOT_SUPPORTED, "Views are not supported for the Snowflake Iceberg catalog");
     }
@@ -366,6 +378,12 @@ public class TrinoSnowflakeCatalog
 
     @Override
     public void createMaterializedView(ConnectorSession session, SchemaTableName viewName, ConnectorMaterializedViewDefinition definition, Map<String, Object> materializedViewProperties, boolean replace, boolean ignoreExisting)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "Materialized views are not supported for the Snowflake Iceberg catalog");
+    }
+
+    @Override
+    public void updateMaterializedViewComment(ConnectorSession session, SchemaTableName schemaViewName, Optional<String> comment)
     {
         throw new TrinoException(NOT_SUPPORTED, "Materialized views are not supported for the Snowflake Iceberg catalog");
     }

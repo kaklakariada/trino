@@ -18,7 +18,6 @@ import io.trino.metastore.Table;
 import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ConnectorViewDefinition;
-import io.trino.spi.type.TypeId;
 
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -27,7 +26,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.metastore.Table.TABLE_COMMENT;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_METADATA;
 import static io.trino.plugin.hive.HiveToTrinoTranslator.translateHiveViewToTrino;
-import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeSignature;
+import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeDescriptor;
 
 public class LegacyHiveViewReader
         implements ViewReaderUtil.ViewReader
@@ -49,7 +48,7 @@ public class LegacyHiveViewReader
                 Optional.of(catalogName.toString()),
                 Optional.ofNullable(table.getDatabaseName()),
                 Stream.concat(table.getDataColumns().stream(), table.getPartitionColumns().stream())
-                        .map(column -> new ConnectorViewDefinition.ViewColumn(column.getName(), TypeId.of(getTypeSignature(column.getType()).toString()), column.getComment()))
+                        .map(column -> ConnectorViewDefinition.ViewColumn.fromTypeDescriptor(column.getName(), getTypeDescriptor(column.getType()), column.getComment()))
                         .collect(toImmutableList()),
                 Optional.ofNullable(table.getParameters().get(TABLE_COMMENT)),
                 Optional.empty(), // will be filled in later by HiveMetadata

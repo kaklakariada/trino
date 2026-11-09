@@ -86,7 +86,7 @@ public class TestDruidCaseInsensitiveMapping
     @Test
     public void testNonLowerCaseTableName()
     {
-        MaterializedResult expectedColumns = MaterializedResult.resultBuilder(getQueryRunner().getDefaultSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+        MaterializedResult expectedColumns = MaterializedResult.resultBuilder(VARCHAR, VARCHAR, VARCHAR, VARCHAR)
                 .row("__time", "timestamp(3)", "", "")
                 .row("clerk", "varchar", "", "") // String columns are reported only as varchar
                 .row("comment", "varchar", "", "")
@@ -122,7 +122,7 @@ public class TestDruidCaseInsensitiveMapping
                 this.druidServer,
                 "region",
                 "casesensitivename",
-                // when you create a second datasource with the same name (ignoring case) the filename mentioned in firehose's ingestion config, must match with the first one.
+                // when you create a second datasource with the same name (ignoring case) the filename mentioned in the input source's ingestion config, must match with the first one.
                 // Otherwise druid's loadstatus (and system tables) fails to register the second datasource created.
                 Optional.of("CaseSensitiveName"));
 
@@ -170,7 +170,7 @@ public class TestDruidCaseInsensitiveMapping
                 this.druidServer,
                 "region",
                 "casesensitivename",
-                // when you create a second datasource with the same name (ignoring case) the filename mentioned in firehose's ingestion config, must match with the first one.
+                // when you create a second datasource with the same name (ignoring case) the filename mentioned in the input source's ingestion config, must match with the first one.
                 // Otherwise druid's loadstatus (and system tables) fails to register the second datasource created.
                 Optional.of("CaseSensitiveName"));
 

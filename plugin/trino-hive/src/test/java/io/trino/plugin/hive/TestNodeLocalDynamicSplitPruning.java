@@ -30,6 +30,7 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.ConnectorIdentity;
@@ -81,7 +82,8 @@ class TestNodeLocalDynamicSplitPruning
     void testDynamicBucketPruning()
             throws IOException
     {
-        HiveConfig config = new HiveConfig();
+        // The split points at an empty ORC file; keep ORC as the default storage format
+        HiveConfig config = new HiveConfig().setHiveStorageFormat(HiveStorageFormat.ORC);
         HiveTransactionHandle transaction = new HiveTransactionHandle(false);
         try (ConnectorPageSource emptyPageSource = createTestingPageSource(transaction, config, getDynamicFilter(getTupleDomainForBucketSplitPruning()))) {
             assertThat(emptyPageSource.getClass()).isEqualTo(EmptyPageSource.class);
@@ -96,7 +98,8 @@ class TestNodeLocalDynamicSplitPruning
     void testDynamicPartitionPruning()
             throws IOException
     {
-        HiveConfig config = new HiveConfig();
+        // The split points at an empty ORC file; keep ORC as the default storage format
+        HiveConfig config = new HiveConfig().setHiveStorageFormat(HiveStorageFormat.ORC);
         HiveTransactionHandle transaction = new HiveTransactionHandle(false);
 
         try (ConnectorPageSource emptyPageSource = createTestingPageSource(transaction, config, getDynamicFilter(getTupleDomainForPartitionSplitPruning()))) {
@@ -165,7 +168,8 @@ class TestNodeLocalDynamicSplitPruning
                 tableHandle.connectorHandle(),
                 Optional.empty(),
                 ImmutableList.of(BUCKET_HIVE_COLUMN_HANDLE, PARTITION_HIVE_COLUMN_HANDLE),
-                dynamicFilter);
+                dynamicFilter,
+                MemoryContext.NO_LIMIT);
     }
 
     private static TupleDomain<ColumnHandle> getTupleDomainForBucketSplitPruning()

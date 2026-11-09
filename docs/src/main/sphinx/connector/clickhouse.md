@@ -19,7 +19,7 @@ from different catalogs accessing ClickHouse or any other supported data source.
 
 To connect to a ClickHouse server, you need:
 
-- ClickHouse (version 25.3 or higher) or Altinity (version 23.3 or higher).
+- ClickHouse (version 26.3 or higher) or Altinity (version 23.8 or higher).
 - Network access from the Trino coordinator and workers to the ClickHouse
   server. Port 8123 is the default port.
 
@@ -68,6 +68,16 @@ For more information on TLS configuration options, see the [Clickhouse JDBC
 driver documentation](https://clickhouse.com/docs/en/interfaces/jdbc/)
 
 ```{include} jdbc-authentication.fragment
+```
+
+(clickhouse-cluster-mode)=
+### Cluster mode
+
+If the server in `connection-url` belongs to a ClickHouse cluster, set
+`clickhouse.cluster-name` to the name of that cluster:
+
+```properties
+clickhouse.cluster-name=example_cluster
 ```
 
 ### Multiple ClickHouse servers

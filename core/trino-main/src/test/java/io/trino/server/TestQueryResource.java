@@ -24,6 +24,8 @@ import io.airlift.http.client.jetty.JettyHttpClient;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
+import io.airlift.tracing.SpanSerialization.SpanDeserializer;
+import io.airlift.tracing.SpanSerialization.SpanSerializer;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.trino.client.Column;
@@ -54,8 +56,6 @@ import static io.airlift.http.client.Request.Builder.preparePut;
 import static io.airlift.http.client.StaticBodyGenerator.createStaticBodyGenerator;
 import static io.airlift.http.client.StatusResponseHandler.createStatusResponseHandler;
 import static io.airlift.testing.Closeables.closeAll;
-import static io.airlift.tracing.SpanSerialization.SpanDeserializer;
-import static io.airlift.tracing.SpanSerialization.SpanSerializer;
 import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static io.trino.execution.QueryState.FAILED;
 import static io.trino.execution.QueryState.RUNNING;
@@ -253,6 +253,7 @@ public class TestQueryResource
         BasicQueryInfo queryInfo = server.getDispatchManager().getQueryInfo(new QueryId(queryId));
         assertThat(queryInfo.getState()).isEqualTo(FAILED);
         assertThat(queryInfo.getErrorCode()).isEqualTo(USER_CANCELED.toErrorCode());
+        assertThat(getFailureMessage(queryId)).isEqualTo("Query was canceled by user 'unknown'");
     }
 
     @Test
@@ -301,10 +302,20 @@ public class TestQueryResource
         assertThat(queryInfo.getState()).isEqualTo(FAILED);
         if (killType.equals("killed")) {
             assertThat(queryInfo.getErrorCode()).isEqualTo(ADMINISTRATIVELY_KILLED.toErrorCode());
+            assertThat(getFailureMessage(queryId)).isEqualTo("Query killed by user 'unknown'. No message provided.");
         }
         else {
             assertThat(queryInfo.getErrorCode()).isEqualTo(ADMINISTRATIVELY_PREEMPTED.toErrorCode());
+            assertThat(getFailureMessage(queryId)).isEqualTo("Query preempted by user 'unknown'. No message provided.");
         }
+    }
+
+    private String getFailureMessage(String queryId)
+    {
+        return server.getDispatchManager().getFullQueryInfo(new QueryId(queryId))
+                .orElseThrow()
+                .getFailureInfo()
+                .message();
     }
 
     private String runToCompletion(String sql)

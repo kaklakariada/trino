@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>482-SNAPSHOT</version>
+        <version>485-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -89,9 +89,14 @@
         </dependency>
 
         <dependency>
-            <groupId>com.google.inject</groupId>
+            <groupId>io.airlift</groupId>
             <artifactId>guice</artifactId>
-            <classifier>classes</classifier>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>jackson</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -199,13 +204,54 @@
                         <revapi.differences>
                             <ignore>true</ignore>
                             <differences>
+                                <item>
+                                    <code>java.annotation.attributeValueChanged</code>
+                                    <old>interface io.trino.spi.predicate.ValueSet</old>
+                                    <new>interface io.trino.spi.predicate.ValueSet</new>
+                                    <annotationType>com.fasterxml.jackson.annotation.JsonSubTypes</annotationType>
+                                    <attribute>value</attribute>
+                                    <justification>Add a floating-point value-set subtype. Existing serialized value sets remain readable.</justification>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeChanged</code>
+                                    <old>parameter io.trino.spi.predicate.SortedRangeSet io.trino.spi.predicate.SortedRangeSet::intersect(===io.trino.spi.predicate.ValueSet===)</old>
+                                    <new>parameter io.trino.spi.predicate.SortedRangeSet io.trino.spi.predicate.SortedRangeSet::intersect(===io.trino.spi.predicate.SortedRangeSet===)</new>
+                                    <justification>Mixed operations return ValueSet; range-only overloads retain SortedRangeSet results. Revapi pairs overloads by their return types.</justification>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeChanged</code>
+                                    <old>parameter io.trino.spi.predicate.SortedRangeSet io.trino.spi.predicate.SortedRangeSet::union(===io.trino.spi.predicate.ValueSet===)</old>
+                                    <new>parameter io.trino.spi.predicate.SortedRangeSet io.trino.spi.predicate.SortedRangeSet::union(===io.trino.spi.predicate.SortedRangeSet===)</new>
+                                    <justification>Mixed operations return ValueSet; range-only overloads retain SortedRangeSet results. Revapi pairs overloads by their return types.</justification>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeChanged</code>
+                                    <old>parameter io.trino.spi.predicate.SortedRangeSet io.trino.spi.predicate.SortedRangeSet::union(===java.util.Collection&lt;io.trino.spi.predicate.ValueSet&gt;===)</old>
+                                    <new>parameter io.trino.spi.predicate.ValueSet io.trino.spi.predicate.SortedRangeSet::union(===io.trino.spi.predicate.ValueSet===)</new>
+                                    <justification>Mixed operations return ValueSet; range-only overloads retain SortedRangeSet results. Revapi pairs overloads by their return types.</justification>
+                                </item>
+                                <item>
+                                    <code>java.method.returnTypeChanged</code>
+                                    <old>method io.trino.spi.predicate.SortedRangeSet io.trino.spi.predicate.SortedRangeSet::union(java.util.Collection&lt;io.trino.spi.predicate.ValueSet&gt;)</old>
+                                    <new>method io.trino.spi.predicate.ValueSet io.trino.spi.predicate.SortedRangeSet::union(io.trino.spi.predicate.ValueSet)</new>
+                                    <justification>Mixed operations return ValueSet; range-only overloads retain SortedRangeSet results. Revapi pairs overloads by their return types.</justification>
+                                </item>
                                 <!-- Allow adding new annotations (such as @Nullable) -->
                                 <item>
                                     <code>java.annotation.added</code>
                                 </item>
+                                <item>
+                                    <!-- Disabled due to too many false positives -->
+                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
+                                </item>
                                 <!-- Allow changing enum constant order (e.g., StandardErrorCode) -->
                                 <item>
                                     <code>java.field.enumConstantOrderChanged</code>
+                                </item>
+                                <item>
+                                    <code>java.field.removedWithConstant</code>
+                                    <old>field io.trino.spi.type.StandardTypes.JSON_2016</old>
+                                    <justification>The json2016 type was internal to the SQL/JSON path engine: it had no literal, cast or function signature reachable from SQL, and no type of that name is registered any more</justification>
                                 </item>
                                 <!-- Allow arbitrary changes to unstable APIs -->
                                 <item>
@@ -226,215 +272,27 @@
                                     </old>
                                 </item>
                                 <!-- Backwards incompatible changes since the previous release -->
-                                <!-- Any exclusions below can be deleted after each release -->
                                 <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.nowFinal</code>
-                                    <old>class io.trino.spi.type.VariantType</old>
-                                    <new>class io.trino.spi.type.VariantType</new>
-                                    <justification>VariantType is a singleton type implementation and should not be extended</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method io.trino.spi.type.TypeParameter io.trino.spi.type.TypeParameter::typeVariable(java.lang.String)</old>
-                                    <justification>Renamed to numericVariable; the factory builds a numeric parameter variable, not a type variable.</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.removed</code>
-                                    <old>class io.trino.spi.function.LongVariableConstraint</old>
-                                    <justification>Renamed to NumericVariableConstraint.</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method io.trino.spi.function.Signature.Builder io.trino.spi.function.Signature.Builder::longVariable(java.lang.String)</old>
-                                    <justification>Renamed to numericVariable.</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method io.trino.spi.function.Signature.Builder io.trino.spi.function.Signature.Builder::longVariable(java.lang.String, java.lang.String)</old>
-                                    <justification>Renamed to numericVariable.</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method java.util.List&lt;io.trino.spi.function.LongVariableConstraint&gt; io.trino.spi.function.Signature::getLongVariableConstraints()</old>
-                                    <justification>Renamed to getNumericVariableConstraints.</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method io.trino.spi.type.TypeSignature io.trino.spi.type.TypeSignature::parametricType(java.lang.String, io.trino.spi.type.TypeSignature[])</old>
-                                    <justification>Renamed parametricType to type; the parameterless type(name) is the degenerate case.</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
-                                    <new>method io.trino.spi.type.TypeSignature io.trino.spi.type.TypeSignature::type(java.lang.String, io.trino.spi.type.TypeSignature[])</new>
-                                    <justification>The type factory deliberately overloads on TypeSignature... and TypeParameter... varargs so callers avoid wrapping homogeneous parameters.</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
-                                    <new>method io.trino.spi.type.TypeSignature io.trino.spi.type.TypeSignature::type(java.lang.String, io.trino.spi.type.TypeParameter[])</new>
-                                    <justification>The type factory deliberately overloads on TypeSignature... and TypeParameter... varargs so callers avoid wrapping homogeneous parameters.</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method io.trino.spi.block.Block io.trino.spi.predicate.Utils::nativeValueToBlock(io.trino.spi.type.Type, java.lang.Object)</old>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method java.lang.Object io.trino.spi.predicate.Utils::blockToNativeValue(io.trino.spi.type.Type, io.trino.spi.block.Block)</old>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.removed</code>
-                                    <old>class io.trino.spi.predicate.Utils</old>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.noLongerDefault</code>
-                                    <old>method io.trino.spi.connector.ConnectorPageSink io.trino.spi.connector.ConnectorPageSinkProvider::createPageSink(io.trino.spi.connector.ConnectorTransactionHandle, io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorInsertTableHandle, java.util.Optional&lt;io.trino.spi.connector.ConnectorTableCredentials&gt;, io.trino.spi.connector.ConnectorPageSinkId)</old>
-                                    <justification>Removed deprecated method without ConnectorTableCredentials parameter</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.nowAbstract</code>
-                                    <old>method io.trino.spi.connector.ConnectorPageSink io.trino.spi.connector.ConnectorPageSinkProvider::createPageSink(io.trino.spi.connector.ConnectorTransactionHandle, io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorInsertTableHandle, java.util.Optional&lt;io.trino.spi.connector.ConnectorTableCredentials&gt;, io.trino.spi.connector.ConnectorPageSinkId)</old>
-                                    <justification>Removed deprecated method without ConnectorTableCredentials parameter</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.noLongerDefault</code>
-                                    <old>method io.trino.spi.connector.ConnectorPageSink io.trino.spi.connector.ConnectorPageSinkProvider::createPageSink(io.trino.spi.connector.ConnectorTransactionHandle, io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorOutputTableHandle, java.util.Optional&lt;io.trino.spi.connector.ConnectorTableCredentials&gt;, io.trino.spi.connector.ConnectorPageSinkId)</old>
-                                    <justification>Removed deprecated method without ConnectorTableCredentials parameter</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.nowAbstract</code>
-                                    <old>method io.trino.spi.connector.ConnectorPageSink io.trino.spi.connector.ConnectorPageSinkProvider::createPageSink(io.trino.spi.connector.ConnectorTransactionHandle, io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorOutputTableHandle, java.util.Optional&lt;io.trino.spi.connector.ConnectorTableCredentials&gt;, io.trino.spi.connector.ConnectorPageSinkId)</old>
-                                    <justification>Removed deprecated method without ConnectorTableCredentials parameter</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.noLongerDefault</code>
-                                    <old>method io.trino.spi.connector.ConnectorPageSource io.trino.spi.connector.ConnectorPageSourceProvider::createPageSource(io.trino.spi.connector.ConnectorTransactionHandle, io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorSplit, io.trino.spi.connector.ConnectorTableHandle, java.util.Optional&lt;io.trino.spi.connector.ConnectorTableCredentials&gt;, java.util.List&lt;io.trino.spi.connector.ColumnHandle&gt;, io.trino.spi.connector.DynamicFilter)</old>
-                                    <justification>Removed deprecated method without ConnectorTableCredentials parameter</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.nowAbstract</code>
-                                    <old>method io.trino.spi.connector.ConnectorPageSource io.trino.spi.connector.ConnectorPageSourceProvider::createPageSource(io.trino.spi.connector.ConnectorTransactionHandle, io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorSplit, io.trino.spi.connector.ConnectorTableHandle, java.util.Optional&lt;io.trino.spi.connector.ConnectorTableCredentials&gt;, java.util.List&lt;io.trino.spi.connector.ColumnHandle&gt;, io.trino.spi.connector.DynamicFilter)</old>
-                                    <justification>Removed deprecated method without ConnectorTableCredentials parameter</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
-                                    <old>method io.opentelemetry.api.common.AttributesBuilder io.opentelemetry.api.common.AttributesBuilder::put(java.lang.String, boolean[])</old>
-                                    <new>method io.opentelemetry.api.common.AttributesBuilder io.opentelemetry.api.common.AttributesBuilder::put(java.lang.String, boolean[])</new>
-                                    <justification>Revapi now detects new API changes to vararg args</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
-                                    <old>method io.opentelemetry.api.common.AttributesBuilder io.opentelemetry.api.common.AttributesBuilder::put(java.lang.String, double[])</old>
-                                    <new>method io.opentelemetry.api.common.AttributesBuilder io.opentelemetry.api.common.AttributesBuilder::put(java.lang.String, double[])</new>
-                                    <justification>Revapi now detects new API changes to vararg args</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
-                                    <old>method io.opentelemetry.api.common.AttributesBuilder io.opentelemetry.api.common.AttributesBuilder::put(java.lang.String, java.lang.String[])</old>
-                                    <new>method io.opentelemetry.api.common.AttributesBuilder io.opentelemetry.api.common.AttributesBuilder::put(java.lang.String, java.lang.String[])</new>
-                                    <justification>Revapi now detects new API changes to vararg args</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
-                                    <old>method io.opentelemetry.api.common.AttributesBuilder io.opentelemetry.api.common.AttributesBuilder::put(java.lang.String, long[])</old>
-                                    <new>method io.opentelemetry.api.common.AttributesBuilder io.opentelemetry.api.common.AttributesBuilder::put(java.lang.String, long[])</new>
-                                    <justification>Revapi now detects new API changes to vararg args</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
-                                    <old>method io.opentelemetry.api.common.Value&lt;java.util.List&lt;io.opentelemetry.api.common.KeyValue&gt;&gt; io.opentelemetry.api.common.Value&lt;T&gt;::of(io.opentelemetry.api.common.KeyValue[])</old>
-                                    <new>method io.opentelemetry.api.common.Value&lt;java.util.List&lt;io.opentelemetry.api.common.KeyValue&gt;&gt; io.opentelemetry.api.common.Value&lt;T&gt;::of(io.opentelemetry.api.common.KeyValue[])</new>
-                                    <justification>Revapi now detects new API changes to vararg args</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
-                                    <old>method io.opentelemetry.api.common.Value&lt;java.util.List&lt;io.opentelemetry.api.common.Value&lt;?&gt;&gt;&gt; io.opentelemetry.api.common.Value&lt;T&gt;::of(io.opentelemetry.api.common.Value&lt;?&gt;[])</old>
-                                    <new>method io.opentelemetry.api.common.Value&lt;java.util.List&lt;io.opentelemetry.api.common.Value&lt;?&gt;&gt;&gt; io.opentelemetry.api.common.Value&lt;T&gt;::of(io.opentelemetry.api.common.Value&lt;?&gt;[])</new>
-                                    <justification>Revapi now detects new API changes to vararg args</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
                                     <code>java.method.numberOfParametersChanged</code>
-                                    <old>method java.util.Optional&lt;io.trino.spi.connector.ConnectorOutputMetadata&gt; io.trino.spi.connector.ConnectorMetadata::finishRefreshMaterializedView(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorTableHandle, io.trino.spi.connector.ConnectorInsertTableHandle, java.util.Collection&lt;io.airlift.slice.Slice&gt;, java.util.Collection&lt;io.trino.spi.statistics.ComputedStatistics&gt;, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, boolean, boolean)</old>
-                                    <new>method java.util.Optional&lt;io.trino.spi.connector.ConnectorOutputMetadata&gt; io.trino.spi.connector.ConnectorMetadata::finishRefreshMaterializedView(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorTableHandle, io.trino.spi.connector.ConnectorInsertTableHandle, java.util.Collection&lt;io.airlift.slice.Slice&gt;, java.util.Collection&lt;io.trino.spi.statistics.ComputedStatistics&gt;, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, boolean, boolean, boolean)</new>
-                                    <justification>Add hasNonDeterministicFunctions parameter to detect stale materialized views</justification>
-                                </item>
-                                <item>
-                                    <code>java.field.removed</code>
-                                    <old>field io.trino.spi.function.OperatorType.MODULUS</old>
-                                    <justification>Renamed to MODULO</justification>
-                                </item>
-                                <item>
-                                    <code>java.method.returnTypeChanged</code>
-                                    <old>method void io.trino.spi.connector.ConnectorMetadata::finishTableExecute(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorTableExecuteHandle, java.util.Collection&lt;io.airlift.slice.Slice&gt;, java.util.List&lt;java.lang.Object&gt;)</old>
-                                    <new>method java.util.Map&lt;java.lang.String, java.lang.Long&gt; io.trino.spi.connector.ConnectorMetadata::finishTableExecute(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorTableExecuteHandle, java.util.Collection&lt;io.airlift.slice.Slice&gt;, java.util.List&lt;java.lang.Object&gt;)</new>
+                                    <old>method void io.trino.spi.connector.RecordPageSource::&lt;init&gt;(io.trino.spi.connector.RecordSet)</old>
+                                    <new>method void io.trino.spi.connector.RecordPageSource::&lt;init&gt;(io.trino.spi.connector.RecordSet, io.trino.spi.connector.MemoryContext)</new>
+                                    <justification>Require a MemoryContext to replace polling through ConnectorPageSource.getMemoryUsage</justification>
                                 </item>
                                 <item>
                                     <code>java.method.numberOfParametersChanged</code>
-                                    <old>method io.trino.spi.function.FunctionMetadata io.trino.spi.function.FunctionMetadata::fromJson(io.trino.spi.function.FunctionId, io.trino.spi.function.Signature, java.lang.String, java.util.Set&lt;java.lang.String&gt;, io.trino.spi.function.FunctionNullability, boolean, boolean, boolean, java.lang.String, io.trino.spi.function.FunctionKind, boolean)</old>
-                                    <new>method io.trino.spi.function.FunctionMetadata io.trino.spi.function.FunctionMetadata::fromJson(io.trino.spi.function.FunctionId, io.trino.spi.function.Signature, java.lang.String, java.util.Set&lt;java.lang.String&gt;, io.trino.spi.function.FunctionNullability, boolean, boolean, boolean, java.lang.String, io.trino.spi.function.FunctionKind, boolean, java.util.Optional&lt;io.trino.spi.type.TypeSignature&gt;, boolean)</new>
-                                    <justification>Add receiverType and instanceMethod to support SQL:2023 method invocation</justification>
+                                    <old>method void io.trino.spi.connector.RecordPageSource::&lt;init&gt;(java.util.List&lt;io.trino.spi.type.Type&gt;, io.trino.spi.connector.RecordCursor)</old>
+                                    <new>method void io.trino.spi.connector.RecordPageSource::&lt;init&gt;(java.util.List&lt;io.trino.spi.type.Type&gt;, io.trino.spi.connector.RecordCursor, io.trino.spi.connector.MemoryContext)</new>
+                                    <justification>Require a MemoryContext to replace polling through ConnectorPageSource.getMemoryUsage</justification>
                                 </item>
                                 <item>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method boolean io.trino.spi.type.TypeManager::isTypeRegistered(java.lang.String)</new>
-                                    <justification>Required for resolving static method calls on parametric type bases (array, row, map). Cannot be a default that calls getType because parametric bases require parameters and would force exception-driven control flow.</justification>
-                                </item>
-                                <item>
-                                    <code>java.method.parameterTypeParameterChanged</code>
-                                    <old>parameter io.trino.spi.function.Signature io.trino.spi.function.Signature::fromJson(java.util.List&lt;io.trino.spi.function.TypeVariableConstraint&gt;, java.util.List&lt;io.trino.spi.function.LongVariableConstraint&gt;, io.trino.spi.type.TypeSignature, ===java.util.List&lt;io.trino.spi.type.TypeSignature&gt;===, boolean)</old>
-                                    <new>parameter io.trino.spi.function.Signature io.trino.spi.function.Signature::fromJson(java.util.List&lt;io.trino.spi.function.TypeVariableConstraint&gt;, java.util.List&lt;io.trino.spi.function.LongVariableConstraint&gt;, io.trino.spi.type.TypeSignature, ===java.util.List&lt;io.trino.spi.function.Signature.Argument&gt;===, boolean)</new>
-                                    <justification>Replace parallel argumentTypes list with structural Signature.Argument list to carry parameter names</justification>
-                                </item>
-                                <item>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter io.trino.spi.function.Signature io.trino.spi.function.Signature::fromJson(java.util.List&lt;io.trino.spi.function.TypeVariableConstraint&gt;, java.util.List&lt;io.trino.spi.function.LongVariableConstraint&gt;, io.trino.spi.type.TypeSignature, ===java.util.List&lt;io.trino.spi.type.TypeSignature&gt;===, boolean)</old>
-                                    <new>parameter io.trino.spi.function.Signature io.trino.spi.function.Signature::fromJson(java.util.List&lt;io.trino.spi.function.TypeVariableConstraint&gt;, java.util.List&lt;io.trino.spi.function.LongVariableConstraint&gt;, io.trino.spi.type.TypeSignature, ===java.util.List&lt;io.trino.spi.function.Signature.Argument&gt;===, boolean)</new>
-                                    <justification>JsonProperty value renamed from argumentTypes to arguments</justification>
-                                </item>
-                                <item>
-                                    <code>java.annotation.removed</code>
-                                    <old>method java.util.List&lt;io.trino.spi.type.TypeSignature&gt; io.trino.spi.function.Signature::getArgumentTypes()</old>
-                                    <new>method java.util.List&lt;io.trino.spi.type.TypeSignature&gt; io.trino.spi.function.Signature::getArgumentTypes()</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <justification>getArgumentTypes() is now a derived view; JsonProperty moved to getArguments()</justification>
-                                </item>
-                                <!-- Remove dead JSON serialization from Signature and FunctionMetadata (never serialized at runtime). -->
-                                <item>
-                                    <regex>true</regex>
-                                    <code>java.annotation.removed</code>
-                                    <old>method .* io\.trino\.spi\.function\.(Signature|FunctionMetadata)::.*</old>
-                                    <annotationType>com\.fasterxml\.jackson\.annotation\.Json.*</annotationType>
-                                    <justification>Signature and FunctionMetadata are never JSON-serialized at runtime; removing the dead serialization.</justification>
-                                </item>
-                                <item>
-                                    <regex>true</regex>
+                                    <ignore>true</ignore>
                                     <code>java.method.removed</code>
-                                    <old>method .* io\.trino\.spi\.function\.(Signature|FunctionMetadata)::fromJson\(.*</old>
-                                    <justification>Remove the dead @JsonCreator; Signature/FunctionMetadata are never deserialized.</justification>
+                                    <old>method boolean io.trino.spi.connector.ConnectorMetadata::delegateMaterializedViewRefreshToConnector(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.SchemaTableName)</old>
+                                </item>
+                                <item>
+                                    <ignore>true</ignore>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.concurrent.CompletableFuture&lt;?&gt; io.trino.spi.connector.ConnectorMetadata::refreshMaterializedView(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.SchemaTableName)</old>
                                 </item>
                             </differences>
                         </revapi.differences>
@@ -454,6 +312,15 @@
                         </goals>
                     </execution>
                 </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Run tests on the class path despite module-info.java, so that class path scanning sees SPI classes -->
+                    <useModulePath>false</useModulePath>
+                </configuration>
             </plugin>
 
             <plugin>

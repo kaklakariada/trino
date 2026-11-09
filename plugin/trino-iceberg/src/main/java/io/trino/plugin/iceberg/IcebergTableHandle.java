@@ -58,7 +58,7 @@ public class IcebergTableHandle
     // Filter guaranteed to be enforced by Iceberg connector
     private final TupleDomain<IcebergColumnHandle> enforcedPredicate;
 
-    // Columns that are present in {@link Constraint#predicate()} applied on the table scan
+    // Columns that are present in {@link Constraint#getExpression()} applied on the table scan
     private final Set<IcebergColumnHandle> constraintColumns;
 
     // semantically limit is applied after enforcedPredicate
@@ -149,7 +149,7 @@ public class IcebergTableHandle
         this.specId = requireNonNull(specId, "specId is null");
         this.partitionSpecJsons = ImmutableMap.copyOf(requireNonNull(partitionSpecJsons, "partitionSpecJsons is null"));
         checkArgument(
-                specId.isEmpty() || partitionSpecJsons.containsKey(specId.getAsInt()),
+                specId.isEmpty() || partitionSpecJsons.containsKey(specId.orElseThrow()),
                 "specId %s is present but partitionSpecJsons does not contain this id",
                 specId);
         this.formatVersion = formatVersion;

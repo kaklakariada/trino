@@ -200,6 +200,308 @@ you need to use `\+01F600` for a grinning face emoji.
 Single quotes in string literals can be escaped by using another single quote: 
 `'I am big, it''s the pictures that got small!'`
 
+#### Methods
+
+The following instance methods are available on `VARCHAR` values. Each returns a
+new value; the receiver is never modified. The related plain function is linked
+from each entry.
+
+:::{function} string.length() -> bigint
+:noindex: true
+
+Returns the number of Unicode code points in `string`. Related: {func}`length`.
+
+```
+SELECT 'Hello, World!'.length();
+-- 13
+```
+:::
+
+:::{function} string.lower() -> varchar
+:noindex: true
+
+Returns `string` with every character converted to lower case. Related:
+{func}`lower`.
+
+```
+SELECT 'HELLO'.lower();
+-- hello
+```
+:::
+
+:::{function} string.upper() -> varchar
+:noindex: true
+
+Returns `string` with every character converted to upper case. Related:
+{func}`upper`.
+
+```
+SELECT 'hello'.upper();
+-- HELLO
+```
+:::
+
+:::{function} string.replace(search) -> varchar
+:noindex: true
+
+Returns `string` with every occurrence of the substring `search` removed.
+Related: {func}`replace`.
+
+```
+SELECT 'a.b.c'.replace('.');
+-- abc
+```
+:::
+
+:::{function} string.replace(search, replacement) -> varchar
+:noindex: true
+
+Returns `string` with every occurrence of the substring `search` replaced by
+`replacement`. Related: {func}`replace`.
+
+```
+SELECT 'a.b.c'.replace('.', '-');
+-- a-b-c
+```
+:::
+
+:::{function} string.reverse() -> varchar
+:noindex: true
+
+Returns `string` with its code points in reverse order. Related: {func}`reverse`.
+
+```
+SELECT 'Trino'.reverse();
+-- onirT
+```
+:::
+
+:::{function} string.split(delimiter) -> array(varchar)
+:noindex: true
+
+Splits `string` on each occurrence of `delimiter` and returns the pieces as an
+array. Related: {func}`split`.
+
+```
+SELECT 'a,b,c'.split(',');
+-- [a, b, c]
+```
+:::
+
+:::{function} string.split(delimiter, limit) -> array(varchar)
+:noindex: true
+
+Splits `string` on `delimiter` into at most `limit` pieces; the last piece holds
+the unsplit remainder. Related: {func}`split`.
+
+```
+SELECT 'a,b,c'.split(',', 2);
+-- [a, b,c]
+```
+:::
+
+:::{function} string.ends_with(suffix) -> boolean
+:noindex: true
+
+Returns `true` when `string` ends with `suffix`, otherwise `false`. Related:
+{func}`ends_with`.
+
+```
+SELECT 'apple'.ends_with('ple');
+-- true
+```
+:::
+
+:::{function} string.starts_with(prefix) -> boolean
+:noindex: true
+
+Returns `true` when `string` begins with `prefix`, otherwise `false`. Related:
+{func}`starts_with`.
+
+```
+SELECT 'apple'.starts_with('app');
+-- true
+```
+:::
+
+:::{function} string.strpos(substring) -> bigint
+:noindex: true
+
+Returns the 1-based index of the first occurrence of `substring` in `string`, or
+`0` when it does not occur. Related: {func}`strpos`.
+
+```
+SELECT 'hello'.strpos('l');
+-- 3
+```
+:::
+
+:::{function} string.strpos(substring, instance) -> bigint
+:noindex: true
+
+Returns the 1-based index of the `instance`-th occurrence of `substring` in
+`string`, or `0` when there are fewer than `instance` occurrences. Related:
+{func}`strpos`.
+
+```
+SELECT 'hello'.strpos('l', 2);
+-- 4
+```
+:::
+
+:::{function} string.substring(start) -> varchar
+:noindex: true
+
+Returns the part of `string` from the 1-based index `start` to the end. Related:
+{func}`substring`.
+
+```
+SELECT 'Trino'.substring(2);
+-- rino
+```
+:::
+
+:::{function} string.substring(start, length) -> varchar
+:noindex: true
+
+Returns the `length` code points of `string` beginning at the 1-based index
+`start`. Related: {func}`substring`.
+
+```
+SELECT 'Trino'.substring(2, 2);
+-- ri
+```
+:::
+
+:::{function} string.translate(from, to) -> varchar
+:noindex: true
+
+Returns `string` with each character that occurs in `from` replaced by the
+character at the same position in `to`, and removed when `to` is shorter.
+Related: {func}`translate`.
+
+```
+SELECT 'abcd'.translate('ac', 'xy');
+-- xbyd
+```
+:::
+
+:::{function} string.trim() -> varchar
+:noindex: true
+
+Returns `string` with whitespace removed from both ends. Related: {func}`trim`.
+
+```
+SELECT '  hi  '.trim();
+-- hi
+```
+:::
+
+:::{function} string.trim(chars) -> varchar
+:noindex: true
+
+Returns `string` with any of the characters in `chars` removed from both ends.
+Related: {func}`trim`.
+
+```
+SELECT '##hi##'.trim('#');
+-- hi
+```
+:::
+
+:::{function} string.ltrim() -> varchar
+:noindex: true
+
+Returns `string` with whitespace removed from the start. Related: {func}`ltrim`.
+:::
+
+:::{function} string.ltrim(chars) -> varchar
+:noindex: true
+
+Returns `string` with any of the characters in `chars` removed from the start.
+Related: {func}`ltrim`.
+:::
+
+:::{function} string.rtrim() -> varchar
+:noindex: true
+
+Returns `string` with whitespace removed from the end. Related: {func}`rtrim`.
+:::
+
+:::{function} string.rtrim(chars) -> varchar
+:noindex: true
+
+Returns `string` with any of the characters in `chars` removed from the end.
+Related: {func}`rtrim`.
+:::
+
+:::{function} string.lpad(size, padstring) -> varchar
+:noindex: true
+
+Returns `string` padded on the left with copies of `padstring` until it is `size`
+code points long, or truncated to `size` when already longer. Related:
+{func}`lpad`.
+
+```
+SELECT '7'.lpad(3, '0');
+-- 007
+```
+:::
+
+:::{function} string.rpad(size, padstring) -> varchar
+:noindex: true
+
+Returns `string` padded on the right with copies of `padstring` until it is
+`size` code points long, or truncated to `size` when already longer. Related:
+{func}`rpad`.
+
+```
+SELECT '7'.rpad(3, '0');
+-- 700
+```
+:::
+
+:::{function} string.to_utf8() -> varbinary
+:noindex: true
+
+Returns the UTF-8 encoding of `string` as a `VARBINARY` value. Related:
+{func}`to_utf8`.
+:::
+
+The following static methods construct `VARCHAR` values:
+
+:::{function} varchar::chr(n) -> varchar
+:noindex: true
+
+Returns the one-character string whose only character has Unicode code point `n`.
+Related: {func}`chr`.
+
+```
+SELECT varchar::chr(65);
+-- A
+```
+:::
+
+:::{function} varchar::from_utf8(binary) -> varchar
+:noindex: true
+
+Returns the string decoded from the UTF-8 bytes in `binary`, with invalid byte
+sequences replaced by the Unicode replacement character. Related:
+{func}`from_utf8`.
+
+```
+SELECT varchar::from_utf8(X'48656C6C6F');
+-- Hello
+```
+:::
+
+:::{function} varchar::from_utf8(binary, replace) -> varchar
+:noindex: true
+
+Returns the string decoded from the UTF-8 bytes in `binary`, with invalid byte
+sequences replaced by the string `replace`. Related: {func}`from_utf8`.
+:::
+
 ### `CHAR`
 
 Fixed length character data. A `CHAR` type without length specified has a
@@ -216,6 +518,78 @@ SELECT CHAR 'All right, Mr. DeMille, I''m ready for my close-up.'
 
 Example type definitions: `char`, `char(20)`
 
+#### `CHAR` and `VARCHAR` coercion and comparison
+
+A `CHAR` value implicitly coerces to `VARCHAR`, yielding the value with its
+trailing spaces removed (for example `CHAR(7) 'dog'` becomes `VARCHAR 'dog'`,
+and `CAST(CHAR(7) 'dog' AS VARCHAR)` returns `'dog'`, not the padded form).
+There is no implicit coercion in the other direction.
+
+As a result, comparing a `CHAR` and a `VARCHAR` value follows `VARCHAR`
+semantics: the `CHAR` value is coerced to `VARCHAR` (trailing spaces trimmed)
+and the two are compared with **no blank padding**, so trailing spaces are
+significant. For example `CHAR 'a' = VARCHAR 'a '` is `false`. Comparisons
+between two `CHAR` values are unaffected and remain blank-padded.
+
+#### Methods
+
+The following instance methods are available on `CHAR` values. Each returns a
+new value; the receiver is never modified.
+
+:::{function} string.length() -> bigint
+:noindex: true
+
+Returns the number of Unicode code points in `string`. Related: {func}`length`.
+:::
+
+:::{function} string.lower() -> char
+:noindex: true
+
+Returns `string` with every character converted to lower case. Related:
+{func}`lower`.
+:::
+
+:::{function} string.upper() -> char
+:noindex: true
+
+Returns `string` with every character converted to upper case. Related:
+{func}`upper`.
+:::
+
+:::{function} string.reverse() -> char
+:noindex: true
+
+Returns `string` with its code points in reverse order. Related: {func}`reverse`.
+:::
+
+:::{function} string.substring(start) -> char
+:noindex: true
+
+Returns the part of `string` from the 1-based index `start` to the end. Related:
+{func}`substring`.
+:::
+
+:::{function} string.substring(start, length) -> char
+:noindex: true
+
+Returns the `length` code points of `string` beginning at the 1-based index
+`start`. Related: {func}`substring`.
+:::
+
+:::{function} string.lpad(size, padstring) -> varchar
+:noindex: true
+
+Returns `string` padded on the left with copies of `padstring` until it is `size`
+code points long, or truncated to `size` when already longer. Related:
+{func}`lpad`.
+:::
+
+:::{function} string.to_utf8() -> varbinary
+:noindex: true
+
+Returns the UTF-8 encoding of `string` as a `VARBINARY` value. Related:
+{func}`to_utf8`.
+:::
 ### `VARBINARY`
 
 Variable length binary data.
@@ -393,15 +767,155 @@ SELECT TIMESTAMP '2001-08-22 03:04:05.321 America/New_York';
 
 ### `INTERVAL YEAR TO MONTH`
 
-Span of years and months.
+Span of years and months. The qualifier is one of `YEAR`, `MONTH`, or
+`YEAR TO MONTH`.
 
 Example: `INTERVAL '3' MONTH`
 
 ### `INTERVAL DAY TO SECOND`
 
-Span of days, hours, minutes, seconds and milliseconds.
+Span of days, hours, minutes, and seconds, down to picosecond resolution. The
+qualifier is a single field — `DAY`, `HOUR`, `MINUTE`, or `SECOND` — or a range
+such as `DAY TO SECOND` or `HOUR TO MINUTE`. The leading field carries a
+[](interval-leading-precision), and a trailing `SECOND` field carries a
+[](interval-fractional-seconds-precision).
 
 Example: `INTERVAL '2' DAY`
+
+(interval-leading-precision)=
+### Interval leading precision
+
+The leading field of an interval has a *precision*: the maximum number of decimal
+digits it may hold, written in parentheses after the field, much like the
+precision of a `DECIMAL`.
+
+```
+INTERVAL DAY(3)             -- holds up to 999 days
+INTERVAL DAY(9) TO SECOND
+INTERVAL YEAR(2) TO MONTH
+```
+
+The precision comes from one of three sources:
+
+- A **bare qualifier** — written without parentheses, as in `INTERVAL DAY`, an
+  interval column type, or a cast target — has the implicit precision `2`, so it
+  holds up to 99 of the leading field.
+- An **interval literal** infers its precision from the value, so
+  `INTERVAL '340' DAY` has the type `INTERVAL DAY(3)`. Inference includes carries
+  from rounding fractional seconds: `INTERVAL '9.9999999999995' SECOND` rounds
+  to `10` seconds and has type `INTERVAL SECOND(2, 12)`.
+- A **derived interval** — the result of interval arithmetic, or of subtracting
+  two datetimes — uses the *field maximum*, the precision sufficient to represent
+  any value the field can store: `DAY(9)`, `HOUR(10)`, `MINUTE(12)`, `SECOND(13)`,
+  `YEAR(9)`, or `MONTH(10)`. For example, `current_timestamp - ts` has the type
+  `INTERVAL DAY(9) TO SECOND`.
+
+A value that does not fit the declared leading precision is rejected with an
+*interval field overflow* error. For instance, `INTERVAL '340' DAY(2)` and
+`CAST('340' AS INTERVAL DAY(2))` both fail because 340 does not fit two digits,
+and `CAST(x AS INTERVAL DAY)` fails for any value of 100 days or more.
+
+(interval-fractional-seconds-precision)=
+### Interval fractional-seconds precision
+
+When the trailing field of a day-time interval is `SECOND`, it also carries a
+*fractional-seconds precision*: the number of digits kept after the decimal point,
+from `0` to `12` (picoseconds). It is the second argument of `SECOND`, written
+after the leading precision:
+
+```
+INTERVAL SECOND(13, 2)        -- two fractional digits
+INTERVAL DAY(9) TO SECOND(6)  -- microsecond precision
+INTERVAL DAY TO SECOND(12)    -- picosecond precision
+```
+
+A `SECOND` *type* written without a fractional precision — a column type or a
+cast target such as `CAST(x AS INTERVAL DAY TO SECOND)` — defaults to `6`
+(microseconds), so `INTERVAL DAY TO SECOND` is `INTERVAL DAY(2) TO SECOND(6)`. A
+qualifier whose trailing field is not `SECOND`, such as `DAY TO MINUTE`, has no
+fractional-seconds precision.
+
+An interval *literal* with the single-field `SECOND` qualifier and no fractional
+precision infers it from the number of fractional digits in the value:
+`INTERVAL '1.123' SECOND` is `INTERVAL SECOND(1, 3)` and `INTERVAL '5'
+SECOND` is `INTERVAL SECOND(1, 0)`. (The leading precision is likewise inferred
+from the value's whole-part digits.) Composite qualifiers retain the default of
+six fractional digits, so `INTERVAL '1 00:00:00.123' DAY TO SECOND` has type
+`INTERVAL DAY(1) TO SECOND(6)`.
+
+A value is rounded to its declared precision, with ties toward positive infinity,
+and renders with exactly
+that many fractional digits:
+
+```sql
+SELECT CAST(INTERVAL '1.2345' SECOND(13, 2) AS VARCHAR);  -- 1.23
+SELECT CAST(INTERVAL '1.9'    SECOND(13, 0) AS VARCHAR);  -- 2
+SELECT CAST(INTERVAL '1.5'    SECOND       AS VARCHAR);   -- 1.5
+```
+
+A **derived interval** keeps the fractional-seconds precision of its operands —
+the wider of the two for interval arithmetic, and at least six fractional digits
+when subtracting two datetimes — so `timestamp(9)` values yield a difference of
+type `INTERVAL DAY(9) TO SECOND(9)` that preserves all nine digits.
+
+Casting an interval to `VARCHAR` formats only the fields in its qualifier, so the
+string can be cast back to the same interval type. Casting to a qualifier with a
+more significant trailing field truncates the discarded fields toward zero. For
+example, casting 25 hours to `INTERVAL DAY` produces one day, and casting 13 months
+to `INTERVAL YEAR` produces one year.
+
+Multiplication and division preserve the interval qualifier and fractional
+precision. Fields below the trailing field are discarded; for example,
+`INTERVAL '1' DAY / 2` is zero days. Use a qualifier ending in `SECOND` when the
+result must retain fractions of a day.
+Results ending in `SECOND` round directly to their fractional precision, with
+midpoint ties toward positive infinity.
+
+Within an interval family, common types preserve the range of both operands.
+For example, combining `MINUTE(4)` with `HOUR(1)` requires `HOUR(3) TO MINUTE`,
+since 9999 minutes contain 166 whole hours.
+
+Fractional seconds in interval literals and strings cast to intervals must
+contain only decimal digits, including digits beyond picosecond precision.
+Other trailing characters and repeated signs are rejected. Day-time leading-field
+overflow reports `NUMERIC_VALUE_OUT_OF_RANGE`, including values too large for a
+64-bit integer.
+
+Older stored view and function signatures using the bare `interval day to second`
+and `interval year to month` types retain their historical ranges when read:
+`DAY(9) TO SECOND(3)` and `YEAR(9) TO MONTH`. Newly declared SQL types use the
+defaults above, and newly written type metadata includes explicit precisions.
+Readers must support the new syntax to read new parametric interval metadata;
+client capability negotiation does not make it readable by older servers.
+
+Stored view, materialized-view, and function bodies also preserve the legacy
+meaning of those bare types in casts and declarations. Newly stored SQL makes
+its interval type precisions explicit. Interval literals in stored bodies use
+the current qualifier, extraction, and arithmetic rules; for example,
+`INTERVAL '1' DAY / 2` evaluates to zero days there as well. Refreshing a view and
+recreating it from `SHOW CREATE VIEW` preserve its historical cast defaults.
+`SHOW CREATE FUNCTION` likewise makes historical interval declarations explicit
+so that recreating a function preserves them. `DROP FUNCTION` and
+`CREATE OR REPLACE FUNCTION` try the current parameter type defaults first, then
+the legacy defaults if no matching function exists. Replacement through the
+legacy fallback preserves the existing parameter types; its new body and return
+type use current defaults.
+
+This stored-SQL compatibility applies to view, materialized-view, and function
+definitions. Row filters, check constraints, and column masks use current SQL
+type defaults. Specify interval precisions explicitly in those expressions to
+preserve their intended ranges and fractional precision across upgrades.
+
+Day-time intervals store a signed 64-bit count of microseconds, with additional
+fractional digits for precisions above six. This has a smaller duration range
+than the former millisecond representation: about 292,000 years in either
+direction. Timestamp differences outside that range fail with an overflow error.
+Older clients receive rounded millisecond values, including interval map keys.
+
+Text conversion rounds the entire fractional input once to the declared precision,
+including digits beyond twelve, with ties toward positive infinity. Multiplication
+and division by `DOUBLE '1.0'` preserve the interval exactly; other floating-point
+scaling can lose precision.
 
 (structural-data-types)=
 ## Structural

@@ -18,15 +18,12 @@ import com.google.common.collect.ImmutableMultiset;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.Duration;
-import io.trino.Session;
 import io.trino.spi.Page;
-import io.trino.spi.block.Block;
 import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.testing.MaterializedResult;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
@@ -41,7 +38,7 @@ import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.MoreFutures.tryGetFutureValue;
-import static io.trino.operator.PageAssertions.assertPageEquals;
+import static io.trino.operator.PageAssertions.assertPagesEqual;
 import static io.trino.spi.block.RowValueBuilder.buildRowValue;
 import static io.trino.util.StructuralTestUtil.appendToBlockBuilder;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -182,15 +179,10 @@ public final class OperatorAssertion
         }
     }
 
-    public static List<Page> toPages(OperatorFactory operatorFactory, DriverContext driverContext)
-    {
-        return toPages(operatorFactory, driverContext, ImmutableList.of());
-    }
-
-    public static MaterializedResult toMaterializedResult(Session session, List<Type> types, List<Page> pages)
+    public static MaterializedResult toMaterializedResult(List<Type> types, List<Page> pages)
     {
         // materialize pages
-        MaterializedResult.Builder resultBuilder = MaterializedResult.resultBuilder(session, types);
+        MaterializedResult.Builder resultBuilder = MaterializedResult.resultBuilder(types);
         for (Page outputPage : pages) {
             resultBuilder.page(outputPage);
         }
@@ -211,10 +203,7 @@ public final class OperatorAssertion
     public static void assertOperatorEquals(OperatorFactory operatorFactory, List<Type> types, DriverContext driverContext, List<Page> input, List<Page> expected)
     {
         List<Page> actual = toPages(operatorFactory, driverContext, input);
-        assertThat(actual).hasSize(expected.size());
-        for (int i = 0; i < actual.size(); i++) {
-            assertPageEquals(types, actual.get(i), expected.get(i));
-        }
+        assertPagesEqual(types, actual, expected);
     }
 
     public static void assertOperatorEquals(OperatorFactory operatorFactory, DriverContext driverContext, List<Page> input, MaterializedResult expected)
@@ -247,7 +236,7 @@ public final class OperatorAssertion
             boolean closeOperatorFactory)
     {
         List<Page> pages = toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages, closeOperatorFactory);
-        MaterializedResult actual = toMaterializedResult(driverContext.getSession(), expected.getTypes(), pages);
+        MaterializedResult actual = toMaterializedResult(expected.getTypes(), pages);
         assertThat(actual).containsExactlyElementsOf(expected);
     }
 
@@ -278,7 +267,7 @@ public final class OperatorAssertion
             List<Page> actualPages,
             MaterializedResult expected)
     {
-        MaterializedResult actual = toMaterializedResult(driverContext.getSession(), expected.getTypes(), actualPages);
+        MaterializedResult actual = toMaterializedResult(expected.getTypes(), actualPages);
         assertThat(ImmutableMultiset.copyOf(actual.getMaterializedRows())).isEqualTo(ImmutableMultiset.copyOf(expected.getMaterializedRows()));
     }
 
@@ -332,22 +321,5 @@ public final class OperatorAssertion
                 .filter(index -> !indexesSet.contains(index))
                 .mapToObj(list::get)
                 .collect(toImmutableList());
-    }
-
-    public static List<Page> dropChannel(List<Page> pages, List<Integer> channels)
-    {
-        List<Page> actualPages = new ArrayList<>();
-        for (Page page : pages) {
-            int channel = 0;
-            Block[] blocks = new Block[page.getChannelCount() - channels.size()];
-            for (int i = 0; i < page.getChannelCount(); i++) {
-                if (channels.contains(i)) {
-                    continue;
-                }
-                blocks[channel++] = page.getBlock(i);
-            }
-            actualPages.add(new Page(blocks));
-        }
-        return actualPages;
     }
 }

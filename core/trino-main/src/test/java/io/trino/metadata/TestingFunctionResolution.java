@@ -17,14 +17,13 @@ import io.trino.Session;
 import io.trino.operator.aggregation.TestingAggregationFunction;
 import io.trino.security.AllowAllAccessControl;
 import io.trino.spi.Plugin;
-import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.function.FunctionBundle;
 import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.sql.PlannerContext;
-import io.trino.sql.analyzer.TypeSignatureProvider;
+import io.trino.sql.analyzer.TypeDescriptorProvider;
 import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.gen.columnar.ColumnarFilterCompiler;
@@ -40,7 +39,9 @@ import java.util.List;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.metadata.InternalFunctionBundle.extractFunctions;
 import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
 import static io.trino.testing.TransactionBuilder.transaction;
@@ -138,17 +139,12 @@ public class TestingFunctionResolution
     public ResolvedFunction resolveOperator(OperatorType operatorType, List<? extends Type> argumentTypes)
             throws OperatorNotFoundException
     {
-        return inTransaction(_ -> metadata.resolveOperator(operatorType, argumentTypes));
+        return inTransaction(session -> metadata.resolveOperator(getCharVarcharCoercion(session), operatorType, argumentTypes));
     }
 
     public ResolvedFunction getCoercion(Type fromType, Type toType)
     {
-        return inTransaction(_ -> metadata.getCoercion(fromType, toType));
-    }
-
-    public ResolvedFunction getCoercion(CatalogSchemaFunctionName name, Type fromType, Type toType)
-    {
-        return inTransaction(_ -> metadata.getCoercion(name, fromType, toType));
+        return inTransaction(session -> metadata.getCoercion(getCharVarcharCoercion(session), fromType, toType));
     }
 
     public TestingFunctionCallBuilder functionCallBuilder(String name)
@@ -161,20 +157,28 @@ public class TestingFunctionResolution
     // legal, but works for tests
     //
 
-    public ResolvedFunction resolveFunction(String name, List<TypeSignatureProvider> parameterTypes)
+    public ResolvedFunction resolveFunction(String name, List<TypeDescriptorProvider> parameterTypes)
     {
-        return metadata.resolveBuiltinFunction(name, parameterTypes);
+        return metadata.resolveBuiltinFunction(getCharVarcharCoercion(TEST_SESSION), name, toTypes(parameterTypes));
     }
 
-    public TestingAggregationFunction getAggregateFunction(String name, List<TypeSignatureProvider> parameterTypes)
+    public TestingAggregationFunction getAggregateFunction(String name, List<TypeDescriptorProvider> parameterTypes)
     {
-        return inTransaction(_ -> {
-            ResolvedFunction resolvedFunction = metadata.resolveBuiltinFunction(name, parameterTypes);
+        return inTransaction(session -> {
+            ResolvedFunction resolvedFunction = metadata.resolveBuiltinFunction(getCharVarcharCoercion(session), name, toTypes(parameterTypes));
             return new TestingAggregationFunction(
                     resolvedFunction.signature(),
                     resolvedFunction.functionNullability(),
                     plannerContext.getFunctionManager().getAggregationImplementation(resolvedFunction));
         });
+    }
+
+    private List<Type> toTypes(List<TypeDescriptorProvider> parameterTypes)
+    {
+        return parameterTypes.stream()
+                .map(TypeDescriptorProvider::getTypeDescriptor)
+                .map(plannerContext.getTypeManager()::getType)
+                .collect(toImmutableList());
     }
 
     private <T> T inTransaction(Function<Session, T> transactionSessionConsumer)
@@ -191,7 +195,7 @@ public class TestingFunctionResolution
     public class TestingFunctionCallBuilder
     {
         private final String name;
-        private List<TypeSignature> argumentTypes = new ArrayList<>();
+        private List<TypeDescriptor> argumentTypes = new ArrayList<>();
         private List<Expression> argumentValues = new ArrayList<>();
 
         public TestingFunctionCallBuilder(String name)
@@ -202,14 +206,14 @@ public class TestingFunctionResolution
         public TestingFunctionCallBuilder addArgument(Type type, Expression value)
         {
             requireNonNull(type, "type is null");
-            return addArgument(type.getTypeSignature(), value);
+            return addArgument(type.getTypeDescriptor(), value);
         }
 
-        public TestingFunctionCallBuilder addArgument(TypeSignature typeSignature, Expression value)
+        public TestingFunctionCallBuilder addArgument(TypeDescriptor typeDescriptor, Expression value)
         {
-            requireNonNull(typeSignature, "typeSignature is null");
+            requireNonNull(typeDescriptor, "typeDescriptor is null");
             requireNonNull(value, "value is null");
-            argumentTypes.add(typeSignature);
+            argumentTypes.add(typeDescriptor);
             argumentValues.add(value);
             return this;
         }
@@ -219,7 +223,7 @@ public class TestingFunctionResolution
             requireNonNull(types, "types is null");
             requireNonNull(values, "values is null");
             argumentTypes = types.stream()
-                    .map(Type::getTypeSignature)
+                    .map(Type::getTypeDescriptor)
                     .collect(Collectors.toList());
             argumentValues = new ArrayList<>(values);
             return this;
@@ -228,7 +232,7 @@ public class TestingFunctionResolution
         public Call build()
         {
             return new Call(
-                    resolveFunction(name, TypeSignatureProvider.fromTypeSignatures(argumentTypes)),
+                    resolveFunction(name, TypeDescriptorProvider.fromTypeDescriptors(argumentTypes)),
                     argumentValues);
         }
     }

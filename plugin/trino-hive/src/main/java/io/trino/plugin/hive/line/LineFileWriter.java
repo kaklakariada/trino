@@ -15,9 +15,11 @@ package io.trino.plugin.hive.line;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.DynamicSliceOutput;
+import io.trino.filesystem.TrinoOutputStream;
 import io.trino.hive.formats.line.LineSerializer;
 import io.trino.hive.formats.line.LineWriter;
 import io.trino.plugin.hive.FileWriter;
+import io.trino.plugin.hive.RollbackAction;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
@@ -38,16 +40,18 @@ public final class LineFileWriter
 {
     private static final int INSTANCE_SIZE = instanceSize(LineFileWriter.class);
 
+    private final TrinoOutputStream outputStream;
     private final LineWriter lineWriter;
     private final LineSerializer serializer;
-    private final Closeable rollbackAction;
+    private final RollbackAction rollbackAction;
     private final int[] fileInputColumnIndexes;
     private final List<Block> nullBlocks;
 
     private final DynamicSliceOutput sliceOutput = new DynamicSliceOutput(1024);
 
-    public LineFileWriter(LineWriter lineWriter, LineSerializer serializer, Closeable rollbackAction, int[] fileInputColumnIndexes)
+    public LineFileWriter(TrinoOutputStream outputStream, LineWriter lineWriter, LineSerializer serializer, RollbackAction rollbackAction, int[] fileInputColumnIndexes)
     {
+        this.outputStream = requireNonNull(outputStream, "outputStream is null");
         this.lineWriter = requireNonNull(lineWriter, "lineWriter is null");
         this.serializer = requireNonNull(serializer, "serializer is null");
         this.rollbackAction = requireNonNull(rollbackAction, "rollbackAction is null");
@@ -103,14 +107,14 @@ public final class LineFileWriter
     }
 
     @Override
-    public Closeable commit()
+    public RollbackAction commit()
     {
         try {
             lineWriter.close();
         }
         catch (Exception e) {
             try {
-                rollbackAction.close();
+                rollbackAction.run();
             }
             catch (Exception _) {
                 // ignore
@@ -123,8 +127,8 @@ public final class LineFileWriter
     @Override
     public void rollback()
     {
-        try (rollbackAction) {
-            lineWriter.close();
+        try (Closeable _ = rollbackAction::run) {
+            outputStream.abort();
         }
         catch (Exception e) {
             throw new TrinoException(HIVE_WRITER_CLOSE_ERROR, "Error rolling back write to Hive", e);

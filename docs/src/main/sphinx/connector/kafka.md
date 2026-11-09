@@ -40,7 +40,7 @@ must be taken:
 
 - Copy the `kafka-protobuf-provider` and `kafka-protobuf-types` JAR files
   from [Confluent](https://packages.confluent.io/maven/io/confluent/) for
-  Confluent version 8.1.1 to the Kafka connector plugin directory (`<install
+  Confluent version 8.4.0 to the Kafka connector plugin directory (`<install
   directory>/plugin/kafka`) on all nodes in the cluster.
   The plugin directory depends on the {doc}`/installation` method.
 - By copying those JARs and using them, you agree to the terms of the [Confluent
@@ -347,12 +347,13 @@ A table definition file contains sections for both key and message to map
 the data onto table columns.
 
 Each of the `key` and `message` fields in the table definition is a
-JSON object that must contain two fields:
+JSON object with the following fields:
 
-| Field        | Required | Type       | Description                                                                                 |
-| ------------ | -------- | ---------- | ------------------------------------------------------------------------------------------- |
-| `dataFormat` | required | string     | Selects the decoder for this group of fields.                                               |
-| `fields`     | required | JSON array | A list of field definitions. Each field definition creates a new column in the Trino table. |
+| Field        | Required | Type       | Description                                                                                                 |
+| ------------ | -------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| `dataFormat` | required | string     | Selects the decoder for this group of fields.                                                               |
+| `dataSchema` | optional | string     | The path or URL where the Avro or Protobuf schema resides. Used by Avro and Protobuf encoders and decoders. |
+| `fields`     | required | JSON array | A list of field definitions. Each field definition creates a new column in the Trino table.                 |
 
 Each field definition is a JSON object:
 
@@ -373,7 +374,6 @@ Each field definition is a JSON object:
 | `name`       | required | string  | Name of the column in the Trino table.                                                                               |
 | `type`       | required | string  | Trino type of the column.                                                                                            |
 | `dataFormat` | optional | string  | Selects the column decoder for this field. Defaults to the default decoder for this row data format and column type. |
-| `dataSchema` | optional | string  | The path or URL where the Avro schema resides. Used only for Avro decoder.                                           |
 | `mapping`    | optional | string  | Mapping information for the column. This is decoder specific, see below.                                             |
 | `formatHint` | optional | string  | Sets a column-specific format hint to the column decoder.                                                            |
 | `hidden`     | optional | boolean | Hides the column from `DESCRIBE <table name>` and `SELECT *`. Defaults to `false`.                                   |
@@ -1305,7 +1305,7 @@ The schema evolution behavior is as follows:
   Data created with an older schema no longer outputs the data from the column that was removed.
 - Column is renamed in the new schema:
   This is equivalent to removing the column and adding a new one, and data created with an older schema
-  produces a *default* value when table is using the new schema.
+  produces a *default* value when the table is using the new schema.
 - Changing type of column in the new schema:
   If the type coercion is supported by Avro, then the conversion happens. An
   error is thrown for incompatible types.
@@ -1415,7 +1415,7 @@ The schema evolution behavior is as follows:
   Data created with an older schema no longer outputs the data from the column that was removed.
 - Column is renamed in the new schema:
   This is equivalent to removing the column and adding a new one, and data created with an older schema
-  produces a *default* value when table is using the new schema.
+  produces a *default* value when the table is using the new schema.
 - Changing type of column in the new schema:
   If the type coercion is supported by Protobuf, then the conversion happens. An error is thrown for incompatible types.
 

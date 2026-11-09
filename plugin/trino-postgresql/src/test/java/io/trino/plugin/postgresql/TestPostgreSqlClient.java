@@ -20,7 +20,6 @@ import io.trino.metadata.TestingFunctionResolution;
 import io.trino.plugin.base.mapping.DefaultIdentifierMapping;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ColumnMapping;
-import io.trino.plugin.jdbc.DefaultQueryBuilder;
 import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
@@ -40,16 +39,16 @@ import io.trino.spi.function.OperatorType;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.sql.ir.Call;
 import io.trino.sql.ir.Coalesce;
-import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.ComparisonOperator;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.In;
 import io.trino.sql.ir.IsNull;
 import io.trino.sql.ir.Logical;
-import io.trino.sql.ir.NullIf;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.ConnectorExpressionTranslator;
 import io.trino.testing.TestingConnectorSession;
+import io.trino.type.CharVarcharCoercion;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Types;
@@ -60,6 +59,7 @@ import java.util.Optional;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.spi.function.OperatorType.ADD;
 import static io.trino.spi.function.OperatorType.DIVIDE;
 import static io.trino.spi.function.OperatorType.MODULO;
@@ -70,12 +70,17 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.ir.IrExpressions.between;
 import static io.trino.sql.ir.IrExpressions.not;
+import static io.trino.sql.ir.IrExpressions.nullIf;
+import static io.trino.sql.ir.TestingIr.comparison;
+import static io.trino.sql.planner.TestingSymbolAllocator.emptySymbolAllocator;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestPostgreSqlClient
 {
+    private static final CharVarcharCoercion CHAR_VARCHAR_COERCION = getCharVarcharCoercion(TEST_SESSION);
     private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
     private static final ResolvedFunction NEGATION_BIGINT = FUNCTIONS.resolveOperator(OperatorType.NEGATION, ImmutableList.of(BIGINT));
 
@@ -119,7 +124,7 @@ public class TestPostgreSqlClient
             new PostgreSqlConfig(),
             new JdbcStatisticsConfig(),
             _ -> { throw new UnsupportedOperationException(); },
-            new DefaultQueryBuilder(RemoteQueryModifier.NONE),
+            new CollationAwareQueryBuilder(RemoteQueryModifier.NONE),
             new TestingPostgreSqlConnectorContext().getTypeManager(),
             new DefaultIdentifierMapping(),
             RemoteQueryModifier.NONE);
@@ -241,8 +246,8 @@ public class TestPostgreSqlClient
                                 new Logical(
                                         Logical.Operator.OR,
                                         List.of(
-                                                new Comparison(Comparison.Operator.EQUAL, new Reference(BIGINT, "c_bigint_symbol"), new Constant(BIGINT, 42L)),
-                                                new Comparison(Comparison.Operator.EQUAL, new Reference(BIGINT, "c_bigint_symbol_2"), new Constant(BIGINT, 415L))))),
+                                                comparison(ComparisonOperator.EQUAL, new Reference(BIGINT, "c_bigint_symbol"), new Constant(BIGINT, 42L)),
+                                                comparison(ComparisonOperator.EQUAL, new Reference(BIGINT, "c_bigint_symbol_2"), new Constant(BIGINT, 415L))))),
                         Map.of(
                                 "c_bigint_symbol", BIGINT_COLUMN,
                                 "c_bigint_symbol_2", BIGINT_COLUMN))
@@ -262,12 +267,12 @@ public class TestPostgreSqlClient
                                 new Logical(
                                         Logical.Operator.OR,
                                         List.of(
-                                                new Comparison(Comparison.Operator.EQUAL, new Reference(BIGINT, "c_bigint_symbol"), new Constant(BIGINT, 42L)),
+                                                comparison(ComparisonOperator.EQUAL, new Reference(BIGINT, "c_bigint_symbol"), new Constant(BIGINT, 42L)),
                                                 new Logical(
                                                         Logical.Operator.AND,
                                                         List.of(
-                                                                new Comparison(Comparison.Operator.EQUAL, new Reference(BIGINT, "c_bigint_symbol"), new Constant(BIGINT, 43L)),
-                                                                new Comparison(Comparison.Operator.EQUAL, new Reference(BIGINT, "c_bigint_symbol_2"), new Constant(BIGINT, 44L))))))),
+                                                                comparison(ComparisonOperator.EQUAL, new Reference(BIGINT, "c_bigint_symbol"), new Constant(BIGINT, 43L)),
+                                                                comparison(ComparisonOperator.EQUAL, new Reference(BIGINT, "c_bigint_symbol_2"), new Constant(BIGINT, 44L))))))),
                         Map.of(
                                 "c_bigint_symbol", BIGINT_COLUMN,
                                 "c_bigint_symbol_2", BIGINT_COLUMN))
@@ -282,17 +287,23 @@ public class TestPostgreSqlClient
     @Test
     public void testConvertComparison()
     {
-        for (Comparison.Operator operator : Comparison.Operator.values()) {
+        for (ComparisonOperator operator : ComparisonOperator.values()) {
             Optional<ParameterizedExpression> converted = JDBC_CLIENT.convertPredicate(
                     SESSION,
                     translateToConnectorExpression(
-                            new Comparison(operator, new Reference(BIGINT, "c_bigint_symbol"), new Constant(BIGINT, 42L))),
+                            comparison(operator, new Reference(BIGINT, "c_bigint_symbol"), new Constant(BIGINT, 42L))),
                     Map.of("c_bigint_symbol", BIGINT_COLUMN));
 
             switch (operator) {
-                case EQUAL, NOT_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL -> {
+                case EQUAL, NOT_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL -> {
                     assertThat(converted).isPresent();
                     assertThat(converted.get().expression()).isEqualTo(format("(\"c_bigint\") %s (?)", operator.getValue()));
+                    assertThat(converted.get().parameters()).isEqualTo(List.of(new QueryParameter(BIGINT, Optional.of(42L))));
+                }
+                case GREATER_THAN, GREATER_THAN_OR_EQUAL -> {
+                    // Greater-than comparisons are canonicalized to less-than with flipped operands.
+                    assertThat(converted).isPresent();
+                    assertThat(converted.get().expression()).isEqualTo(format("(?) %s (\"c_bigint\")", operator.flip().getValue()));
                     assertThat(converted.get().parameters()).isEqualTo(List.of(new QueryParameter(BIGINT, Optional.of(42L))));
                 }
                 case IDENTICAL -> {
@@ -338,6 +349,44 @@ public class TestPostgreSqlClient
     }
 
     @Test
+    public void testConvertBetween()
+    {
+        // -c_bigint BETWEEN 1 AND 10 — a non-trivial value produces the Let-wrapped form, which
+        // reaches the connector as a single `$between` and is pushed only for numeric operands
+        ParameterizedExpression converted = JDBC_CLIENT.convertPredicate(
+                        SESSION,
+                        translateToConnectorExpression(
+                                between(FUNCTIONS.getMetadata(),
+                                        CHAR_VARCHAR_COERCION,
+                                        emptySymbolAllocator(),
+                                        new Call(NEGATION_BIGINT, ImmutableList.of(new Reference(BIGINT, "c_bigint_symbol"))),
+                                        new Constant(BIGINT, 1L),
+                                        new Constant(BIGINT, 10L))),
+                        Map.of("c_bigint_symbol", BIGINT_COLUMN))
+                .orElseThrow();
+        assertThat(converted.expression()).isEqualTo("(-(\"c_bigint\")) BETWEEN (?) AND (?)");
+        assertThat(converted.parameters()).isEqualTo(List.of(
+                new QueryParameter(BIGINT, Optional.of(1L)),
+                new QueryParameter(BIGINT, Optional.of(10L))));
+
+        // Ordering comparisons over collatable types must not be pushed down without an explicit
+        // collation; the `$between` type gate refuses non-numeric operands
+        assertThat(JDBC_CLIENT.convertPredicate(
+                SESSION,
+                translateToConnectorExpression(
+                        between(FUNCTIONS.getMetadata(),
+                                CHAR_VARCHAR_COERCION,
+                                emptySymbolAllocator(),
+                                new Coalesce(
+                                        new Reference(VARCHAR, "a_varchar_symbol"),
+                                        new Reference(VARCHAR, "b_varchar_symbol")),
+                                new Constant(VARCHAR, utf8Slice("A")),
+                                new Constant(VARCHAR, utf8Slice("Z")))),
+                ImmutableMap.of("a_varchar_symbol", VARCHAR_COLUMN, "b_varchar_symbol", VARCHAR_COLUMN2)))
+                .isEmpty();
+    }
+
+    @Test
     public void testConvertIsNull()
     {
         // c_varchar IS NULL
@@ -359,7 +408,7 @@ public class TestPostgreSqlClient
         ParameterizedExpression converted = JDBC_CLIENT.convertPredicate(
                         SESSION,
                         translateToConnectorExpression(
-                                not(FUNCTIONS.getMetadata(), new IsNull(new Reference(VARCHAR, "c_varchar_symbol")))),
+                                not(FUNCTIONS.getMetadata(), CHAR_VARCHAR_COERCION, new IsNull(new Reference(VARCHAR, "c_varchar_symbol")))),
                         Map.of("c_varchar_symbol", VARCHAR_COLUMN))
                 .orElseThrow();
         assertThat(converted.expression()).isEqualTo("(\"c_varchar\") IS NOT NULL");
@@ -373,7 +422,10 @@ public class TestPostgreSqlClient
         ParameterizedExpression converted = JDBC_CLIENT.convertPredicate(
                         SESSION,
                         translateToConnectorExpression(
-                                new NullIf(
+                                nullIf(FUNCTIONS.getMetadata(),
+                                        FUNCTIONS.getPlannerContext().getTypeManager(),
+                                        CHAR_VARCHAR_COERCION,
+                                        emptySymbolAllocator(),
                                         new Reference(VARCHAR, "a_varchar_symbol"),
                                         new Reference(VARCHAR, "b_varchar_symbol"))),
                         ImmutableMap.of("a_varchar_symbol", VARCHAR_COLUMN, "b_varchar_symbol", VARCHAR_COLUMN))
@@ -389,9 +441,9 @@ public class TestPostgreSqlClient
         ParameterizedExpression converted = JDBC_CLIENT.convertPredicate(
                         SESSION,
                         translateToConnectorExpression(
-                                not(
-                                        FUNCTIONS.getMetadata(),
-                                        not(FUNCTIONS.getMetadata(), new IsNull(new Reference(VARCHAR, "c_varchar_symbol"))))),
+                                not(FUNCTIONS.getMetadata(),
+                                        CHAR_VARCHAR_COERCION,
+                                        not(FUNCTIONS.getMetadata(), CHAR_VARCHAR_COERCION, new IsNull(new Reference(VARCHAR, "c_varchar_symbol"))))),
                         Map.of("c_varchar_symbol", VARCHAR_COLUMN))
                 .orElseThrow();
         assertThat(converted.expression()).isEqualTo("NOT ((\"c_varchar\") IS NOT NULL)");

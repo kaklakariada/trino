@@ -20,6 +20,7 @@ import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.WhenClause;
 import io.trino.sql.ir.optimizer.IrOptimizerRule;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.SymbolAllocator;
 
 import java.util.List;
 import java.util.Map;
@@ -34,17 +35,17 @@ public class EvaluateCase
         implements IrOptimizerRule
 {
     @Override
-    public Optional<Expression> apply(Expression expression, Session session, Map<Symbol, Expression> bindings)
+    public Optional<Expression> apply(Expression expression, Session session, SymbolAllocator symbolAllocator, Map<Symbol, Expression> bindings)
     {
         if (!(expression instanceof Case(List<WhenClause> whenClauses, Expression defaultValue))) {
             return Optional.empty();
         }
 
         for (WhenClause whenClause : whenClauses) {
-            Expression operand = whenClause.getOperand();
+            Expression operand = whenClause.operand();
 
             if (operand.equals(TRUE)) {
-                return Optional.of(whenClause.getResult());
+                return Optional.of(whenClause.result());
             }
             else if (!(operand instanceof Constant)) {
                 return Optional.empty();

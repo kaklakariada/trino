@@ -39,6 +39,7 @@ import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
 import static io.trino.orc.reader.ReaderUtils.toNotNullSupressedBlock;
 import static io.trino.orc.stream.MissingInputStreamSource.missingStreamSource;
+import static io.trino.spi.block.Bitmap.wordsForBits;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.util.Objects.requireNonNull;
 
@@ -105,7 +106,7 @@ public class VariantColumnReader
             valueReader.prepareNextRead(readOffset);
         }
 
-        boolean[] nullVector = null;
+        long[] valueIsValid = null;
         Block metadataBlock;
         Block valueBlock;
 
@@ -116,27 +117,34 @@ public class VariantColumnReader
             valueBlock = valueReader.readBlock();
         }
         else {
-            nullVector = new boolean[nextBatchSize];
-            int nullValues = presentStream.getUnsetBits(nextBatchSize, nullVector);
-            if (nullValues != nextBatchSize) {
-                int nonNullCount = nextBatchSize - nullValues;
+            valueIsValid = new long[wordsForBits(nextBatchSize)];
+            int nonNullCount = presentStream.getSetBits(nextBatchSize, valueIsValid);
+            int nullValues = nextBatchSize - nonNullCount;
+            if (nullValues == 0) {
+                valueIsValid = null;
+                metadataReader.prepareNextRead(nextBatchSize);
+                valueReader.prepareNextRead(nextBatchSize);
+                metadataBlock = metadataReader.readBlock();
+                valueBlock = valueReader.readBlock();
+            }
+            else if (nullValues != nextBatchSize) {
                 metadataReader.prepareNextRead(nonNullCount);
                 valueReader.prepareNextRead(nonNullCount);
 
                 Block rawMetadata = metadataReader.readBlock();
                 Block rawValue = valueReader.readBlock();
 
-                metadataBlock = toNotNullSupressedBlock(nextBatchSize, nullVector, rawMetadata);
-                valueBlock = toNotNullSupressedBlock(nextBatchSize, nullVector, rawValue);
+                metadataBlock = toNotNullSupressedBlock(nextBatchSize, valueIsValid, rawMetadata);
+                valueBlock = toNotNullSupressedBlock(nextBatchSize, valueIsValid, rawValue);
             }
             else {
                 // All values are null
-                metadataBlock = RunLengthEncodedBlock.create(VARBINARY.createBlockBuilder(null, 0).appendNull().build(), nextBatchSize);
-                valueBlock = RunLengthEncodedBlock.create(VARBINARY.createBlockBuilder(null, 0).appendNull().build(), nextBatchSize);
+                metadataBlock = RunLengthEncodedBlock.create(VARBINARY.createBlockBuilder(null, 1).appendNull().build(), nextBatchSize);
+                valueBlock = RunLengthEncodedBlock.create(VARBINARY.createBlockBuilder(null, 1).appendNull().build(), nextBatchSize);
             }
         }
 
-        VariantBlock variantBlock = VariantBlock.create(nextBatchSize, metadataBlock, valueBlock, Optional.ofNullable(nullVector));
+        VariantBlock variantBlock = VariantBlock.create(nextBatchSize, metadataBlock, valueBlock, Optional.ofNullable(valueIsValid));
 
         readOffset = 0;
         nextBatchSize = 0;

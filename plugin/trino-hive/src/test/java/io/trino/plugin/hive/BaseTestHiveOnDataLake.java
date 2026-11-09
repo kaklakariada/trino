@@ -25,7 +25,7 @@ import io.trino.metastore.Partition;
 import io.trino.metastore.PartitionStatistics;
 import io.trino.metastore.PartitionWithStatistics;
 import io.trino.metastore.Table;
-import io.trino.plugin.hive.containers.HiveMinioDataLake;
+import io.trino.plugin.hive.containers.HiveFlociDataLake;
 import io.trino.plugin.hive.metastore.thrift.BridgingHiveMetastore;
 import io.trino.plugin.hive.s3.S3HiveQueryRunner;
 import io.trino.spi.connector.SchemaTableName;
@@ -34,16 +34,22 @@ import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
-import io.trino.testing.minio.MinioClient;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalUnit;
 import java.util.Arrays;
 import java.util.Date;
@@ -78,30 +84,30 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 abstract class BaseTestHiveOnDataLake
         extends AbstractTestQueryFramework
 {
-    private static final String HIVE_TEST_SCHEMA = "hive_datalake";
+    protected static final String HIVE_TEST_SCHEMA = "hive_datalake";
     private static final DataSize HIVE_S3_STREAMING_PART_SIZE = DataSize.of(5, MEGABYTE);
 
-    private final HiveMinioDataLake hiveMinioDataLake;
-    private final String bucketName;
+    protected final HiveFlociDataLake hiveFlociDataLake;
+    protected final String bucketName;
 
     private HiveMetastore metastoreClient;
 
-    public BaseTestHiveOnDataLake(String bucketName, HiveMinioDataLake hiveMinioDataLake)
+    public BaseTestHiveOnDataLake(String bucketName, HiveFlociDataLake hiveFlociDataLake)
     {
         this.bucketName = bucketName;
-        this.hiveMinioDataLake = hiveMinioDataLake;
+        this.hiveFlociDataLake = hiveFlociDataLake;
     }
 
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        this.hiveMinioDataLake.start();
+        this.hiveFlociDataLake.start();
         this.metastoreClient = new BridgingHiveMetastore(
                 testingThriftHiveMetastoreBuilder()
-                        .metastoreClient(hiveMinioDataLake.getHiveMetastoreEndpoint())
+                        .metastoreClient(hiveFlociDataLake.getHiveMetastoreEndpoint())
                         .build(this::closeAfterClass));
-        return S3HiveQueryRunner.builder(hiveMinioDataLake)
+        return S3HiveQueryRunner.builder(hiveFlociDataLake)
                 .addExtraProperty("sql.path", "hive.functions")
                 .addExtraProperty("sql.default-function-catalog", "hive")
                 .addExtraProperty("sql.default-function-schema", "functions")
@@ -133,7 +139,7 @@ abstract class BaseTestHiveOnDataLake
     public void destroy()
             throws Exception
     {
-        hiveMinioDataLake.close();
+        hiveFlociDataLake.close();
     }
 
     @Test
@@ -143,13 +149,13 @@ abstract class BaseTestHiveOnDataLake
         String viewName = "default.test_view_with_column_comment" + randomNameSuffix();
         String partitionedViewName = "default.test_partitioned_view_with_column_comment" + randomNameSuffix();
 
-        hiveMinioDataLake.runOnHive(format("CREATE TABLE %s(id int, name string) PARTITIONED BY (ds date)", tableName));
-        hiveMinioDataLake.runOnHive(format("CREATE VIEW %s(id, name COMMENT 'comment', ds COMMENT 'test comment') AS SELECT * FROM %s", viewName, tableName));
-        hiveMinioDataLake.runOnHive(format("CREATE VIEW %s(name COMMENT 'comment', ds COMMENT 'test comment') PARTITIONED ON (ds) AS SELECT name, ds FROM %s", partitionedViewName, tableName));
+        hiveFlociDataLake.runOnHive(format("CREATE TABLE %s(id int, name string) PARTITIONED BY (ds date)", tableName));
+        hiveFlociDataLake.runOnHive(format("CREATE VIEW %s(id, name COMMENT 'comment', ds COMMENT 'test comment') AS SELECT * FROM %s", viewName, tableName));
+        hiveFlociDataLake.runOnHive(format("CREATE VIEW %s(name COMMENT 'comment', ds COMMENT 'test comment') PARTITIONED ON (ds) AS SELECT name, ds FROM %s", partitionedViewName, tableName));
 
         assertThat(query("DESCRIBE " + viewName)).result()
                 .skippingTypesCheck()
-                .containsAll(resultBuilder(getSession())
+                .containsAll(resultBuilder()
                         .row("id", "integer", "", "")
                         .row("name", "varchar", "", "comment")
                         .row("ds", "date", "", "test comment")
@@ -157,7 +163,7 @@ abstract class BaseTestHiveOnDataLake
 
         assertThat(query("DESCRIBE " + partitionedViewName)).result()
                 .skippingTypesCheck()
-                .containsAll(resultBuilder(getSession())
+                .containsAll(resultBuilder()
                         .row("name", "varchar", "", "comment")
                         .row("ds", "date", "", "test comment")
                         .build());
@@ -260,7 +266,7 @@ abstract class BaseTestHiveOnDataLake
         String tableName = "test_sync_partition_on_bucket_root_" + randomNameSuffix();
         String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
 
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "hello\u0001world\nbye\u0001world".getBytes(UTF_8),
                 "part_key=part_val/data.txt");
@@ -275,7 +281,8 @@ abstract class BaseTestHiveOnDataLake
                 " format='TEXTFILE'" +
                 ")");
 
-        getQueryRunner().execute("CALL system.sync_partition_metadata(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "', mode => 'ADD')");
+        assertThat(query("CALL system.sync_partition_metadata(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "', mode => 'ADD')"))
+                .matches("VALUES (VARCHAR 'added_partitions_count', BIGINT '1'), ('dropped_partitions_count', 0)");
 
         assertQuery("SELECT * FROM " + fullyQualifiedTestTableName, "VALUES ('hello', 'world', 'part_val'), ('bye', 'world', 'part_val')");
 
@@ -414,7 +421,7 @@ abstract class BaseTestHiveOnDataLake
         String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
         String tableLocation = format("s3://%s/%s/%s/", bucketName, HIVE_TEST_SCHEMA, tableName);
 
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "Trino\u0001rocks".getBytes(UTF_8),
                 HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=part_val/data.txt");
@@ -433,8 +440,8 @@ abstract class BaseTestHiveOnDataLake
         assertQuery("SELECT * FROM " + fullyQualifiedTestTableName, "VALUES ('Trino', 'rocks', 'part_val')");
 
         // Move the data to a location where the partition path differs only in case
-        hiveMinioDataLake.getMinioClient().removeObject(bucketName, HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=part_val/data.txt");
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().deleteObject(bucketName, HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=part_val/data.txt");
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "Trino\u0001rocks".getBytes(UTF_8),
                 HIVE_TEST_SCHEMA + "/" + tableName + "/PART_KEY=part_val/data.txt");
@@ -456,27 +463,27 @@ abstract class BaseTestHiveOnDataLake
         String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
         String tableLocation = format("s3://%s/%s/%s/", bucketName, HIVE_TEST_SCHEMA, tableName);
 
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "Trino\u0001rocks\u0001hyphens".getBytes(UTF_8),
                 HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with-hyphen/data.txt");
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "Trino\u0001rocks\u0001dots".getBytes(UTF_8),
                 HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with.dot/data.txt");
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "Trino\u0001rocks\u0001colons".getBytes(UTF_8),
                 HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with%3Acolon/data.txt");
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "Trino\u0001rocks\u0001slashes".getBytes(UTF_8),
                 HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with%2Fslash/data.txt");
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "Trino\u0001rocks\u0001backslashes".getBytes(UTF_8),
                 HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with%5Cbackslash/data.txt");
-        hiveMinioDataLake.getMinioClient().putObject(
+        hiveFlociDataLake.floci().putObject(
                 bucketName,
                 "Trino\u0001rocks\u0001percents".getBytes(UTF_8),
                 HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with%25percent/data.txt");
@@ -584,7 +591,8 @@ abstract class BaseTestHiveOnDataLake
                         "    col1 varchar, " +
                         "    col2 varchar, " +
                         "    regionkey bigint) " +
-                        "    WITH (partitioned_by=ARRAY['regionkey'])",
+                        // ORC so the file-size thresholds below hit the intended S3 multipart-upload code paths
+                        "    WITH (format='ORC', partitioned_by=ARRAY['regionkey'])",
                 testTable));
 
         long partSizeInBytes = HIVE_S3_STREAMING_PART_SIZE.toBytes();
@@ -624,7 +632,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short name\\.type[ |]+enum[ |]+")
@@ -701,7 +709,7 @@ abstract class BaseTestHiveOnDataLake
                         "  partition_projection_location_template='" + storageFormat + "' " +
                         ")");
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(schemaName, tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+storage\\.location\\.template[ |]+" + quote(storageFormat) + "[ |]+")
@@ -721,7 +729,7 @@ abstract class BaseTestHiveOnDataLake
                 this.bucketName,
                 HIVE_TEST_SCHEMA,
                 tableName);
-        hiveMinioDataLake.runOnHive(
+        hiveFlociDataLake.runOnHive(
                 "CREATE TABLE " + getHiveTestTableName(tableName) + " ( " +
                         "  name varchar(25), " +
                         "  comment varchar(152), " +
@@ -796,7 +804,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -853,7 +861,7 @@ abstract class BaseTestHiveOnDataLake
                         "  partition_projection_enabled=true " +
                         ")");
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -868,7 +876,7 @@ abstract class BaseTestHiveOnDataLake
     public void testIntegerPartitionProjectionOnVarcharColumnWithDigitsAlignCreatedOnHive()
     {
         String tableName = "nation_" + randomNameSuffix();
-        hiveMinioDataLake.runOnHive(
+        hiveFlociDataLake.runOnHive(
                 "CREATE TABLE " + getHiveTestTableName(tableName) + " ( " +
                         "  name varchar(25), " +
                         "  comment varchar(152), " +
@@ -951,7 +959,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1011,7 +1019,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1075,7 +1083,7 @@ abstract class BaseTestHiveOnDataLake
                         "  format='TEXTFILE')");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.dt\\.type[ |]+date[ |]+")
@@ -1092,11 +1100,11 @@ abstract class BaseTestHiveOnDataLake
         byte[] row3 = "CZECH_2\u0001Comment".getBytes(UTF_8);
         List<String> columns = ImmutableList.of("dt", "ts");
         // row : ("'POLAND_1'", "'Comment'", "DATE '2025-1-23'", "TIMESTAMP '2025-1-20 01:00:00'")
-        hiveMinioDataLake.getMinioClient().putObject(bucketName, row1, tablePath + makePartName(columns, ImmutableList.of("2025/01/23", "2025/1/20 01@00@00")) + "/data.txt");
+        hiveFlociDataLake.floci().putObject(bucketName, row1, tablePath + makePartName(columns, ImmutableList.of("2025/01/23", "2025/1/20 01@00@00")) + "/data.txt");
         // row : ("'POLAND_2'", "'Comment'", "DATE '2025-1-23'", "TIMESTAMP '2025-1-20 02:00:00'")
-        hiveMinioDataLake.getMinioClient().putObject(bucketName, row2, tablePath + makePartName(columns, ImmutableList.of("2025/01/23", "2025/1/20 02@00@00")) + "/data.txt");
+        hiveFlociDataLake.floci().putObject(bucketName, row2, tablePath + makePartName(columns, ImmutableList.of("2025/01/23", "2025/1/20 02@00@00")) + "/data.txt");
         // row: ("'CZECH_2'", "'Comment'", "DATE '2025-1-24'", "TIMESTAMP '2025-1-20 10:00:00'")
-        hiveMinioDataLake.getMinioClient().putObject(bucketName, row3, tablePath + makePartName(columns, ImmutableList.of("2025/01/24", "2025/1/20 10@00@00")) + "/data.txt");
+        hiveFlociDataLake.floci().putObject(bucketName, row3, tablePath + makePartName(columns, ImmutableList.of("2025/01/24", "2025/1/20 10@00@00")) + "/data.txt");
 
         assertQuery("SELECT * FROM " + fullyQualifiedTestTableName + " WHERE name = 'POLAND_1'", "VALUES ('POLAND_1', 'Comment', DATE '2025-01-23', TIMESTAMP '2025-01-20 01:00:00')");
 
@@ -1144,7 +1152,7 @@ abstract class BaseTestHiveOnDataLake
                         "  format='TEXTFILE')");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.dt\\.type[ |]+date[ |]+")
@@ -1160,11 +1168,11 @@ abstract class BaseTestHiveOnDataLake
         byte[] row2 = "POLAND_2\u0001Comment".getBytes(UTF_8);
         byte[] row3 = "CZECH_2\u0001Comment".getBytes(UTF_8);
         // row : ("'POLAND_1'", "'Comment'", "DATE '2025-1-23'", "TIMESTAMP '2025-1-20 01:00:00'")
-        hiveMinioDataLake.getMinioClient().putObject(bucketName, row1, projectionLocationValueFormat.formatted("2025/01/23", "2025/1/20 01@00@00") + "/data.txt");
+        hiveFlociDataLake.floci().putObject(bucketName, row1, projectionLocationValueFormat.formatted("2025/01/23", "2025/1/20 01@00@00") + "/data.txt");
         // row : ("'POLAND_2'", "'Comment'", "DATE '2025-1-23'", "TIMESTAMP '2025-1-20 02:00:00'")
-        hiveMinioDataLake.getMinioClient().putObject(bucketName, row2, projectionLocationValueFormat.formatted("2025/01/23", "2025/1/20 02@00@00") + "/data.txt");
+        hiveFlociDataLake.floci().putObject(bucketName, row2, projectionLocationValueFormat.formatted("2025/01/23", "2025/1/20 02@00@00") + "/data.txt");
         // row: ("'CZECH_2'", "'Comment'", "DATE '2025-1-24'", "TIMESTAMP '2025-1-20 10:00:00'")
-        hiveMinioDataLake.getMinioClient().putObject(bucketName, row3, projectionLocationValueFormat.formatted("2025/01/24", "2025/1/20 10@00@00") + "/data.txt");
+        hiveFlociDataLake.floci().putObject(bucketName, row3, projectionLocationValueFormat.formatted("2025/01/24", "2025/1/20 10@00@00") + "/data.txt");
 
         assertQuery("SELECT * FROM " + fullyQualifiedTestTableName + " WHERE name = 'POLAND_1'", "VALUES ('POLAND_1', 'Comment', DATE '2025-01-23', TIMESTAMP '2025-01-20 01:00:00')");
 
@@ -1296,7 +1304,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1373,7 +1381,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1447,7 +1455,7 @@ abstract class BaseTestHiveOnDataLake
                         "  partition_projection_enabled=true " +
                         ")");
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1464,7 +1472,7 @@ abstract class BaseTestHiveOnDataLake
     {
         String tableName = getRandomTestTableName();
         String dateProjectionFormat = "yyyy-MM-dd HH:mm:ss";
-        hiveMinioDataLake.runOnHive(
+        hiveFlociDataLake.runOnHive(
                 "CREATE TABLE " + getHiveTestTableName(tableName) + " ( " +
                         "  name varchar(25), " +
                         "  comment varchar(152), " +
@@ -1546,7 +1554,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1620,7 +1628,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1665,6 +1673,105 @@ abstract class BaseTestHiveOnDataLake
                 "VALUES ('POLAND_1'), ('POLAND_2'), ('CZECH_1'), ('CZECH_2')");
     }
 
+    @ParameterizedTest
+    @CsvSource(value = {
+            "yyyy-MM,DAYS,2020-10-01,2020-12-01,2021-02-01",
+            "yyyy-MM,HOURS,2020-10-01,2020-12-01,2021-02-01",
+            "yyyy-MM,MINUTES,2020-10-01,2020-12-01,2021-02-01",
+            "yyyy-MM,SECONDS,2020-10-01,2020-12-01,2021-02-01",
+            "'abc'-yyyy-MM,DAYS,2020-10-01,2020-12-01,2021-02-01",
+            "yyyy-MM-'abc',DAYS,2020-10-01,2020-12-01,2021-02-01",
+            "yyyy,DAYS,2020-01-01,2021-01-01,2022-01-01",
+            "yyyy,HOURS,2020-01-01,2021-01-01,2022-01-01",
+            "yyyy,MINUTES,2020-01-01,2021-01-01,2022-01-01",
+            "yyyy,SECONDS,2020-01-01,2021-01-01,2022-01-01",
+            "'abc'-yyyy,DAYS,2020-01-01,2021-01-01,2022-01-01",
+            "yyyy-'abc',DAYS,2020-01-01,2021-01-01,2022-01-01",
+            "yyyy-'Q'Q,DAYS,2020-07-01,2020-10-01,2021-01-01",
+    }, quoteCharacter = '"')
+    public void testDatePartitionProjectionOnVarcharColumnWithYearOrMonthFormat(String pattern, ChronoUnit intervalUnit, LocalDate firstDate, LocalDate secondDate, LocalDate thirdDate)
+    {
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern(pattern);
+        String beforeRange = firstDate.minusMonths(1).format(formatter);
+        String first = firstDate.format(formatter);
+        String second = secondDate.format(formatter);
+        String third = thirdDate.format(formatter);
+        String afterRange = thirdDate.plusYears(1).format(formatter);
+        String tableName = getFullyQualifiedTestTableName(getRandomTestTableName());
+        assertUpdate(
+                """
+                CREATE TABLE %s (
+                    name varchar,
+                    projected_date varchar WITH (
+                        partition_projection_type = 'date',
+                        partition_projection_format = '%s',
+                        partition_projection_range = ARRAY['%s', '%s'],
+                        partition_projection_interval_unit = '%s'
+                    )
+                ) WITH (
+                    partitioned_by = ARRAY['projected_date'],
+                    partition_projection_enabled = true
+                )
+                """.formatted(tableName, pattern.replace("'", "''"), first, third, intervalUnit.name()));
+        assertUpdate("INSERT INTO %s VALUES ('before', '%s'), ('first', '%s'), ('second', '%s'), ('third', '%s'), ('after', '%s')".formatted(tableName, beforeRange, first, second, third, afterRange), 5);
+
+        assertQuery("SELECT name FROM " + tableName, "VALUES 'first', 'second', 'third'");
+        assertQuery("SELECT name FROM %s WHERE projected_date = '%s'".formatted(tableName, second), "VALUES 'second'");
+        assertQuery("SELECT name FROM %s WHERE projected_date >= '%s'".formatted(tableName, second), "VALUES 'second', 'third'");
+    }
+
+    @Test
+    public void testDatePartitionProjectionWithWeekFormat()
+    {
+        assertQueryFails(
+                """
+                CREATE TABLE %s (
+                    name varchar,
+                    projected_week varchar WITH (
+                        partition_projection_type = 'date',
+                        partition_projection_format = 'yyyy-ww',
+                        partition_projection_range = ARRAY['2020-01', '2021-01'],
+                        partition_projection_interval_unit = 'DAYS'
+                    )
+                ) WITH (
+                    partitioned_by = ARRAY['projected_week'],
+                    partition_projection_enabled = true
+                )
+                """.formatted(getFullyQualifiedTestTableName(getRandomTestTableName())),
+                "Column projection for column 'projected_week' failed\\. Property: 'partition_projection_format' value 'yyyy-ww' is invalid: " +
+                        "a format without a day must have year, quarter, or month precision");
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"MONTHS", "YEARS", "WEEKS"})
+    public void testDatePartitionProjectionWithYearOrMonthFormatRejectsUnsupportedInterval(String intervalUnit)
+    {
+        String intervalUnitProperty = Optional.ofNullable(intervalUnit)
+                .map(unit -> ", partition_projection_interval_unit = '%s'".formatted(unit))
+                .orElse("");
+        for (String pattern : ImmutableList.of("yyyy-MM", "'abc'-yyyy-MM", "yyyy-MM-'abc'", "yyyy", "'abc'-yyyy", "yyyy-'abc'")) {
+            assertQueryFails(
+                    """
+                    CREATE TABLE %s (
+                        name varchar,
+                        projected_month varchar WITH (
+                            partition_projection_type = 'date',
+                            partition_projection_format = '%s',
+                            partition_projection_range = ARRAY['NOW-1DAY', 'NOW']
+                            %s
+                        )
+                    ) WITH (
+                        partitioned_by = ARRAY['projected_month'],
+                        partition_projection_enabled = true
+                    )
+                    """.formatted(getFullyQualifiedTestTableName(getRandomTestTableName()), pattern.replace("'", "''"), intervalUnitProperty),
+                    "Column projection for column 'projected_month' failed. " +
+                            "Property: 'partition_projection_interval_unit' value '%s' is invalid. Available options: \\[Days, Hours, Minutes, Seconds\\]"
+                                    .formatted(Optional.ofNullable(intervalUnit).map(ChronoUnit::valueOf).orElse(ChronoUnit.MONTHS)));
+        }
+    }
+
     @Test
     public void testDatePartitionProjectionOnVarcharColumnWithIntervalExpression()
     {
@@ -1693,7 +1800,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1797,7 +1904,7 @@ abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake
+                hiveFlociDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -2039,7 +2146,7 @@ abstract class BaseTestHiveOnDataLake
         String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
 
         // Create corrupted configuration
-        hiveMinioDataLake.runOnHive(
+        hiveFlociDataLake.runOnHive(
                 "CREATE TABLE " + hiveTestTableName + " ( " +
                         "  name varchar(25) " +
                         ") PARTITIONED BY (" +
@@ -2058,7 +2165,7 @@ abstract class BaseTestHiveOnDataLake
                         "or '^\\s*NOW\\s*(([+-])\\s*([0-9]+)\\s*(DAY|HOUR|MINUTE|SECOND)S?\\s*)?$' that are sequential: Text '2001-01-01' could not be parsed at index 10");
 
         // Append kill switch table property to ignore Partition Projection properties
-        hiveMinioDataLake.runOnHive(
+        hiveFlociDataLake.runOnHive(
                 "ALTER TABLE " + hiveTestTableName + " SET TBLPROPERTIES ( 'trino.partition_projection.ignore'='TRUE' )");
         // Flush cache to get new definition
         computeActual("CALL system.flush_metadata_cache(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "')");
@@ -2146,7 +2253,7 @@ abstract class BaseTestHiveOnDataLake
 
         byte[] contents = "hello\u0001world\nbye\u0001world".getBytes(UTF_8);
         String targetPath = format("%s/%s/test.txt", HIVE_TEST_SCHEMA, tableLocationDirWithTrailingSpace);
-        hiveMinioDataLake.getMinioClient().putObject(bucketName, contents, targetPath);
+        hiveFlociDataLake.floci().putObject(bucketName, contents, targetPath);
 
         assertUpdate(format(
                 "CREATE TABLE %s (" +
@@ -2235,7 +2342,7 @@ abstract class BaseTestHiveOnDataLake
         String tableLocationWithTrailingSlash = format("s3://%s/%s/%s/", bucketName, HIVE_TEST_SCHEMA, tableName);
         byte[] contents = "Trino\nSQL\non\neverything".getBytes(UTF_8);
         String dataFilePath = format("%s/%s/data.txt", HIVE_TEST_SCHEMA, tableName);
-        hiveMinioDataLake.getMinioClient().putObject(bucketName, contents, dataFilePath);
+        hiveFlociDataLake.floci().putObject(bucketName, contents, dataFilePath);
 
         assertUpdate(format(
                 "CREATE TABLE %s (" +
@@ -2254,11 +2361,11 @@ abstract class BaseTestHiveOnDataLake
     public void testUnpartitionedTableExternalLocationOnTopOfTheBucket()
     {
         String topBucketName = "test-hive-unpartitioned-top-of-the-bucket-" + randomNameSuffix();
-        hiveMinioDataLake.getMinio().createBucket(topBucketName);
+        hiveFlociDataLake.floci().createBucket(topBucketName);
         String tableName = "test_external_location_top_of_the_bucket_" + randomNameSuffix();
 
         byte[] contents = "Trino\nSQL\non\neverything".getBytes(UTF_8);
-        hiveMinioDataLake.getMinioClient().putObject(topBucketName, contents, "data.txt");
+        hiveFlociDataLake.floci().putObject(topBucketName, contents, "data.txt");
 
         assertUpdate(format(
                 "CREATE TABLE %s (" +
@@ -2277,7 +2384,7 @@ abstract class BaseTestHiveOnDataLake
     public void testPartitionedTableExternalLocationOnTopOfTheBucket()
     {
         String topBucketName = "test-hive-partitioned-top-of-the-bucket-" + randomNameSuffix();
-        hiveMinioDataLake.getMinio().createBucket(topBucketName);
+        hiveFlociDataLake.floci().createBucket(topBucketName);
         String tableName = "test_external_location_top_of_the_bucket_" + randomNameSuffix();
 
         assertUpdate(format(
@@ -2362,18 +2469,35 @@ abstract class BaseTestHiveOnDataLake
         String schemaName = "test_unsupported_drop_schema_cascade_" + randomNameSuffix();
         String icebergTableName = "test_dummy_iceberg_table" + randomNameSuffix();
 
-        hiveMinioDataLake.runOnHive("CREATE DATABASE %2$s LOCATION 's3a://%1$s/%2$s'".formatted(bucketName, schemaName));
+        hiveFlociDataLake.runOnHive("CREATE DATABASE %2$s LOCATION 's3a://%1$s/%2$s'".formatted(bucketName, schemaName));
         try {
-            hiveMinioDataLake.runOnHive("CREATE TABLE " + schemaName + "." + icebergTableName + " TBLPROPERTIES ('table_type'='iceberg') AS SELECT 1 a");
+            hiveFlociDataLake.runOnHive("CREATE TABLE " + schemaName + "." + icebergTableName + " TBLPROPERTIES ('table_type'='iceberg') AS SELECT 1 a");
+            assertUpdate("CALL system.flush_metadata_cache()");
 
             assertQueryFails("DROP SCHEMA " + schemaName + " CASCADE", "\\QCannot query Iceberg table '%s.%s'".formatted(schemaName, icebergTableName));
 
             assertThat(computeActual("SHOW SCHEMAS").getOnlyColumnAsSet()).contains(schemaName);
             assertThat(computeActual("SHOW TABLES FROM " + schemaName).getOnlyColumnAsSet()).contains(icebergTableName);
-            assertThat(hiveMinioDataLake.getMinioClient().listObjects(bucketName, schemaName).stream()).isNotEmpty();
+            assertThat(hiveFlociDataLake.floci().listObjects(bucketName, schemaName).stream()).isNotEmpty();
         }
         finally {
-            hiveMinioDataLake.runOnHive("DROP DATABASE IF EXISTS " + schemaName + " CASCADE");
+            hiveFlociDataLake.runOnHive("DROP DATABASE IF EXISTS " + schemaName + " CASCADE");
+        }
+    }
+
+    @Test
+    public void testSyncPartitionMetadataWithNonHiveTable()
+    {
+        String tableName = "test_sync_partition_metadata_iceberg_table" + randomNameSuffix();
+
+        hiveFlociDataLake.runOnHive("CREATE TABLE %s.%s (a int) PARTITIONED BY (part int) TBLPROPERTIES ('table_type'='iceberg')".formatted(HIVE_TEST_SCHEMA, tableName));
+        try {
+            assertQueryFails(
+                    "CALL system.sync_partition_metadata(schema_name => '%s', table_name => '%s', mode => 'FULL')".formatted(HIVE_TEST_SCHEMA, tableName),
+                    "\\QNot a Hive table '%s.%s'".formatted(HIVE_TEST_SCHEMA, tableName));
+        }
+        finally {
+            hiveFlociDataLake.runOnHive("DROP TABLE IF EXISTS %s.%s".formatted(HIVE_TEST_SCHEMA, tableName));
         }
     }
 
@@ -2476,12 +2600,12 @@ abstract class BaseTestHiveOnDataLake
     {
         String viewName = HIVE_TEST_SCHEMA + ".test_unsupported_comment_on_hive_view_" + randomNameSuffix();
 
-        hiveMinioDataLake.runOnHive("CREATE VIEW " + viewName + " AS SELECT 1 x");
+        hiveFlociDataLake.runOnHive("CREATE VIEW " + viewName + " AS SELECT 1 x");
         try {
             assertQueryFails("COMMENT ON COLUMN " + viewName + ".x IS NULL", "Hive views are not supported.*");
         }
         finally {
-            hiveMinioDataLake.runOnHive("DROP VIEW " + viewName);
+            hiveFlociDataLake.runOnHive("DROP VIEW " + viewName);
         }
     }
 
@@ -2504,7 +2628,7 @@ abstract class BaseTestHiveOnDataLake
         assertThat(query("SHOW FUNCTIONS"))
                 .result()
                 .skippingTypesCheck()
-                .containsAll(resultBuilder(getSession())
+                .containsAll(resultBuilder()
                         .row(name, "bigint", "integer", "scalar", true, "t42")
                         .row(name, "double", "double", "scalar", true, "t88")
                         .build());
@@ -2523,7 +2647,7 @@ abstract class BaseTestHiveOnDataLake
         assertThat(query("SHOW FUNCTIONS"))
                 .result()
                 .skippingTypesCheck()
-                .containsAll(resultBuilder(getSession())
+                .containsAll(resultBuilder()
                         .row(name, "bigint", "integer", "scalar", true, "t42")
                         .row(name, "bigint", "bigint", "scalar", true, "")
                         .row(name, "double", "double", "scalar", true, "t88")
@@ -2552,13 +2676,12 @@ abstract class BaseTestHiveOnDataLake
         String renamedPartitionSuffix = "CP";
 
         // Copy whole partition to new location
-        MinioClient minioClient = hiveMinioDataLake.getMinioClient();
-        minioClient.listObjects(bucketName, "")
+        hiveFlociDataLake.floci().listObjects(bucketName, "")
                 .forEach(objectKey -> {
                     if (objectKey.startsWith(partitionS3KeyPrefix)) {
                         String fileName = objectKey.substring(objectKey.lastIndexOf('/'));
                         String destinationKey = partitionS3KeyPrefix + renamedPartitionSuffix + fileName;
-                        minioClient.copyObject(bucketName, objectKey, bucketName, destinationKey);
+                        hiveFlociDataLake.floci().copyObject(bucketName, objectKey, bucketName, destinationKey);
                     }
                 });
 
@@ -2623,7 +2746,7 @@ abstract class BaseTestHiveOnDataLake
                 .assertThat()
                 .result()
                 .skippingTypesCheck()
-                .containsAll(resultBuilder(getSession())
+                .containsAll(resultBuilder()
                         .row("POLAND", "Test Data", 25L, 5L)
                         .row("CZECH", "Test Data", 26L, 5L)
                         .build());
@@ -2636,7 +2759,7 @@ abstract class BaseTestHiveOnDataLake
                 .assertThat()
                 .result()
                 .skippingTypesCheck()
-                .containsAll(resultBuilder(getSession())
+                .containsAll(resultBuilder()
                         .row("POLAND", "Overwrite", 25L, 5L)
                         .build());
         computeActual(format("DROP TABLE %s", testTable));
@@ -2709,14 +2832,14 @@ abstract class BaseTestHiveOnDataLake
                 .assertThat()
                 .result()
                 .skippingTypesCheck()
-                .containsAll(resultBuilder(getSession())
+                .containsAll(resultBuilder()
                         .row(114L * scaleFactorInThousands * 1000)
                         .build());
         query(format("SELECT \"$file_size\" BETWEEN %d AND %d FROM %s", fileSizeRangeStart, fileSizeRangeEnd, testTable))
                 .assertThat()
                 .result()
                 .skippingTypesCheck()
-                .containsAll(resultBuilder(getSession())
+                .containsAll(resultBuilder()
                         .row(true)
                         .build());
     }

@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.iceberg.catalog.file;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.filesystem.local.LocalFileSystemFactory;
 import io.trino.metastore.HiveMetastore;
@@ -22,24 +23,44 @@ import io.trino.plugin.hive.metastore.HiveMetastoreConfig;
 import io.trino.plugin.hive.metastore.file.FileHiveMetastore;
 import io.trino.plugin.hive.metastore.file.FileHiveMetastoreConfig;
 import io.trino.plugin.iceberg.TestingIcebergPlugin;
+import io.trino.plugin.iceberg.fileio.ForwardingFileIo;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.connector.SchemaNotFoundException;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
+import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Schema;
+import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableMetadataParser;
+import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.parallel.Execution;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static java.util.UUID.randomUUID;
+import static org.apache.iceberg.BaseMetastoreTableOperations.METADATA_LOCATION_PROP;
+import static org.apache.iceberg.BaseMetastoreTableOperations.PREVIOUS_METADATA_LOCATION_PROP;
+import static org.apache.iceberg.TableProperties.METADATA_PREVIOUS_VERSIONS_MAX;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -55,13 +76,22 @@ public class TestIcebergFileMetastoreCreateTableFailure
 
     private Path dataDirectory;
     private HiveMetastore metastore;
-    private final AtomicReference<RuntimeException> testException = new AtomicReference<>();
+    private final AtomicReference<RuntimeException> createTableFailure = new AtomicReference<>();
+    private final AtomicBoolean createTableCommitsBeforeFailure = new AtomicBoolean();
+    private final AtomicBoolean metastoreUnavailableAfterCreate = new AtomicBoolean();
+    private final AtomicBoolean metastoreUnavailable = new AtomicBoolean();
+    private final AtomicInteger laterCommitsBeforeFailure = new AtomicInteger();
+    private final AtomicBoolean otherTableTakesNameBeforeFailure = new AtomicBoolean();
+    private final AtomicBoolean otherTableWithMissingMetadataTakesNameBeforeFailure = new AtomicBoolean();
+    private final AtomicBoolean metadataDirectoryReadOnlyBeforeFailure = new AtomicBoolean();
+    private FileIO fileIo;
 
     @Override
     protected DistributedQueryRunner createQueryRunner()
             throws Exception
     {
         this.dataDirectory = Files.createTempDirectory("test_iceberg_create_table_failure");
+        this.fileIo = new ForwardingFileIo(new LocalFileSystemFactory(dataDirectory).create(ConnectorIdentity.ofUser("test")), false);
         // Using FileHiveMetastore as approximation of HMS
         this.metastore = new FileHiveMetastore(
                 new NodeVersion("testversion"),
@@ -73,9 +103,47 @@ public class TestIcebergFileMetastoreCreateTableFailure
             @Override
             public synchronized void createTable(Table table, PrincipalPrivileges principalPrivileges)
             {
-                if (testException.get() != null) {
-                    throw testException.get();
+                RuntimeException failure = createTableFailure.get();
+                // Persist the table on a normal create, and when simulating a commit that landed before the injected failure
+                if (failure == null || createTableCommitsBeforeFailure.get()) {
+                    super.createTable(table, principalPrivileges);
+                    Table current = table;
+                    for (int commitNumber = 1; commitNumber <= laterCommitsBeforeFailure.get(); commitNumber++) {
+                        current = withLaterCommit(current, commitNumber);
+                        replaceTable(table.getDatabaseName(), table.getTableName(), current, principalPrivileges, ImmutableMap.of());
+                    }
                 }
+                else if (otherTableTakesNameBeforeFailure.get()) {
+                    super.createTable(tableWithUnrelatedMetadata(table), principalPrivileges);
+                }
+                else if (otherTableWithMissingMetadataTakesNameBeforeFailure.get()) {
+                    super.createTable(Table.builder(table)
+                            .setParameter(METADATA_LOCATION_PROP, "local:///" + table.getTableName() + "_other/metadata/00000-missing.metadata.json")
+                            .build(), principalPrivileges);
+                }
+                if (metastoreUnavailableAfterCreate.get()) {
+                    metastoreUnavailable.set(true);
+                }
+                if (metadataDirectoryReadOnlyBeforeFailure.get()) {
+                    try {
+                        Files.setPosixFilePermissions(dataDirectory.resolve(table.getTableName(), "metadata"), PosixFilePermissions.fromString("r-xr-xr-x"));
+                    }
+                    catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+                if (failure != null) {
+                    throw failure;
+                }
+            }
+
+            @Override
+            public synchronized Optional<Table> getTable(String databaseName, String tableName)
+            {
+                if (metastoreUnavailable.get()) {
+                    throw new RuntimeException("simulated metastore unavailable");
+                }
+                return super.getTable(databaseName, tableName);
             }
         };
 
@@ -104,22 +172,223 @@ public class TestIcebergFileMetastoreCreateTableFailure
         }
     }
 
+    @BeforeEach
+    public void resetMetastoreBehavior()
+    {
+        createTableFailure.set(null);
+        createTableCommitsBeforeFailure.set(false);
+        metastoreUnavailableAfterCreate.set(false);
+        metastoreUnavailable.set(false);
+        laterCommitsBeforeFailure.set(0);
+        otherTableTakesNameBeforeFailure.set(false);
+        otherTableWithMissingMetadataTakesNameBeforeFailure.set(false);
+        metadataDirectoryReadOnlyBeforeFailure.set(false);
+    }
+
     @Test
     public void testCreateTableFailureMetadataCleanedUp()
     {
-        testException.set(new SchemaNotFoundException("simulated_test_schema"));
+        // The metastore is reachable and confirms the table was not created, so the orphaned metadata file is removed.
         String tableName = "test_create_failure_" + randomNameSuffix();
-        String tableLocation = "local:///" + tableName;
-        String createTableSql = "CREATE TABLE " + tableName + " (a varchar) WITH (location = '" + tableLocation + "')";
-        assertThatThrownBy(() -> getQueryRunner().execute(createTableSql))
-                .hasMessageContaining("Schema simulated_test_schema not found");
+        createTableFailure.set(new SchemaNotFoundException("simulated_test_schema"));
+        try {
+            String tableLocation = "local:///" + tableName;
+            String createTableSql = "CREATE TABLE " + tableName + " (a varchar) WITH (location = '" + tableLocation + "')";
+            assertThatThrownBy(() -> getQueryRunner().execute(createTableSql))
+                    .hasMessageContaining("Schema simulated_test_schema not found");
 
-        Path metadataDirectory = dataDirectory.resolve(tableName, "metadata");
-        assertThat(metadataDirectory).as("Metadata file should not exist").isEmptyDirectory();
+            Path metadataDirectory = dataDirectory.resolve(tableName, "metadata");
+            assertThat(metadataDirectory).as("Metadata file should not exist").isEmptyDirectory();
 
-        // it should be possible to create a table with the same name after the failure
-        testException.set(null);
-        getQueryRunner().execute(createTableSql);
-        assertThat(metadataDirectory).as("Metadata file should not exist").isNotEmptyDirectory();
+            // it should be possible to create a table with the same name after the failure
+            createTableFailure.set(null);
+            getQueryRunner().execute(createTableSql);
+            assertThat(metadataDirectory).as("Metadata file should not exist").isNotEmptyDirectory();
+        }
+        finally {
+            getQueryRunner().execute("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    public void testCreateTableMetadataPreservedWhenCommitActuallySucceeded()
+    {
+        // The create was applied but the client saw a failure; the status check finds our metadata and treats it as successful
+        String tableName = "test_create_succeeded_" + randomNameSuffix();
+        createTableCommitsBeforeFailure.set(true);
+        createTableFailure.set(new RuntimeException("simulated metastore response loss"));
+        try {
+            String tableLocation = "local:///" + tableName;
+            String createTableSql = "CREATE TABLE " + tableName + " (a integer) WITH (location = '" + tableLocation + "')";
+
+            // The statement must not fail and must not delete the metadata of the table that was actually created.
+            getQueryRunner().execute(createTableSql);
+
+            Path metadataDirectory = dataDirectory.resolve(tableName, "metadata");
+            assertThat(metadataDirectory).as("Metadata file should be preserved").isNotEmptyDirectory();
+            // The table is fully usable.
+            assertThat(getQueryRunner().execute("SELECT * FROM " + tableName).getRowCount()).isEqualTo(0);
+        }
+        finally {
+            getQueryRunner().execute("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    public void testCreateTableMetadataPreservedWhenCommitStateUnknown()
+    {
+        // The create was applied, but the status check cannot reach the metastore either, so every new file is kept
+        String tableName = "test_create_unknown_" + randomNameSuffix();
+        createTableCommitsBeforeFailure.set(true);
+        createTableFailure.set(new RuntimeException("simulated metastore response loss"));
+        metastoreUnavailableAfterCreate.set(true);
+        try {
+            String tableLocation = "local:///" + tableName;
+            String createTableSql = "CREATE TABLE " + tableName + " (a integer) WITH (location = '" + tableLocation + "')";
+
+            assertThatThrownBy(() -> getQueryRunner().execute(createTableSql))
+                    .hasMessageContaining("Cannot determine whether the commit was successful");
+
+            Path metadataDirectory = dataDirectory.resolve(tableName, "metadata");
+            assertThat(metadataDirectory).as("Metadata file should be preserved when commit state is unknown").isNotEmptyDirectory();
+
+            // Once the metastore is reachable again the table created by the (actually successful) commit is usable.
+            metastoreUnavailable.set(false);
+            assertThat(getQueryRunner().execute("SELECT * FROM " + tableName).getRowCount()).isEqualTo(0);
+        }
+        finally {
+            // Restore metastore reachability (an earlier assertion may have failed before it was reset) so the table can be dropped.
+            metastoreUnavailable.set(false);
+            getQueryRunner().execute("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    public void testCreateTableMetadataPreservedWhenLaterCommitsEvictedItFromMetadataLog()
+            throws Exception
+    {
+        String tableName = "test_create_evicted_" + randomNameSuffix();
+        createTableCommitsBeforeFailure.set(true);
+        laterCommitsBeforeFailure.set(2);
+        createTableFailure.set(new RuntimeException("simulated metastore response loss"));
+        try {
+            String tableLocation = "local:///" + tableName;
+            String createTableSql = "CREATE TABLE " + tableName + " (a integer) WITH (location = '" + tableLocation + "')";
+
+            getQueryRunner().execute(createTableSql);
+
+            assertThat(metadataFiles(tableName)).hasSize(3);
+            String currentMetadataLocation = metastore.getTable(SCHEMA_NAME, tableName).orElseThrow().getParameters().get(METADATA_LOCATION_PROP);
+            TableMetadata currentMetadata = TableMetadataParser.read(fileIo, currentMetadataLocation);
+            assertThat(currentMetadata.previousFiles())
+                    .extracting(entry -> entry.file())
+                    .hasSize(1)
+                    .noneMatch(file -> file.contains("/metadata/00000-"));
+            assertThat(getQueryRunner().execute("SELECT * FROM " + tableName).getRowCount()).isEqualTo(0);
+            assertThat(computeScalar("SELECT value FROM \"" + tableName + "$properties\" WHERE key = 'later_commits'")).isEqualTo("2");
+        }
+        finally {
+            getQueryRunner().execute("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    public void testCreateTableFailureMetadataCleanedUpWhenAnotherTableTookTheName()
+            throws Exception
+    {
+        String tableName = "test_create_lost_name_" + randomNameSuffix();
+        otherTableTakesNameBeforeFailure.set(true);
+        createTableFailure.set(new RuntimeException("simulated concurrent create"));
+        try {
+            String tableLocation = "local:///" + tableName;
+            String createTableSql = "CREATE TABLE " + tableName + " (a integer) WITH (location = '" + tableLocation + "')";
+            assertThatThrownBy(() -> getQueryRunner().execute(createTableSql))
+                    .hasMessageContaining("simulated concurrent create");
+
+            assertThat(metadataFiles(tableName)).as("Metadata file should not exist").isEmpty();
+            assertThat(computeActual("SELECT column_name FROM information_schema.columns WHERE table_schema = '" + SCHEMA_NAME + "' AND table_name = '" + tableName + "'").getOnlyColumnAsSet()).containsExactly("b");
+        }
+        finally {
+            getQueryRunner().execute("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    public void testCreateTableFailureReportedWhenCleanupFails()
+            throws Exception
+    {
+        String tableName = "test_create_cleanup_failure_" + randomNameSuffix();
+        metadataDirectoryReadOnlyBeforeFailure.set(true);
+        createTableFailure.set(new RuntimeException("simulated create failure"));
+        try {
+            String tableLocation = "local:///" + tableName;
+            String createTableSql = "CREATE TABLE " + tableName + " (a integer) WITH (location = '" + tableLocation + "')";
+            assertThatThrownBy(() -> getQueryRunner().execute(createTableSql))
+                    .hasMessageContaining("simulated create failure");
+
+            assertThat(metadataFiles(tableName)).as("Metadata file could not be deleted").hasSize(1);
+        }
+        finally {
+            Files.setPosixFilePermissions(dataDirectory.resolve(tableName, "metadata"), PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+    }
+
+    @Test
+    public void testCreateTableMetadataPreservedWhenCurrentMetadataIsUnreadable()
+            throws Exception
+    {
+        String tableName = "test_create_unreadable_" + randomNameSuffix();
+        otherTableWithMissingMetadataTakesNameBeforeFailure.set(true);
+        createTableFailure.set(new RuntimeException("simulated concurrent create"));
+        try {
+            String tableLocation = "local:///" + tableName;
+            String createTableSql = "CREATE TABLE " + tableName + " (a integer) WITH (location = '" + tableLocation + "')";
+            assertThatThrownBy(() -> getQueryRunner().execute(createTableSql))
+                    .hasMessageContaining("Cannot determine whether the commit was successful");
+
+            assertThat(metadataFiles(tableName)).as("Metadata file should be preserved when commit state is unknown").hasSize(1);
+        }
+        finally {
+            metastore.dropTable(SCHEMA_NAME, tableName, false);
+        }
+    }
+
+    private Table withLaterCommit(Table table, int commitNumber)
+    {
+        String currentLocation = table.getParameters().get(METADATA_LOCATION_PROP);
+        TableMetadata current = TableMetadataParser.read(fileIo, currentLocation);
+        // previous-versions-max 1 makes the second later commit evict the create's file from the metadata log
+        TableMetadata later = TableMetadata.buildFrom(current)
+                .setProperties(ImmutableMap.of(METADATA_PREVIOUS_VERSIONS_MAX, "1", "later_commits", String.valueOf(commitNumber)))
+                .build();
+        String laterLocation = current.location() + "/metadata/%05d-".formatted(commitNumber) + randomUUID() + ".metadata.json";
+        TableMetadataParser.write(later, fileIo.newOutputFile(laterLocation));
+        return Table.builder(table)
+                .setParameter(METADATA_LOCATION_PROP, laterLocation)
+                .setParameter(PREVIOUS_METADATA_LOCATION_PROP, currentLocation)
+                .build();
+    }
+
+    private Table tableWithUnrelatedMetadata(Table table)
+    {
+        String otherLocation = "local:///" + table.getTableName() + "_other";
+        TableMetadata other = TableMetadata.newTableMetadata(
+                new Schema(Types.NestedField.optional(1, "b", Types.IntegerType.get())),
+                PartitionSpec.unpartitioned(),
+                otherLocation,
+                ImmutableMap.of());
+        String otherMetadataLocation = otherLocation + "/metadata/00000-" + randomUUID() + ".metadata.json";
+        TableMetadataParser.write(other, fileIo.newOutputFile(otherMetadataLocation));
+        return Table.builder(table)
+                .setParameter(METADATA_LOCATION_PROP, otherMetadataLocation)
+                .build();
+    }
+
+    private List<Path> metadataFiles(String tableName)
+            throws IOException
+    {
+        try (Stream<Path> files = Files.list(dataDirectory.resolve(tableName, "metadata"))) {
+            return files.filter(file -> file.toString().endsWith(".metadata.json")).collect(toImmutableList());
+        }
     }
 }

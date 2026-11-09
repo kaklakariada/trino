@@ -27,15 +27,17 @@ public abstract class AbstractConnectorTableFunction
 {
     private final String schema;
     private final String name;
+    private final String description;
     private final List<ArgumentSpecification> arguments;
     private final ReturnTypeSpecification returnTypeSpecification;
 
-    public AbstractConnectorTableFunction(String schema, String name, List<ArgumentSpecification> arguments, ReturnTypeSpecification returnTypeSpecification)
+    public AbstractConnectorTableFunction(String schema, String name, List<ArgumentSpecification> arguments, ReturnTypeSpecification returnTypeSpecification, String description)
     {
         this.schema = requireNonNull(schema, "schema is null");
         this.name = requireNonNull(name, "name is null");
         this.arguments = List.copyOf(requireNonNull(arguments, "arguments is null"));
         this.returnTypeSpecification = requireNonNull(returnTypeSpecification, "returnTypeSpecification is null");
+        this.description = requireNonNull(description, "description is null");
     }
 
     @Override
@@ -48,6 +50,12 @@ public abstract class AbstractConnectorTableFunction
     public String getName()
     {
         return name;
+    }
+
+    @Override
+    public String getDescription()
+    {
+        return description;
     }
 
     @Override

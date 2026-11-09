@@ -37,7 +37,11 @@ import io.trino.sql.ir.Reference;
 import io.trino.sql.ir.optimizer.IrExpressionOptimizer;
 import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.OrderingScheme;
+import io.trino.sql.planner.Partitioning;
+import io.trino.sql.planner.PartitioningHandle;
+import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.optimizations.ActualProperties.Global;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.ApplyNode;
@@ -64,7 +68,6 @@ import io.trino.sql.planner.plan.PatternRecognitionNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanVisitor;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.planner.plan.RefreshMaterializedViewNode;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.SampleNode;
 import io.trino.sql.planner.plan.SemiJoinNode;
@@ -99,8 +102,11 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.spi.predicate.TupleDomain.extractFixedValues;
 import static io.trino.sql.planner.SystemPartitioningHandle.ARBITRARY_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION;
 import static io.trino.sql.planner.optimizations.ActualProperties.Global.arbitraryPartition;
 import static io.trino.sql.planner.optimizations.ActualProperties.Global.coordinatorSinglePartition;
 import static io.trino.sql.planner.optimizations.ActualProperties.Global.partitionedOn;
@@ -112,7 +118,6 @@ import static io.trino.sql.planner.plan.RowsPerMatch.ONE;
 import static io.trino.sql.planner.plan.RowsPerMatch.WINDOW;
 import static io.trino.sql.planner.plan.SkipToPosition.PAST_LAST;
 import static java.lang.String.format;
-import static java.util.stream.Collectors.toMap;
 
 public final class PropertyDerivations
 {
@@ -121,21 +126,23 @@ public final class PropertyDerivations
     public static ActualProperties derivePropertiesRecursively(
             PlanNode node,
             PlannerContext plannerContext,
-            Session session)
+            Session session,
+            SymbolAllocator symbolAllocator)
     {
         List<ActualProperties> inputProperties = node.getSources().stream()
-                .map(source -> derivePropertiesRecursively(source, plannerContext, session))
+                .map(source -> derivePropertiesRecursively(source, plannerContext, session, symbolAllocator))
                 .collect(toImmutableList());
-        return deriveProperties(node, inputProperties, plannerContext, session);
+        return deriveProperties(node, inputProperties, plannerContext, session, symbolAllocator);
     }
 
     public static ActualProperties deriveProperties(
             PlanNode node,
             List<ActualProperties> inputProperties,
             PlannerContext plannerContext,
-            Session session)
+            Session session,
+            SymbolAllocator symbolAllocator)
     {
-        ActualProperties output = node.accept(new Visitor(plannerContext, session), inputProperties);
+        ActualProperties output = node.accept(new Visitor(plannerContext, session, symbolAllocator), inputProperties);
 
         output.getNodePartitioning().ifPresent(partitioning ->
                 verify(node.getOutputSymbols().containsAll(partitioning.getColumns()), "Node-level partitioning properties contain columns not present in node's output"));
@@ -154,9 +161,15 @@ public final class PropertyDerivations
             PlanNode node,
             List<ActualProperties> inputProperties,
             PlannerContext plannerContext,
-            Session session)
+            Session session,
+            SymbolAllocator symbolAllocator)
     {
-        return node.accept(new Visitor(plannerContext, session), inputProperties);
+        return node.accept(new Visitor(plannerContext, session, symbolAllocator), inputProperties);
+    }
+
+    static boolean isRoundRobin(PartitioningHandle handle)
+    {
+        return handle.equals(FIXED_ARBITRARY_DISTRIBUTION) || handle.equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION);
     }
 
     private static class Visitor
@@ -165,12 +178,14 @@ public final class PropertyDerivations
         private final PlannerContext plannerContext;
         private final IrExpressionOptimizer optimizer;
         private final Session session;
+        private final SymbolAllocator symbolAllocator;
 
-        public Visitor(PlannerContext plannerContext, Session session)
+        public Visitor(PlannerContext plannerContext, Session session, SymbolAllocator symbolAllocator)
         {
             this.plannerContext = plannerContext;
             this.optimizer = plannerContext.getExpressionOptimizer();
             this.session = session;
+            this.symbolAllocator = symbolAllocator;
         }
 
         @Override
@@ -671,7 +686,7 @@ public final class PropertyDerivations
             checkState(entries != null);
 
             Map<Symbol, NullableValue> constants = entries.stream()
-                    .collect(toMap(Entry::getKey, Entry::getValue));
+                    .collect(toImmutableMap(Entry::getKey, Entry::getValue));
 
             ImmutableList.Builder<LocalProperty<Symbol>> localProperties = ImmutableList.builder();
             node.getOrderingScheme().ifPresent(orderingScheme -> localProperties.addAll(orderingScheme.toLocalProperties()));
@@ -724,8 +739,7 @@ public final class PropertyDerivations
                         .constants(constants)
                         .build();
                 case REPARTITION -> ActualProperties.builder()
-                        .global(partitionedOn(node.getPartitioningScheme().getPartitioning())
-                                .withReplicatedNulls(node.getPartitioningScheme().isReplicateNullsAndAny()))
+                        .global(deriveRepartitionGlobalProperties(node.getPartitioningScheme()))
                         .constants(constants)
                         .build();
                 // TODO: this should have the same global properties as the stream taking the replicated data
@@ -734,6 +748,17 @@ public final class PropertyDerivations
                         .constants(constants)
                         .build();
             };
+        }
+
+        private static Global deriveRepartitionGlobalProperties(PartitioningScheme partitioningScheme)
+        {
+            Partitioning partitioning = partitioningScheme.getPartitioning();
+            // round robin places rows independently of their values
+            if (isRoundRobin(partitioning.getHandle())) {
+                return arbitraryPartition();
+            }
+            return partitionedOn(partitioning)
+                    .withReplicatedNulls(partitioningScheme.isReplicateNullsAndAny());
         }
 
         @Override
@@ -747,7 +772,7 @@ public final class PropertyDerivations
                     node.getPredicate());
 
             Map<Symbol, NullableValue> constants = new HashMap<>(properties.getConstants());
-            constants.putAll(extractFixedValues(decomposedPredicate.getTupleDomain()).orElse(ImmutableMap.of()));
+            constants.putAll(extractFixedValues(decomposedPredicate.tupleDomain()).orElse(ImmutableMap.of()));
 
             return ActualProperties.builderFrom(properties)
                     .constants(constants)
@@ -773,11 +798,10 @@ public final class PropertyDerivations
                 // We want to use a symbol resolver that looks up in the constants from the input subplan
                 // to take advantage of constant-folding for complex expressions
                 // However, that currently causes errors when those expressions operate on arrays or row types
-                // ("ROW comparison not supported for fields with null elements", etc)
-                Expression value = optimizer.process(expression, session, ImmutableMap.of()).orElse(expression);
+                Expression value = optimizer.process(expression, session, symbolAllocator, ImmutableMap.of()).orElse(expression);
 
-                if (value instanceof Reference) {
-                    Symbol symbol = Symbol.from(value);
+                if (value instanceof Reference reference) {
+                    Symbol symbol = Symbol.from(reference);
                     NullableValue existingConstantValue = constants.get(symbol);
                     if (existingConstantValue != null) {
                         constants.put(assignment.getKey(), new NullableValue(type, value));
@@ -791,14 +815,6 @@ public final class PropertyDerivations
 
             return ActualProperties.builderFrom(translatedProperties)
                     .constants(constants)
-                    .build();
-        }
-
-        @Override
-        public ActualProperties visitRefreshMaterializedView(RefreshMaterializedViewNode node, List<ActualProperties> inputProperties)
-        {
-            return ActualProperties.builder()
-                    .global(coordinatorSinglePartition())
                     .build();
         }
 
@@ -875,7 +891,7 @@ public final class PropertyDerivations
 
             Map<Symbol, NullableValue> symbolConstants = globalConstants.entrySet().stream()
                     .filter(entry -> assignments.containsKey(entry.getKey()))
-                    .collect(toMap(entry -> assignments.get(entry.getKey()), Entry::getValue));
+                    .collect(toImmutableMap(entry -> assignments.get(entry.getKey()), Entry::getValue));
             properties.constants(symbolConstants);
 
             // Partitioning properties
@@ -910,8 +926,8 @@ public final class PropertyDerivations
         {
             Map<Symbol, Symbol> inputToOutput = new HashMap<>();
             for (Entry<Symbol, Expression> assignment : assignments.entrySet()) {
-                if (assignment.getValue() instanceof Reference) {
-                    inputToOutput.put(Symbol.from(assignment.getValue()), assignment.getKey());
+                if (assignment.getValue() instanceof Reference reference) {
+                    inputToOutput.put(Symbol.from(reference), assignment.getKey());
                 }
             }
             return inputToOutput;

@@ -49,7 +49,6 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.Sets.newConcurrentHashSet;
 import static java.util.Objects.requireNonNull;
 
 @ThreadSafe
@@ -61,6 +60,7 @@ public class DirectExchangeClient
     private final String selfAddress;
     private final DataIntegrityVerification dataIntegrityVerification;
     private final DataSize maxResponseSize;
+    private final DataSize maxResponseContentLength;
     private final int concurrentRequestMultiplier;
     private final Duration maxErrorDuration;
     private final boolean acknowledgePages;
@@ -77,7 +77,7 @@ public class DirectExchangeClient
     @GuardedBy("this")
     private final Set<HttpPageBufferClient> runningClients = new LinkedHashSet<>();
 
-    private final Set<HttpPageBufferClient> completedClients = newConcurrentHashSet();
+    private final Set<HttpPageBufferClient> completedClients = ConcurrentHashMap.newKeySet();
     private final DirectExchangeBuffer buffer;
 
     @GuardedBy("this")
@@ -105,6 +105,7 @@ public class DirectExchangeClient
             DataIntegrityVerification dataIntegrityVerification,
             DirectExchangeBuffer buffer,
             DataSize maxResponseSize,
+            DataSize maxResponseContentLength,
             int concurrentRequestMultiplier,
             Duration maxErrorDuration,
             boolean acknowledgePages,
@@ -118,6 +119,7 @@ public class DirectExchangeClient
         this.dataIntegrityVerification = requireNonNull(dataIntegrityVerification, "dataIntegrityVerification is null");
         this.buffer = requireNonNull(buffer, "buffer is null");
         this.maxResponseSize = maxResponseSize;
+        this.maxResponseContentLength = requireNonNull(maxResponseContentLength, "maxResponseContentLength is null");
         this.concurrentRequestMultiplier = concurrentRequestMultiplier;
         this.maxErrorDuration = maxErrorDuration;
         this.acknowledgePages = acknowledgePages;
@@ -172,6 +174,7 @@ public class DirectExchangeClient
                 httpClient,
                 dataIntegrityVerification,
                 maxResponseSize,
+                maxResponseContentLength,
                 maxErrorDuration,
                 acknowledgePages,
                 taskId,

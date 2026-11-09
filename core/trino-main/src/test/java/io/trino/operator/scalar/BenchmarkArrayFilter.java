@@ -20,7 +20,6 @@ import io.trino.metadata.InternalFunctionBundle;
 import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.SqlScalarFunction;
 import io.trino.metadata.TestingFunctionResolution;
-import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.ArrayBlockBuilder;
@@ -29,13 +28,14 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.ValueBlock;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionDependencies;
 import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.Signature;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.FunctionType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeTemplates;
 import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
@@ -64,6 +64,7 @@ import java.util.concurrent.TimeUnit;
 
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.base.Verify.verify;
+import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.block.BlockAssertions.createRandomBlockForType;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.operator.scalar.BenchmarkArrayFilter.ExactArrayFilterFunction.EXACT_ARRAY_FILTER_FUNCTION;
@@ -74,10 +75,10 @@ import static io.trino.spi.function.OperatorType.LESS_THAN;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.spi.type.TypeSignature.arrayType;
-import static io.trino.spi.type.TypeSignature.functionType;
+import static io.trino.spi.type.TypeTemplates.fromTypeDescriptor;
+import static io.trino.spi.type.TypeTemplates.typeVariable;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
 import static io.trino.sql.ir.IrExpressions.call;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.util.Reflection.methodHandle;
@@ -110,7 +111,6 @@ public class BenchmarkArrayFilter
         return ImmutableList.copyOf(
                 data.getPageProcessor().process(
                         SESSION,
-                        new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
                         SourcePage.create(data.getPage())));
     }
@@ -122,7 +122,6 @@ public class BenchmarkArrayFilter
         return ImmutableList.copyOf(
                 data.getPageProcessor().process(
                         SESSION,
-                        new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
                         SourcePage.create(data.getPage())));
     }
@@ -163,7 +162,7 @@ public class BenchmarkArrayFilter
             }
 
             List<Expression> projections = projectionsBuilder.build();
-            pageProcessor = compiler.compilePageProcessor(Optional.empty(), projections, layoutBuilder.buildOrThrow()).get();
+            pageProcessor = compiler.compilePageProcessor(TEST_SESSION, Optional.empty(), projections, layoutBuilder.buildOrThrow()).get();
             page = new Page(blocks);
         }
 
@@ -233,7 +232,7 @@ public class BenchmarkArrayFilter
             }
 
             List<Expression> projections = projectionsBuilder.build();
-            pageProcessor = compiler.compilePageProcessor(Optional.empty(), projections, layoutBuilder.buildOrThrow()).get();
+            pageProcessor = compiler.compilePageProcessor(TEST_SESSION, Optional.empty(), projections, layoutBuilder.buildOrThrow()).get();
             page = new Page(blocks);
         }
 
@@ -283,9 +282,9 @@ public class BenchmarkArrayFilter
             super(FunctionMetadata.scalarBuilder("exact_filter")
                     .signature(Signature.builder()
                             .typeVariable("T")
-                            .returnType(arrayType(new TypeSignature("T")))
-                            .argumentType(arrayType(new TypeSignature("T")))
-                            .argumentType(functionType(new TypeSignature("T"), BOOLEAN.getTypeSignature()))
+                            .returnType(TypeTemplates.arrayType(typeVariable("T")))
+                            .argumentType(TypeTemplates.arrayType(typeVariable("T")))
+                            .argumentType(TypeTemplates.functionType(typeVariable("T"), fromTypeDescriptor(BOOLEAN.getTypeDescriptor())))
                             .build())
                     .nondeterministic()
                     .description("return array containing elements that match the given predicate")
@@ -293,7 +292,7 @@ public class BenchmarkArrayFilter
         }
 
         @Override
-        protected SpecializedSqlScalarFunction specialize(BoundSignature boundSignature)
+        public SpecializedSqlScalarFunction specialize(BoundSignature boundSignature, FunctionDependencies functionDependencies)
         {
             Type type = ((ArrayType) boundSignature.getReturnType()).getElementType();
             return new ChoicesSpecializedSqlScalarFunction(
@@ -338,9 +337,9 @@ public class BenchmarkArrayFilter
             super(FunctionMetadata.scalarBuilder("exact_filter")
                     .signature(Signature.builder()
                             .typeVariable("T")
-                            .returnType(arrayType(new TypeSignature("T")))
-                            .argumentType(arrayType(new TypeSignature("T")))
-                            .argumentType(functionType(new TypeSignature("T"), BOOLEAN.getTypeSignature()))
+                            .returnType(TypeTemplates.arrayType(typeVariable("T")))
+                            .argumentType(TypeTemplates.arrayType(typeVariable("T")))
+                            .argumentType(TypeTemplates.functionType(typeVariable("T"), fromTypeDescriptor(BOOLEAN.getTypeDescriptor())))
                             .build())
                     .nondeterministic()
                     .description("return array containing elements that match the given predicate")
@@ -348,7 +347,7 @@ public class BenchmarkArrayFilter
         }
 
         @Override
-        protected SpecializedSqlScalarFunction specialize(BoundSignature boundSignature)
+        public SpecializedSqlScalarFunction specialize(BoundSignature boundSignature, FunctionDependencies functionDependencies)
         {
             Type type = ((ArrayType) boundSignature.getReturnType()).getElementType();
             return new ChoicesSpecializedSqlScalarFunction(

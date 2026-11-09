@@ -21,7 +21,6 @@ import com.google.common.util.concurrent.AtomicDouble;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.errorprone.annotations.ThreadSafe;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
-import io.airlift.stats.CounterStat;
 import io.airlift.stats.GcMonitor;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
@@ -31,11 +30,9 @@ import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskState;
 import io.trino.execution.TaskStateMachine;
-import io.trino.execution.buffer.LazyOutputBuffer;
 import io.trino.memory.QueryContext;
 import io.trino.memory.QueryContextVisitor;
 import io.trino.memory.context.AggregatedMemoryContext;
-import io.trino.memory.context.LocalMemoryContext;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.predicate.Domain;
@@ -171,9 +168,6 @@ public class TaskContext
         this.timeoutExecutor = requireNonNull(timeoutExecutor, "timeoutExecutor is null");
         this.session = session;
         this.taskMemoryContext = requireNonNull(taskMemoryContext, "taskMemoryContext is null");
-
-        // Initialize the local memory contexts with the LazyOutputBuffer tag as LazyOutputBuffer will do the local memory allocations
-        this.taskMemoryContext.initializeLocalMemoryContexts(LazyOutputBuffer.class.getSimpleName());
         this.dynamicFiltersCollector = new DynamicFiltersCollector(notifyStatusChanged);
         this.localDynamicFiltersCollector = new LocalDynamicFiltersCollector(session);
         this.perOperatorCpuTimerEnabled = perOperatorCpuTimerEnabled;
@@ -310,14 +304,14 @@ public class TaskContext
         queryContext.freeSpill(bytes);
     }
 
-    public LocalMemoryContext localMemoryContext()
+    public AggregatedMemoryContext aggregateUserMemoryContext()
     {
-        return taskMemoryContext.localUserMemoryContext();
+        return taskMemoryContext.aggregateUserMemoryContext();
     }
 
     public AggregatedMemoryContext newAggregateMemoryContext()
     {
-        return taskMemoryContext.newAggregateUserMemoryContext();
+        return aggregateUserMemoryContext().newAggregatedMemoryContext();
     }
 
     public boolean isPerOperatorCpuTimerEnabled()
@@ -330,48 +324,48 @@ public class TaskContext
         return cpuTimerEnabled;
     }
 
-    public CounterStat getProcessedInputDataSize()
+    public long getProcessedInputDataSize()
     {
-        CounterStat stat = new CounterStat();
+        long total = 0;
         for (PipelineContext pipelineContext : pipelineContexts) {
             if (pipelineContext.isInputPipeline()) {
-                stat.merge(pipelineContext.getProcessedInputDataSize());
+                total += pipelineContext.getProcessedInputDataSize();
             }
         }
-        return stat;
+        return total;
     }
 
-    public CounterStat getInputPositions()
+    public long getInputPositions()
     {
-        CounterStat stat = new CounterStat();
+        long total = 0;
         for (PipelineContext pipelineContext : pipelineContexts) {
             if (pipelineContext.isInputPipeline()) {
-                stat.merge(pipelineContext.getInputPositions());
+                total += pipelineContext.getInputPositions();
             }
         }
-        return stat;
+        return total;
     }
 
-    public CounterStat getOutputDataSize()
+    public long getOutputDataSize()
     {
-        CounterStat stat = new CounterStat();
+        long total = 0;
         for (PipelineContext pipelineContext : pipelineContexts) {
             if (pipelineContext.isOutputPipeline()) {
-                stat.merge(pipelineContext.getOutputDataSize());
+                total += pipelineContext.getOutputDataSize();
             }
         }
-        return stat;
+        return total;
     }
 
-    public CounterStat getOutputPositions()
+    public long getOutputPositions()
     {
-        CounterStat stat = new CounterStat();
+        long total = 0;
         for (PipelineContext pipelineContext : pipelineContexts) {
             if (pipelineContext.isOutputPipeline()) {
-                stat.merge(pipelineContext.getOutputPositions());
+                total += pipelineContext.getOutputPositions();
             }
         }
-        return stat;
+        return total;
     }
 
     public long getWriterInputDataSize()

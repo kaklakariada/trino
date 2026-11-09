@@ -105,6 +105,89 @@ public class TestDecimalCasts
         assertThat(assertions.expression("cast(a as DECIMAL(30, 20))")
                 .binding("a", "false"))
                 .isEqualTo(decimal("0000000000.00000000000000000000", createDecimalType(30, 20)));
+
+        assertTrinoExceptionThrownBy(assertions.expression("cast(a as DECIMAL(2, 2))")
+                .binding("a", "true")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Cannot cast BOOLEAN 'true' to DECIMAL(2, 2)");
+        assertTrinoExceptionThrownBy(assertions.expression("cast(a as DECIMAL(38, 38))")
+                .binding("a", "true")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE)
+                .hasMessage("Cannot cast BOOLEAN 'true' to DECIMAL(38, 38)");
+    }
+
+    @Test
+    public void testCastToDecimalNeverFailsBoundaries()
+    {
+        assertThat(assertions.expression("cast(a as DECIMAL(2, 1))").binding("a", "true"))
+                .neverFails()
+                .isEqualTo(decimal("1.0", createDecimalType(2, 1)));
+        assertTrinoExceptionThrownBy(assertions.expression("cast(a as DECIMAL(2, 2))")
+                .binding("a", "true")::evaluate)
+                .hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+        assertThat(assertions.expression("cast(a as DECIMAL(2, 2))").binding("a", "false"))
+                .couldFail()
+                .isEqualTo(decimal(".00", createDecimalType(2, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(4, 1))").binding("a", "TINYINT '12'"))
+                .neverFails()
+                .isEqualTo(decimal("012.0", createDecimalType(4, 1)));
+        assertThat(assertions.expression("cast(a as DECIMAL(3, 1))").binding("a", "TINYINT '12'"))
+                .couldFail()
+                .isEqualTo(decimal("12.0", createDecimalType(3, 1)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(6, 1))").binding("a", "SMALLINT '12'"))
+                .neverFails()
+                .isEqualTo(decimal("00012.0", createDecimalType(6, 1)));
+        assertThat(assertions.expression("cast(a as DECIMAL(5, 1))").binding("a", "SMALLINT '12'"))
+                .couldFail()
+                .isEqualTo(decimal("0012.0", createDecimalType(5, 1)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(11, 1))").binding("a", "INTEGER '12'"))
+                .neverFails()
+                .isEqualTo(decimal("0000000012.0", createDecimalType(11, 1)));
+        assertThat(assertions.expression("cast(a as DECIMAL(10, 1))").binding("a", "INTEGER '12'"))
+                .couldFail()
+                .isEqualTo(decimal("000000012.0", createDecimalType(10, 1)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(22, 1))").binding("a", "BIGINT '234'"))
+                .neverFails()
+                .isEqualTo(decimal("000000000000000000234.0", createDecimalType(22, 1)));
+        assertThat(assertions.expression("cast(a as DECIMAL(4, 1))").binding("a", "BIGINT '234'"))
+                .couldFail()
+                .isEqualTo(decimal("234.0", createDecimalType(4, 1)));
+    }
+
+    @Test
+    public void testCastFromDecimalNeverFailsBoundaries()
+    {
+        assertThat(assertions.expression("cast(a as TINYINT)").binding("a", "DECIMAL '99'"))
+                .neverFails()
+                .isEqualTo((byte) 99);
+        assertThat(assertions.expression("cast(a as TINYINT)").binding("a", "DECIMAL '100'"))
+                .couldFail()
+                .isEqualTo((byte) 100);
+
+        assertThat(assertions.expression("cast(a as SMALLINT)").binding("a", "DECIMAL '1234'"))
+                .neverFails()
+                .isEqualTo((short) 1234);
+        assertThat(assertions.expression("cast(a as SMALLINT)").binding("a", "DECIMAL '12345'"))
+                .couldFail()
+                .isEqualTo((short) 12345);
+
+        assertThat(assertions.expression("cast(a as INTEGER)").binding("a", "DECIMAL '123456789'"))
+                .neverFails()
+                .isEqualTo(123456789);
+        assertThat(assertions.expression("cast(a as INTEGER)").binding("a", "DECIMAL '1234567890'"))
+                .couldFail()
+                .isEqualTo(1234567890);
+
+        assertThat(assertions.expression("cast(a as BIGINT)").binding("a", "DECIMAL '123456789012345678'"))
+                .neverFails()
+                .isEqualTo(123456789012345678L);
+        assertThat(assertions.expression("cast(a as BIGINT)").binding("a", "DECIMAL '1234567890123456789'"))
+                .couldFail()
+                .isEqualTo(1234567890123456789L);
     }
 
     @Test
@@ -112,6 +195,7 @@ public class TestDecimalCasts
     {
         assertThat(assertions.expression("cast(a as BOOLEAN)")
                 .binding("a", "DECIMAL '1.1'"))
+                .neverFails()
                 .isEqualTo(true);
 
         assertThat(assertions.expression("cast(a as BOOLEAN)")
@@ -829,6 +913,23 @@ public class TestDecimalCasts
                 .binding("a", "DOUBLE '-1234567890.51'"))
                 .isEqualTo(decimal("-0000001234567891", createDecimalType(16)));
 
+        // double 2.675 is actually 2.67499...
+        assertThat(assertions.expression("cast(a as DECIMAL(3,2))")
+                .binding("a", "DOUBLE '2.675'"))
+                .isEqualTo(decimal("2.68", createDecimalType(3, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(3,2))")
+                .binding("a", "DOUBLE '-2.675'"))
+                .isEqualTo(decimal("-2.68", createDecimalType(3, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(3,2))")
+                .binding("a", "DOUBLE '1.005'"))
+                .isEqualTo(decimal("1.01", createDecimalType(3, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(18,17))")
+                .binding("a", "DOUBLE '0.1'"))
+                .isEqualTo(decimal(".10000000000000000", createDecimalType(18, 17)));
+
         assertTrinoExceptionThrownBy(() -> assertions.expression("cast(a as DECIMAL(17,16))")
                 .binding("a", "DOUBLE '100.02'").evaluate())
                 .hasMessage("Cannot cast DOUBLE '100.02' to DECIMAL(17, 16)")
@@ -981,6 +1082,23 @@ public class TestDecimalCasts
                 .binding("a", "DOUBLE '1234567890.51'"))
                 .isEqualTo(decimal("1234567891", createDecimalType(10)));
 
+        // double 2.675 is actually 2.67499...
+        assertThat(assertions.expression("cast(a as DECIMAL(20,2))")
+                .binding("a", "DOUBLE '2.675'"))
+                .isEqualTo(decimal("2.68", createDecimalType(20, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(20,2))")
+                .binding("a", "DOUBLE '-2.675'"))
+                .isEqualTo(decimal("-2.68", createDecimalType(20, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(20,17))")
+                .binding("a", "DOUBLE '0.1'"))
+                .isEqualTo(decimal(".10000000000000000", createDecimalType(20, 17)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(38,30))")
+                .binding("a", "DOUBLE '0.1'"))
+                .isEqualTo(decimal(".100000000000000000000000000000", createDecimalType(38, 30)));
+
         assertTrinoExceptionThrownBy(() -> assertions.expression("cast(a as DECIMAL(38,37))")
                 .binding("a", "DOUBLE '100.02'").evaluate())
                 .hasMessage("Cannot cast DOUBLE '100.02' to DECIMAL(38, 37)")
@@ -1100,6 +1218,24 @@ public class TestDecimalCasts
         assertThat(assertions.expression("cast(a as DOUBLE)")
                 .binding("a", "DECIMAL '99999999999999999999999999999999999999'"))
                 .isEqualTo(1.0e38);
+
+        // unscaled value does not fit in double lossless, but represented number does
+        assertThat(assertions.expression("cast(a as DOUBLE)")
+                .binding("a", "DECIMAL '912057769880088.000'"))
+                .isEqualTo(912057769880088.0);
+
+        assertThat(assertions.expression("cast(a as DOUBLE)")
+                .binding("a", "DECIMAL '-912057769880088.000'"))
+                .isEqualTo(-912057769880088.0);
+
+        // unscaled value does not fit in double lossless, but represented number does
+        assertThat(assertions.expression("cast(a as DOUBLE)")
+                .binding("a", "DECIMAL '5764607523034800.00'"))
+                .isEqualTo(5764607523034800.0);
+
+        assertThat(assertions.expression("cast(a as DOUBLE)")
+                .binding("a", "DECIMAL '-5764607523034800.00'"))
+                .isEqualTo(-5764607523034800.0);
     }
 
     @Test
@@ -1188,6 +1324,32 @@ public class TestDecimalCasts
         assertThat(assertions.expression("cast(a as DECIMAL(18,9))")
                 .binding("a", "REAL '1456213.432632456'"))
                 .isEqualTo(decimal("001456213.400000000", createDecimalType(18, 9)));
+
+        // real 2.675 is actually 2.67499...
+        assertThat(assertions.expression("cast(a as DECIMAL(3,2))")
+                .binding("a", "REAL '2.675'"))
+                .isEqualTo(decimal("2.68", createDecimalType(3, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(3,2))")
+                .binding("a", "REAL '-2.675'"))
+                .isEqualTo(decimal("-2.68", createDecimalType(3, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(20,2))")
+                .binding("a", "REAL '2.675'"))
+                .isEqualTo(decimal("2.68", createDecimalType(20, 2)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(20,2))")
+                .binding("a", "REAL '-2.675'"))
+                .isEqualTo(decimal("-2.68", createDecimalType(20, 2)));
+
+        // real 12345.123 is actually 12345.123046...
+        assertThat(assertions.expression("cast(a as DECIMAL(10,5))")
+                .binding("a", "REAL '12345.123'"))
+                .isEqualTo(decimal("12345.12300", createDecimalType(10, 5)));
+
+        assertThat(assertions.expression("cast(a as DECIMAL(20,5))")
+                .binding("a", "REAL '12345.123'"))
+                .isEqualTo(decimal("12345.12300", createDecimalType(20, 5)));
 
         // test roundtrip
         assertThat(assertions.expression("CAST(CAST(DOUBLE '123456790519087104' AS DECIMAL(18,0)) as DOUBLE) = DOUBLE '123456790519087104'"))
@@ -1343,6 +1505,24 @@ public class TestDecimalCasts
         assertThat(assertions.expression("cast(a as REAL)")
                 .binding("a", "CAST(-16777217.0 AS DECIMAL(13,1))"))
                 .isEqualTo(-16777217.0f);
+
+        // Unscaled value far below 2^53 but still double-rounds when narrowing to real at scale 14
+        assertThat(assertions.expression("cast(a as REAL)")
+                .binding("a", "DECIMAL '0.00391462049447'"))
+                .isEqualTo(0.0039146203f);
+
+        assertThat(assertions.expression("cast(a as REAL)")
+                .binding("a", "DECIMAL '-0.00391462049447'"))
+                .isEqualTo(-0.0039146203f);
+
+        // Unscaled value above 2^53, where the double divide itself is inexact
+        assertThat(assertions.expression("cast(a as REAL)")
+                .binding("a", "DECIMAL '9600000841482239.99'"))
+                .isEqualTo(9.6e15f);
+
+        assertThat(assertions.expression("cast(a as REAL)")
+                .binding("a", "DECIMAL '-9600000841482239.99'"))
+                .isEqualTo(-9.6e15f);
     }
 
     @Test

@@ -35,7 +35,6 @@ import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.gen.columnar.ColumnarFilterCompiler;
 import io.trino.sql.ir.Cast;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.Reference;
@@ -74,13 +73,16 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.jmh.Benchmarks.benchmark;
+import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
-import static io.trino.sql.ir.Comparison.Operator.EQUAL;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
+import static io.trino.sql.ir.ComparisonOperator.EQUAL;
 import static io.trino.sql.ir.IrExpressions.call;
+import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
 import static io.trino.testing.TestingHandles.TEST_CATALOG_HANDLE;
 import static io.trino.testing.TestingHandles.TEST_TABLE_HANDLE;
@@ -160,7 +162,7 @@ public class BenchmarkScanFilterAndProjectOperator
 
             PageFunctionCompiler pageFunctionCompiler = new PageFunctionCompiler(PLANNER_CONTEXT.getFunctionManager(), PLANNER_CONTEXT.getMetadata(), PLANNER_CONTEXT.getTypeManager(), 0);
             ColumnarFilterCompiler compiler = new ColumnarFilterCompiler(PLANNER_CONTEXT, 0);
-            PageProcessor pageProcessor = new ExpressionCompiler(pageFunctionCompiler, compiler).compilePageProcessor(true, true, Optional.of(getFilter(type)), Optional.empty(), projections, sourceLayout, Optional.empty(), OptionalInt.empty()).apply(DynamicFilter.EMPTY);
+            PageProcessor pageProcessor = new ExpressionCompiler(pageFunctionCompiler, compiler).compilePageProcessor(getCharVarcharCoercion(TEST_SESSION), true, true, Optional.of(getFilter(type)), Optional.empty(), projections, sourceLayout, Optional.empty(), OptionalInt.empty()).apply(DynamicFilter.EMPTY);
 
             createTaskContext();
             createScanFilterAndProjectOperatorFactories(createInputPages(types), pageProcessor, columnHandles, types);
@@ -179,7 +181,7 @@ public class BenchmarkScanFilterAndProjectOperator
                     0,
                     new PlanNodeId("test"),
                     new PlanNodeId("test_source"),
-                    _ -> (_, _, _, _, _, _) -> new FixedPageSource(inputPages),
+                    (_, _) -> (_, _, _, _, _, _, _) -> new FixedPageSource(inputPages),
                     _ -> pageProcessor,
                     TEST_TABLE_HANDLE,
                     Optional.empty(),
@@ -187,7 +189,8 @@ public class BenchmarkScanFilterAndProjectOperator
                     DynamicFilter.EMPTY,
                     types,
                     FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_SIZE,
-                    FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_ROW_COUNT);
+                    FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_ROW_COUNT,
+                    newSimpleAggregatedMemoryContext());
         }
 
         public TaskContext createTaskContext()
@@ -212,10 +215,10 @@ public class BenchmarkScanFilterAndProjectOperator
         private Expression getFilter(Type type)
         {
             if (type == VARCHAR) {
-                return new Comparison(EQUAL, call(MODULO_INTEGER, new Cast(new Reference(VARCHAR, "varchar0"), INTEGER), new Constant(INTEGER, 2L)), new Constant(INTEGER, 0L));
+                return comparison(EQUAL, call(MODULO_INTEGER, new Cast(new Reference(VARCHAR, "varchar0"), INTEGER), new Constant(INTEGER, 2L)), new Constant(INTEGER, 0L));
             }
             if (type == BIGINT) {
-                return new Comparison(EQUAL, call(MODULO_BIGINT, new Reference(BIGINT, "bigint0"), new Constant(BIGINT, 2L)), new Constant(BIGINT, 0L));
+                return comparison(EQUAL, call(MODULO_BIGINT, new Reference(BIGINT, "bigint0"), new Constant(BIGINT, 2L)), new Constant(BIGINT, 0L));
             }
             throw new IllegalArgumentException("filter not supported for type : " + type);
         }

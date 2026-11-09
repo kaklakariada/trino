@@ -18,21 +18,31 @@ import java.util.List;
 public interface TypeManager
 {
     /**
-     * Gets the type with the specified signature.
+     * Gets the type with the specified descriptor.
      *
      * @throws TypeNotFoundException if not found
      */
-    Type getType(TypeSignature signature);
+    Type getType(TypeDescriptor descriptor);
 
     /**
      * Gets a type given it's SQL representation
      */
     Type fromSqlType(String type);
 
+    /// Reads stored SQL type metadata, preserving historical defaults for legacy spellings.
+    /// Newly written metadata should include explicit type parameters.
+    default Type fromPersistedSqlType(String type)
+    {
+        return fromSqlType(type);
+    }
+
     /**
      * Gets the type with the give (opaque) id
      */
-    Type getType(TypeId id);
+    default Type getType(TypeId id)
+    {
+        return fromPersistedSqlType(id.getId());
+    }
 
     /**
      * Gets the type with the specified base type and the given parameters.
@@ -41,7 +51,7 @@ public interface TypeManager
      */
     default Type getParameterizedType(String baseTypeName, List<TypeParameter> typeParameters)
     {
-        return getType(new TypeSignature(baseTypeName, typeParameters));
+        return getType(new TypeDescriptor(baseTypeName, typeParameters));
     }
 
     /**

@@ -23,11 +23,18 @@ import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DecimalModule;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
+import io.trino.plugin.jdbc.FloatingPointQueryBuilder;
 import io.trino.plugin.jdbc.ForBaseJdbc;
 import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.JdbcMetadataFactory;
+import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
+import io.trino.spi.classloader.ThreadContextClassLoader;
+import io.trino.spi.connector.ConnectorSession;
 import org.apache.ignite.IgniteJdbcThinDriver;
+
+import java.sql.Connection;
+import java.sql.SQLException;
 
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
@@ -40,6 +47,7 @@ public class IgniteClientModule
     public void configure(Binder binder)
     {
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(IgniteClient.class).in(Scopes.SINGLETON);
+        newOptionalBinder(binder, QueryBuilder.class).setBinding().to(FloatingPointQueryBuilder.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, JdbcMetadataFactory.class).setBinding().to(IgniteJdbcMetadataFactory.class).in(Scopes.SINGLETON);
         configBinder(binder).bindConfig(IgniteJdbcConfig.class);
         bindTablePropertiesProvider(binder, IgniteTableProperties.class);
@@ -51,8 +59,22 @@ public class IgniteClientModule
     @ForBaseJdbc
     public static ConnectionFactory createConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, OpenTelemetry openTelemetry)
     {
-        return DriverConnectionFactory.builder(new IgniteJdbcThinDriver(), config.getConnectionUrl(), credentialProvider)
+        ClassLoader classLoader = IgniteClientModule.class.getClassLoader();
+        ConnectionFactory delegate = DriverConnectionFactory.builder(new IgniteJdbcThinDriver(), config.getConnectionUrl(), credentialProvider)
                 .setOpenTelemetry(openTelemetry)
                 .build();
+        // IgniteJdbcThinDriver uses ServiceLoader.load(Class) (TCCL-based) during connection init.
+        // Wrap to set TCCL to the plugin classloader so ignite-binary-impl services are visible.
+        return new ConnectionFactory()
+        {
+            @Override
+            public Connection openConnection(ConnectorSession session)
+                    throws SQLException
+            {
+                try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+                    return delegate.openConnection(session);
+                }
+            }
+        };
     }
 }

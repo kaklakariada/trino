@@ -18,6 +18,7 @@ import com.google.inject.Inject;
 
 import java.util.Map;
 
+import static org.apache.iceberg.gcp.auth.GoogleAuthManager.GCP_CREDENTIALS_JSON_PROPERTY;
 import static org.apache.iceberg.gcp.auth.GoogleAuthManager.GCP_CREDENTIALS_PATH_PROPERTY;
 import static org.apache.iceberg.rest.auth.AuthProperties.AUTH_TYPE;
 import static org.apache.iceberg.rest.auth.AuthProperties.AUTH_TYPE_GOOGLE;
@@ -30,11 +31,12 @@ public class GoogleAuthProperties
     @Inject
     public GoogleAuthProperties(GoogleSecurityConfig config)
     {
-        properties = ImmutableMap.<String, String>builder()
+        ImmutableMap.Builder<String, String> builder = ImmutableMap.<String, String>builder()
                 .put(AUTH_TYPE, AUTH_TYPE_GOOGLE)
-                .put(GCP_CREDENTIALS_PATH_PROPERTY, config.getJsonKeyFilePath())
-                .put("header.x-goog-user-project", config.getProjectId())
-                .buildOrThrow();
+                .put("header.x-goog-user-project", config.getProjectId());
+        config.getJsonKey().ifPresent(key -> builder.put(GCP_CREDENTIALS_JSON_PROPERTY, key));
+        config.getJsonKeyFilePath().ifPresent(path -> builder.put(GCP_CREDENTIALS_PATH_PROPERTY, path));
+        properties = builder.buildOrThrow();
     }
 
     @Override

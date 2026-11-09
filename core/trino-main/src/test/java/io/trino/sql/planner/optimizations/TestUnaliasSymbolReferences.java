@@ -42,12 +42,15 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.DynamicFilters.createDynamicFilterExpression;
 import static io.trino.sql.ir.Booleans.TRUE;
 import static io.trino.sql.ir.IrUtils.and;
+import static io.trino.sql.planner.TestingSymbolAllocator.emptySymbolAllocator;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.groupId;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
@@ -148,7 +151,7 @@ public class TestUnaliasSymbolReferences
             PlanNodeIdAllocator idAllocator = new PlanNodeIdAllocator();
             PlanBuilder planBuilder = new PlanBuilder(idAllocator, planTester.getPlannerContext(), session);
 
-            SymbolAllocator symbolAllocator = new SymbolAllocator();
+            SymbolAllocator symbolAllocator = emptySymbolAllocator();
             PlanNode plan = planCreator.create(planBuilder, session, metadata);
             PlanNode optimized = optimizer.optimize(
                     plan,
@@ -169,7 +172,7 @@ public class TestUnaliasSymbolReferences
 
     private Expression dynamicFilterExpression(Metadata metadata, Symbol symbol, DynamicFilterId id)
     {
-        return createDynamicFilterExpression(metadata, id, BigintType.BIGINT, symbol.toSymbolReference());
+        return createDynamicFilterExpression(metadata, getCharVarcharCoercion(TEST_SESSION), id, BigintType.BIGINT, symbol.toSymbolReference());
     }
 
     private TableHandle tableHandle(String tableName)

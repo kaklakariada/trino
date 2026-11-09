@@ -89,8 +89,44 @@ public class TestSqlServerConnectorTest
     }
 
     @Test
+    public void testSelectFromTemporalTableWithHiddenPeriodColumns()
+    {
+        // A table whose PERIOD columns are HIDDEN (system versioning is not required to make them hidden).
+        // With LIMIT pushdown the read query must not be wrapped in `SELECT TOP n * FROM (...)`, because the
+        // wrapping `SELECT *` re-excludes the HIDDEN period columns and misaligns ordinal-based reads.
+        String tableName = "test_temporal_" + randomNameSuffix();
+        onRemoteDatabase().execute(format(
+                """
+                CREATE TABLE dbo.%s (
+                    Id INT NOT NULL PRIMARY KEY,
+                    Name NVARCHAR(50) NOT NULL,
+                    ValidFrom DATETIME2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL,
+                    ValidTo DATETIME2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL,
+                    IsActive BIT NOT NULL,
+                    PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo))
+                """,
+                tableName));
+        try {
+            onRemoteDatabase().execute(format("INSERT INTO dbo.%s (Id, Name, IsActive) VALUES (1, 'a', 1)", tableName));
+
+            // The hidden period columns are exposed by DatabaseMetaData.getColumns(), so Trino sees 5 columns.
+            assertThat(computeActual("DESCRIBE " + tableName).getRowCount()).isEqualTo(5);
+
+            // SELECT * with LIMIT exercises the hidden period columns; the IsActive (BIT) column must not be read as a timestamp.
+            assertThat(computeActual("SELECT * FROM " + tableName + " LIMIT 10").getRowCount()).isEqualTo(1);
+            assertThat(query("SELECT * FROM " + tableName + " LIMIT 0")).returnsEmptyResult();
+
+            assertThat(query("SELECT Id, Name, IsActive FROM " + tableName))
+                    .skippingTypesCheck()
+                    .matches("VALUES (1, 'a', true)");
+        }
+        finally {
+            onRemoteDatabase().execute("DROP TABLE dbo." + tableName);
+        }
+    }
+
+    @Test
     public void testInsertWriteBulkiness()
-            throws SQLException
     {
         testInsertWriteBulkiness(true, true, true);
         testInsertWriteBulkiness(true, true, false);
@@ -103,7 +139,6 @@ public class TestSqlServerConnectorTest
     }
 
     private void testInsertWriteBulkiness(boolean nonTransactionalInsert, boolean bulkCopyForWrite, boolean bulkCopyForWriteLockDestinationTable)
-            throws SQLException
     {
         String table = "bulk_copy_insert_" + randomNameSuffix();
         assertQuerySucceeds(format("CREATE TABLE %s as SELECT * FROM tpch.tiny.customer WHERE 0 = 1", table));
@@ -113,15 +148,17 @@ public class TestSqlServerConnectorTest
                 .setCatalogSessionProperty(CATALOG, BULK_COPY_FOR_WRITE_LOCK_DESTINATION_TABLE, Boolean.toString(bulkCopyForWriteLockDestinationTable))
                 .build();
 
-        // there should be enough rows in source table to minimal logging be enabled. `nation` table is too small.
-        assertQuerySucceeds(session, format("INSERT INTO %s SELECT * FROM tpch.tiny.customer", table));
-        assertQuery("SELECT * FROM " + table, "SELECT * FROM customer");
+        preventSqlServerTransactionLogTruncation(() -> {
+            // there should be enough rows in source table to minimal logging be enabled. `nation` table is too small.
+            assertQuerySucceeds(session, format("INSERT INTO %s SELECT * FROM tpch.tiny.customer", table));
+            assertQuery("SELECT * FROM " + table, "SELECT * FROM customer");
 
-        // check whether minimal logging was applied.
-        // Unlike fully logged operations, which use the transaction log to keep track of every row change,
-        // minimally logged operations keep track of extent allocations and meta-data changes only.
-        assertThat(getTableOperationsCount("LOP_INSERT_ROWS", table))
-                .isEqualTo(bulkCopyForWrite && bulkCopyForWriteLockDestinationTable ? 0 : 1500);
+            // check whether minimal logging was applied.
+            // Unlike fully logged operations, which use the transaction log to keep track of every row change,
+            // minimally logged operations keep track of extent allocations and meta-data changes only.
+            assertThat(getTableOperationsCount("LOP_INSERT_ROWS", table))
+                    .isEqualTo(bulkCopyForWrite && bulkCopyForWriteLockDestinationTable ? 0 : 1500);
+        });
 
         // check that there are no locks remaining on the target table after bulk copy
         assertQuery("SELECT count(*) FROM " + table, "SELECT count(*) FROM customer");
@@ -229,13 +266,39 @@ public class TestSqlServerConnectorTest
         }
     }
 
+    /**
+     * Runs {@code callback} while an open transaction keeps the transaction log from being truncated.
+     * The test database is in the FULL recovery model but was never backed up, so a checkpoint truncates
+     * the log up to the oldest open transaction, removing the records {@link #getTableOperationsCount} counts.
+     */
+    private void preventSqlServerTransactionLogTruncation(Runnable callback)
+    {
+        String pinTable = "dbo.transaction_log_pin_" + randomNameSuffix();
+        sqlServer.execute("CREATE TABLE %s (a int)".formatted(pinTable));
+        try {
+            Jdbi.create(sqlServer::createConnection).useHandle(handle -> {
+                handle.begin();
+                // A transaction holds back log truncation only once it has written a log record
+                handle.execute("INSERT INTO %s VALUES (1)".formatted(pinTable));
+                try {
+                    callback.run();
+                }
+                finally {
+                    handle.rollback();
+                }
+            });
+        }
+        finally {
+            sqlServer.execute("DROP TABLE " + pinTable);
+        }
+    }
+
     private int getTableOperationsCount(String operation, String table)
-            throws SQLException
     {
         try (Connection connection = sqlServer.createConnection();
                 Handle handle = Jdbi.open(connection)) {
-            // fn_dblog() function only returns information about the active portion of the transaction log such as open transactions or the last activity
-            // therefore tests which use this function are flaky, but it's almost not possible to reproduce this flakiness.
+            // fn_dblog() function only returns information about the active portion of the transaction log such as open transactions or the last activity,
+            // so call this inside preventSqlServerTransactionLogTruncation, together with the operations being counted.
             // There was no better option found to test if minimal logging was enabled than to query `LOP_INSERT_ROWS` from fn_dblog(NULL,NULL)
             return handle.createQuery("" +
                             "SELECT COUNT(*) as cnt " +
@@ -246,6 +309,9 @@ public class TestSqlServerConnectorTest
                     .bind("table_name", table)
                     .mapTo(Integer.class)
                     .one();
+        }
+        catch (SQLException e) {
+            throw new RuntimeException(e);
         }
     }
 

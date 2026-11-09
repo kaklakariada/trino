@@ -49,10 +49,10 @@ import java.util.concurrent.Future;
 import java.util.function.Function;
 import java.util.stream.IntStream;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
+import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.operator.HashArraySizeSupplier.incrementalLoadFactorHashArraySizeSupplier;
 import static io.trino.operator.JoinOperatorType.innerJoin;
 import static io.trino.operator.OperatorFactories.join;
@@ -69,14 +69,16 @@ public final class JoinTestUtils
     public static OperatorFactory innerJoinOperatorFactory(
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager,
             RowPagesBuilder probePages,
+            List<Integer> hashChannels,
             boolean hasFilter)
     {
-        return innerJoinOperatorFactory(lookupSourceFactoryManager, probePages, false, hasFilter);
+        return innerJoinOperatorFactory(lookupSourceFactoryManager, probePages, hashChannels, false, hasFilter);
     }
 
     public static OperatorFactory innerJoinOperatorFactory(
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager,
             RowPagesBuilder probePages,
+            List<Integer> hashChannels,
             boolean outputSingleMatch,
             boolean hasFilter)
     {
@@ -87,7 +89,7 @@ public final class JoinTestUtils
                 lookupSourceFactoryManager,
                 hasFilter,
                 probePages.getTypes(),
-                probePages.getHashChannels().orElseThrow(),
+                hashChannels,
                 Optional.empty());
     }
 
@@ -95,7 +97,6 @@ public final class JoinTestUtils
     {
         PipelineContext buildPipeline = taskContext.addPipelineContext(1, true, true, false);
         List<Driver> buildDrivers = new ArrayList<>();
-        List<HashBuilderOperator> buildOperators = new ArrayList<>();
         for (int i = 0; i < buildSideSetup.getPartitionCount(); i++) {
             DriverContext buildDriverContext = buildPipeline.addDriverContext();
             HashBuilderOperator buildOperator = buildSideSetup.getBuildOperatorFactory().createOperator(buildDriverContext);
@@ -104,10 +105,9 @@ public final class JoinTestUtils
                     buildSideSetup.getBuildSideSourceOperatorFactory().createOperator(buildDriverContext),
                     buildOperator);
             buildDrivers.add(driver);
-            buildOperators.add(buildOperator);
         }
 
-        buildSideSetup.setDriversAndOperators(buildDrivers, buildOperators);
+        buildSideSetup.setDrivers(buildDrivers);
     }
 
     public static BuildSideSetup setupBuildSide(
@@ -115,9 +115,10 @@ public final class JoinTestUtils
             boolean parallelBuild,
             TaskContext taskContext,
             RowPagesBuilder buildPages,
+            List<Integer> hashChannels,
             Optional<InternalJoinFilterFunction> filterFunction)
     {
-        return setupBuildSide(partitionFunctionProvider, parallelBuild, taskContext, buildPages, filterFunction, true);
+        return setupBuildSide(partitionFunctionProvider, parallelBuild, taskContext, buildPages, hashChannels, filterFunction, true);
     }
 
     public static BuildSideSetup setupBuildSide(
@@ -125,6 +126,7 @@ public final class JoinTestUtils
             boolean parallelBuild,
             TaskContext taskContext,
             RowPagesBuilder buildPages,
+            List<Integer> hashChannels,
             Optional<InternalJoinFilterFunction> filterFunction,
             boolean enableSingleChannelBigintLookupSource)
     {
@@ -132,7 +134,6 @@ public final class JoinTestUtils
                 .map(function -> (_, addresses, pages) -> new StandardJoinFilterFunction(function, addresses, pages));
 
         int partitionCount = parallelBuild ? PARTITION_COUNT : 1;
-        List<Integer> hashChannels = buildPages.getHashChannels().orElseThrow();
         List<Type> types = buildPages.getTypes();
         List<Type> hashChannelTypes = hashChannels.stream()
                 .map(types::get)
@@ -146,6 +147,7 @@ public final class JoinTestUtils
                 hashChannels,
                 hashChannelTypes,
                 DataSize.of(32, DataSize.Unit.MEGABYTE),
+                newSimpleAggregatedMemoryContext(),
                 HASH_COMPILER,
                 DataSize.of(32, DataSize.Unit.MEGABYTE),
                 () -> 0L);
@@ -251,7 +253,6 @@ public final class JoinTestUtils
         private final LocalExchangeSourceOperatorFactory buildSideSourceOperatorFactory;
         private final int partitionCount;
         private List<Driver> buildDrivers;
-        private List<HashBuilderOperator> buildOperators;
 
         public BuildSideSetup(JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager, HashBuilderOperatorFactory buildOperatorFactory, LocalExchangeSourceOperatorFactory buildSideSourceOperatorFactory, int partitionCount)
         {
@@ -261,11 +262,9 @@ public final class JoinTestUtils
             this.partitionCount = partitionCount;
         }
 
-        public void setDriversAndOperators(List<Driver> buildDrivers, List<HashBuilderOperator> buildOperators)
+        public void setDrivers(List<Driver> buildDrivers)
         {
-            checkArgument(buildDrivers.size() == buildOperators.size());
             this.buildDrivers = ImmutableList.copyOf(buildDrivers);
-            this.buildOperators = ImmutableList.copyOf(buildOperators);
         }
 
         public JoinBridgeManager<PartitionedLookupSourceFactory> getLookupSourceFactoryManager()
@@ -292,12 +291,6 @@ public final class JoinTestUtils
         {
             checkState(buildDrivers != null, "buildDrivers is not initialized yet");
             return buildDrivers;
-        }
-
-        public List<HashBuilderOperator> getBuildOperators()
-        {
-            checkState(buildOperators != null, "buildDrivers is not initialized yet");
-            return buildOperators;
         }
     }
 

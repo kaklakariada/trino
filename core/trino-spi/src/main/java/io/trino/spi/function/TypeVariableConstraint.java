@@ -17,11 +17,14 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.errorprone.annotations.DoNotCall;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeSyntax;
+import io.trino.spi.type.TypeTemplate;
+import io.trino.spi.type.TypeTemplates;
 
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
@@ -32,16 +35,16 @@ public class TypeVariableConstraint
     private final boolean comparableRequired;
     private final boolean orderableRequired;
     private final boolean rowType;
-    private final Set<TypeSignature> castableTo;
-    private final Set<TypeSignature> castableFrom;
+    private final Set<TypeTemplate> castableTo;
+    private final Set<TypeTemplate> castableFrom;
 
     private TypeVariableConstraint(
             String name,
             boolean comparableRequired,
             boolean orderableRequired,
             boolean rowType,
-            Set<TypeSignature> castableTo,
-            Set<TypeSignature> castableFrom)
+            Set<TypeTemplate> castableTo,
+            Set<TypeTemplate> castableFrom)
     {
         this.name = requireNonNull(name, "name is null");
         this.comparableRequired = comparableRequired;
@@ -76,19 +79,30 @@ public class TypeVariableConstraint
     }
 
     @JsonProperty
-    public Set<TypeSignature> getCastableTo()
+    public Set<TypeTemplate> getCastableTo()
     {
         return castableTo;
     }
 
     @JsonProperty
-    public Set<TypeSignature> getCastableFrom()
+    public Set<TypeTemplate> getCastableFrom()
     {
         return castableFrom;
     }
 
     @Override
     public String toString()
+    {
+        return render(TypeTemplate::render);
+    }
+
+    /// Renders constraints using SQL type spelling for user-facing diagnostics.
+    public String toSql()
+    {
+        return render(TypeSyntax::toSql);
+    }
+
+    private String render(Function<TypeTemplate, String> renderType)
     {
         String value = name;
         if (comparableRequired) {
@@ -101,10 +115,10 @@ public class TypeVariableConstraint
             value += ":row(*)";
         }
         if (!castableTo.isEmpty()) {
-            value += castableTo.stream().map(Object::toString).collect(joining(", ", ":castableTo(", ")"));
+            value += castableTo.stream().map(renderType).collect(joining(", ", ":castableTo(", ")"));
         }
         if (!castableFrom.isEmpty()) {
-            value += castableFrom.stream().map(Object::toString).collect(joining(", ", ":castableFrom(", ")"));
+            value += castableFrom.stream().map(renderType).collect(joining(", ", ":castableFrom(", ")"));
         }
         return value;
     }
@@ -149,8 +163,8 @@ public class TypeVariableConstraint
         private boolean comparableRequired;
         private boolean orderableRequired;
         private boolean rowType;
-        private final Set<TypeSignature> castableTo = new HashSet<>();
-        private final Set<TypeSignature> castableFrom = new HashSet<>();
+        private final Set<TypeTemplate> castableTo = new HashSet<>();
+        private final Set<TypeTemplate> castableFrom = new HashSet<>();
 
         private TypeVariableConstraintBuilder(String name)
         {
@@ -177,10 +191,10 @@ public class TypeVariableConstraint
 
         public TypeVariableConstraintBuilder castableTo(Type type)
         {
-            return castableTo(type.getTypeSignature());
+            return castableTo(TypeTemplates.fromTypeDescriptor(type.getTypeDescriptor()));
         }
 
-        public TypeVariableConstraintBuilder castableTo(TypeSignature type)
+        public TypeVariableConstraintBuilder castableTo(TypeTemplate type)
         {
             this.castableTo.add(type);
             return this;
@@ -188,10 +202,10 @@ public class TypeVariableConstraint
 
         public TypeVariableConstraintBuilder castableFrom(Type type)
         {
-            return castableFrom(type.getTypeSignature());
+            return castableFrom(TypeTemplates.fromTypeDescriptor(type.getTypeDescriptor()));
         }
 
-        public TypeVariableConstraintBuilder castableFrom(TypeSignature type)
+        public TypeVariableConstraintBuilder castableFrom(TypeTemplate type)
         {
             this.castableFrom.add(type);
             return this;
@@ -211,8 +225,8 @@ public class TypeVariableConstraint
             @JsonProperty("comparableRequired") boolean comparableRequired,
             @JsonProperty("orderableRequired") boolean orderableRequired,
             @JsonProperty("rowType") boolean rowType,
-            @JsonProperty("castableTo") Set<TypeSignature> castableTo,
-            @JsonProperty("castableFrom") Set<TypeSignature> castableFrom)
+            @JsonProperty("castableTo") Set<TypeTemplate> castableTo,
+            @JsonProperty("castableFrom") Set<TypeTemplate> castableFrom)
     {
         return new TypeVariableConstraint(name, comparableRequired, orderableRequired, rowType, castableTo, castableFrom);
     }

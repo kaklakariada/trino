@@ -41,7 +41,10 @@ public class TestIcebergNessieCatalogWithBearerAuth
     {
         Network network = closeAfterClass(Network.newNetwork());
 
-        KeycloakContainer keycloakContainer = closeAfterClass(KeycloakContainer.builder().withNetwork(network).build());
+        KeycloakContainer keycloakContainer = closeAfterClass(KeycloakContainer.builder()
+                .withNetwork(network)
+                .withStartupRetryLimit(2)
+                .build());
         keycloakContainer.start();
 
         Map<String, String> envVars = ImmutableMap.<String, String>builder()
@@ -68,6 +71,7 @@ public class TestIcebergNessieCatalogWithBearerAuth
         return IcebergQueryRunner.builder()
                 .setBaseDataDir(Optional.of(tempDir))
                 .setIcebergProperties(properties)
+                .addIcebergProperty("fs.hadoop.enabled", "true")
                 .build();
     }
 

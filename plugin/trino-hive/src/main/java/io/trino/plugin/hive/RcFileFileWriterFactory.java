@@ -19,6 +19,7 @@ import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.TrinoInputFile;
+import io.trino.filesystem.TrinoOutputStream;
 import io.trino.hive.formats.encodings.ColumnEncodingFactory;
 import io.trino.hive.formats.encodings.binary.BinaryColumnEncodingFactory;
 import io.trino.hive.formats.encodings.text.TextColumnEncodingFactory;
@@ -33,8 +34,6 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import org.joda.time.DateTimeZone;
 
-import java.io.Closeable;
-import java.io.OutputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -128,14 +127,14 @@ public class RcFileFileWriterFactory
         try {
             TrinoFileSystem fileSystem = fileSystemFactory.create(session);
             AggregatedMemoryContext outputStreamMemoryContext = newSimpleAggregatedMemoryContext();
-            OutputStream outputStream = fileSystem.newOutputFile(location).create(outputStreamMemoryContext);
+            TrinoOutputStream outputStream = fileSystem.newOutputFile(location).create(outputStreamMemoryContext);
 
             Optional<Supplier<TrinoInputFile>> validationInputFactory = Optional.empty();
             if (isRcfileOptimizedWriterValidate(session)) {
                 validationInputFactory = Optional.of(() -> fileSystem.newInputFile(location));
             }
 
-            Closeable rollbackAction = () -> fileSystem.deleteFile(location);
+            RollbackAction rollbackAction = () -> fileSystem.deleteFile(location);
 
             return Optional.of(new RcFileFileWriter(
                     outputStream,

@@ -26,8 +26,8 @@ import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeZoneKey;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeSignature;
 import jakarta.annotation.Nullable;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.MetricsUtil.ReadableMetricsStruct;
@@ -112,7 +112,7 @@ public class EntriesTable
                 .add(new ColumnMetadata("sequence_number", BIGINT))
                 .add(new ColumnMetadata("file_sequence_number", BIGINT))
                 .add(new ColumnMetadata("data_file", RowType.from(dataFileFieldMetadata(typeManager, icebergTable))))
-                .add(new ColumnMetadata("readable_metrics", typeManager.getType(new TypeSignature(JSON))))
+                .add(new ColumnMetadata("readable_metrics", typeManager.getType(new TypeDescriptor(JSON))))
                 .build();
     }
 
@@ -153,7 +153,7 @@ public class EntriesTable
         appendDataFile((RowBlockBuilder) pageSource.nextColumn(), dataFile);
         ReadableMetricsStruct readableMetrics = row.get("readable_metrics", ReadableMetricsStruct.class);
         String readableMetricsJson = readableMetricsToJson(readableMetrics, primitiveFields);
-        pageSource.appendVarchar(readableMetricsJson);
+        pageSource.appendJson(readableMetricsJson);
     }
 
     private void appendDataFile(RowBlockBuilder blockBuilder, StructProjection dataFile)

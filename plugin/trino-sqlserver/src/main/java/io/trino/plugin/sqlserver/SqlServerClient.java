@@ -14,7 +14,6 @@
 package io.trino.plugin.sqlserver;
 
 import com.google.common.base.Enums;
-import com.google.common.base.Joiner;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -52,20 +51,19 @@ import io.trino.plugin.jdbc.LongWriteFunction;
 import io.trino.plugin.jdbc.ObjectReadFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
 import io.trino.plugin.jdbc.PredicatePushdownController;
+import io.trino.plugin.jdbc.PredicatePushdownController.DomainPushdownResult;
 import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.SliceWriteFunction;
+import io.trino.plugin.jdbc.StandardColumnMappings;
 import io.trino.plugin.jdbc.WriteMapping;
 import io.trino.plugin.jdbc.aggregation.ImplementAvgDecimal;
 import io.trino.plugin.jdbc.aggregation.ImplementAvgFloatingPoint;
 import io.trino.plugin.jdbc.aggregation.ImplementMinMax;
 import io.trino.plugin.jdbc.aggregation.ImplementSum;
-import io.trino.plugin.jdbc.expression.ComparisonOperator;
 import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
 import io.trino.plugin.jdbc.expression.ParameterizedExpression;
-import io.trino.plugin.jdbc.expression.RewriteCaseSensitiveComparison;
-import io.trino.plugin.jdbc.expression.RewriteIn;
 import io.trino.plugin.jdbc.expression.RewriteLikeEscapeWithCaseSensitivity;
 import io.trino.plugin.jdbc.expression.RewriteLikeWithCaseSensitivity;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
@@ -96,8 +94,8 @@ import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import microsoft.sql.DateTimeOffset;
@@ -139,9 +137,7 @@ import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.MoreCollectors.toOptional;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
-import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
-import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
 import static io.trino.plugin.jdbc.CaseSensitivity.CASE_INSENSITIVE;
 import static io.trino.plugin.jdbc.CaseSensitivity.CASE_SENSITIVE;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
@@ -149,6 +145,7 @@ import static io.trino.plugin.jdbc.JdbcJoinPushdownUtil.implementJoinCostAware;
 import static io.trino.plugin.jdbc.JdbcMetadataSessionProperties.getDomainCompactionThreshold;
 import static io.trino.plugin.jdbc.PredicatePushdownController.CASE_INSENSITIVE_CHARACTER_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
+import static io.trino.plugin.jdbc.PredicatePushdownController.FINITE_FLOATING_POINT_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintWriteFunction;
@@ -163,6 +160,7 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.fromTrinoTime;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.jsonWriteMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longTimestampWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realColumnMapping;
@@ -237,8 +235,6 @@ public class SqlServerClient
 
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd");
 
-    private static final Joiner DOT_JOINER = Joiner.on(".");
-
     private final boolean statisticsEnabled;
 
     private final Type jsonType;
@@ -272,6 +268,27 @@ public class SqlServerClient
             return DISABLE_PUSHDOWN.apply(session, domain);
         }
         return FULL_PUSHDOWN.apply(session, simplifiedDomain);
+    };
+
+    private static final PredicatePushdownController SQLSERVER_VARCHAR_PUSHDOWN = (session, domain) -> {
+        // SQL Server compares varchar with PAD SPACE semantics: trailing spaces are not significant, so a pushed
+        // equality or IN predicate can match values that differ only in trailing spaces, returning more rows than
+        // Trino's NO PAD comparison. Push equality / IN down only as a superset pre-filter and keep the engine filter
+        // to re-apply the exact comparison; disable inequality and range, which cannot be expressed as a safe superset.
+        if (domain.isOnlyNull()) {
+            return FULL_PUSHDOWN.apply(session, domain);
+        }
+
+        if (!domain.getValues().isDiscreteSet()) {
+            return DISABLE_PUSHDOWN.apply(session, domain);
+        }
+
+        Domain simplifiedDomain = domain.simplify(getDomainCompactionThreshold(session));
+        if (!simplifiedDomain.getValues().isDiscreteSet()) {
+            // Domain#simplify can turn a discrete set into a range predicate
+            return DISABLE_PUSHDOWN.apply(session, domain);
+        }
+        return new DomainPushdownResult(simplifiedDomain, domain);
     };
 
     // Dates prior to the Gregorian calendar switch in 1582 can cause incorrect results when pushed down,
@@ -314,12 +331,13 @@ public class SqlServerClient
         super("\"", connectionFactory, queryBuilder, config.getJdbcTypesMappedToVarchar(), identifierMapping, queryModifier, true);
 
         requireNonNull(typeManager, "typeManager is null");
-        jsonType = typeManager.getType(new TypeSignature(JSON));
+        jsonType = typeManager.getType(new TypeDescriptor(JSON));
         this.statisticsEnabled = statisticsConfig.isEnabled();
 
         this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
                 .addStandardRules(this::quoted)
-                .add(new RewriteIn())
+                .add(new RewriteSqlServerIn())
+                .add(new RewriteSqlServerNullIf())
                 .add(new RewriteLikeWithCaseSensitivity())
                 .add(new RewriteLikeEscapeWithCaseSensitivity())
                 .withTypeClass("integer_type", ImmutableSet.of("tinyint", "smallint", "integer", "bigint"))
@@ -330,7 +348,6 @@ public class SqlServerClient
                 .map("$less_than_or_equal(left: numeric_type, right: numeric_type)").to("left <= right")
                 .map("$greater_than(left: numeric_type, right: numeric_type)").to("left > right")
                 .map("$greater_than_or_equal(left: numeric_type, right: numeric_type)").to("left >= right")
-                .add(new RewriteCaseSensitiveComparison(ImmutableSet.of(ComparisonOperator.EQUAL, ComparisonOperator.NOT_EQUAL)))
                 .map("$add(left: integer_type, right: integer_type)").to("left + right")
                 .map("$subtract(left: integer_type, right: integer_type)").to("left - right")
                 .map("$multiply(left: integer_type, right: integer_type)").to("left * right")
@@ -340,7 +357,6 @@ public class SqlServerClient
                 .map("$not($is_null(value))").to("value IS NOT NULL")
                 .map("$not(value: boolean)").to("NOT value")
                 .map("$is_null(value)").to("value IS NULL")
-                .map("$nullif(first, second)").to("NULLIF(first, second)")
                 .build();
 
         this.aggregateFunctionRewriter = new AggregateFunctionRewriter<>(
@@ -495,7 +511,8 @@ public class SqlServerClient
         if (!remoteSchemaName.equals(newRemoteSchemaName)) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming tables across schemas");
         }
-        String fullTableFromName = DOT_JOINER.join(
+        String fullTableFromName = String.join(
+                ".",
                 quoted(catalogName),
                 quoted(remoteSchemaName),
                 quoted(remoteTableName));
@@ -513,7 +530,8 @@ public class SqlServerClient
     {
         // sp_rename treats first argument as SQL object name, so it needs to be properly quoted and escaped.
         // The second argument is treated literally.
-        String columnFrom = DOT_JOINER.join(
+        String columnFrom = String.join(
+                ".",
                 quoted(remoteTableName.getCatalogName().orElseThrow()),
                 quoted(remoteTableName.getSchemaName().orElseThrow()),
                 quoted(remoteTableName.getTableName()),
@@ -631,9 +649,9 @@ public class SqlServerClient
 
             case Types.BIGINT -> Optional.of(bigintColumnMapping());
 
-            case Types.REAL -> Optional.of(realColumnMapping());
+            case Types.REAL -> Optional.of(realColumnMapping(FINITE_FLOATING_POINT_PUSHDOWN));
 
-            case Types.DOUBLE -> Optional.of(doubleColumnMapping());
+            case Types.DOUBLE -> Optional.of(doubleColumnMapping(FINITE_FLOATING_POINT_PUSHDOWN));
 
             case Types.NUMERIC, Types.DECIMAL -> {
                 int columnSize = typeHandle.requiredColumnSize();
@@ -755,7 +773,7 @@ public class SqlServerClient
         }
 
         if (type == jsonType) {
-            return WriteMapping.sliceMapping("json", nvarcharWriteFunction());
+            return jsonWriteMapping("json", nvarcharWriteFunction());
         }
 
         throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type.getDisplayName());
@@ -1116,7 +1134,11 @@ public class SqlServerClient
     @Override
     protected Optional<BiFunction<String, Long, String>> limitFunction()
     {
-        return Optional.of((sql, limit) -> format("SELECT TOP %s * FROM (%s) o", limit, sql));
+        // Use OFFSET/FETCH rather than wrapping in `SELECT TOP n * FROM (...)`: the wrapping `SELECT *` re-applies
+        // SQL Server's rule that HIDDEN columns (e.g. temporal period columns) are excluded from `SELECT *`, which
+        // drops columns the inner projection selected explicitly and misaligns ordinal-based reads.
+        // ORDER BY (SELECT NULL) satisfies the OFFSET/FETCH requirement for an ORDER BY without imposing an ordering.
+        return Optional.of((sql, limit) -> format("%s ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT %s ROWS ONLY", sql, limit));
     }
 
     @Override
@@ -1180,7 +1202,10 @@ public class SqlServerClient
             JoinCondition.Operator operator = joinCondition.getOperator();
             return switch (operator) {
                 case LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL -> false;
-                case EQUAL, NOT_EQUAL -> isCaseSensitiveVarchar(joinCondition.getLeftColumn()) && isCaseSensitiveVarchar(joinCondition.getRightColumn());
+                case EQUAL, NOT_EQUAL -> joinCondition.getLeftColumn().getColumnType() instanceof CharType
+                        && joinCondition.getRightColumn().getColumnType() instanceof CharType
+                        && isCaseSensitive(joinCondition.getLeftColumn())
+                        && isCaseSensitive(joinCondition.getRightColumn());
                 default -> false;
             };
         }
@@ -1188,7 +1213,7 @@ public class SqlServerClient
         return true;
     }
 
-    private boolean isCaseSensitiveVarchar(JdbcColumnHandle columnHandle)
+    private boolean isCaseSensitive(JdbcColumnHandle columnHandle)
     {
         return columnHandle.getJdbcTypeHandle().caseSensitivity().orElse(CASE_INSENSITIVE) == CASE_SENSITIVE;
     }
@@ -1324,16 +1349,12 @@ public class SqlServerClient
                 varcharType,
                 varcharReadFunction(varcharType),
                 varcharWriteFunction(),
-                isCaseSensitive ? SQLSERVER_CHARACTER_PUSHDOWN : CASE_INSENSITIVE_CHARACTER_PUSHDOWN);
+                isCaseSensitive ? SQLSERVER_VARCHAR_PUSHDOWN : CASE_INSENSITIVE_CHARACTER_PUSHDOWN);
     }
 
     private ColumnMapping jsonColumnMapping()
     {
-        return ColumnMapping.sliceMapping(
-                jsonType,
-                (resultSet, columnIndex) -> jsonParse(utf8Slice(resultSet.getString(columnIndex))),
-                nvarcharWriteFunction(),
-                DISABLE_PUSHDOWN);
+        return StandardColumnMappings.jsonColumnMapping(jsonType, nvarcharWriteFunction());
     }
 
     private static SliceWriteFunction nvarcharWriteFunction()

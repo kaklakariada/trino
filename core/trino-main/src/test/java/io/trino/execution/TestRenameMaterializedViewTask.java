@@ -48,6 +48,19 @@ public class TestRenameMaterializedViewTask
     }
 
     @Test
+    public void testRenameToUnqualifiedTargetKeepsSourceSchema()
+    {
+        String sourceSchema = "other_schema";
+        QualifiedObjectName materializedViewName = new QualifiedObjectName(TEST_CATALOG_NAME, sourceSchema, "existing_materialized_view");
+        QualifiedObjectName newMaterializedViewName = new QualifiedObjectName(TEST_CATALOG_NAME, sourceSchema, "existing_materialized_view_new");
+        metadata.createMaterializedView(testSession, materializedViewName, someMaterializedView(), MATERIALIZED_VIEW_PROPERTIES, false, false);
+
+        getFutureValue(executeRenameMaterializedView(asQualifiedName(materializedViewName), QualifiedName.of("existing_materialized_view_new")));
+        assertThat(metadata.isMaterializedView(testSession, materializedViewName)).isFalse();
+        assertThat(metadata.isMaterializedView(testSession, newMaterializedViewName)).isTrue();
+    }
+
+    @Test
     public void testRenameNotExistingMaterializedView()
     {
         QualifiedName materializedViewName = qualifiedName("not_existing_materialized_view");
@@ -105,7 +118,7 @@ public class TestRenameMaterializedViewTask
     public void testRenameMaterializedViewOnView()
     {
         QualifiedName viewName = qualifiedName("existing_view");
-        metadata.createView(testSession, QualifiedObjectName.valueOf(viewName.toString()), someView(), ImmutableMap.of(), false);
+        metadata.createView(testSession, QualifiedObjectName.valueOf(viewName.toString()), someView(), ImmutableMap.of(), FAIL);
 
         assertTrinoExceptionThrownBy(() -> getFutureValue(executeRenameMaterializedView(viewName, qualifiedName("existing_view_new"))))
                 .hasErrorCode(TABLE_NOT_FOUND)
@@ -116,7 +129,7 @@ public class TestRenameMaterializedViewTask
     public void testRenameMaterializedViewOnViewIfExists()
     {
         QualifiedName viewName = qualifiedName("existing_view");
-        metadata.createView(testSession, QualifiedObjectName.valueOf(viewName.toString()), someView(), ImmutableMap.of(), false);
+        metadata.createView(testSession, QualifiedObjectName.valueOf(viewName.toString()), someView(), ImmutableMap.of(), FAIL);
 
         assertTrinoExceptionThrownBy(() -> getFutureValue(executeRenameMaterializedView(viewName, qualifiedName("existing_view_new"), true)))
                 .hasErrorCode(TABLE_NOT_FOUND)
@@ -129,7 +142,7 @@ public class TestRenameMaterializedViewTask
         QualifiedObjectName materializedViewName = qualifiedObjectName("existing_materialized_view");
         metadata.createMaterializedView(testSession, materializedViewName, someMaterializedView(), MATERIALIZED_VIEW_PROPERTIES, false, false);
         QualifiedName viewName = qualifiedName("existing_view");
-        metadata.createView(testSession, QualifiedObjectName.valueOf(viewName.toString()), someView(), ImmutableMap.of(), false);
+        metadata.createView(testSession, QualifiedObjectName.valueOf(viewName.toString()), someView(), ImmutableMap.of(), FAIL);
 
         assertTrinoExceptionThrownBy(() -> getFutureValue(executeRenameMaterializedView(asQualifiedName(materializedViewName), viewName)))
                 .hasErrorCode(TABLE_ALREADY_EXISTS)

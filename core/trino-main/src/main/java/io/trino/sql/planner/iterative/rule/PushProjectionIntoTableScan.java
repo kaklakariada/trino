@@ -35,6 +35,7 @@ import io.trino.sql.PlannerContext;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.NodeRef;
 import io.trino.sql.planner.ConnectorExpressionTranslator;
+import io.trino.sql.planner.DeterminismEvaluator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.Assignments;
@@ -97,6 +98,12 @@ public class PushProjectionIntoTableScan
 
         Session session = context.getSession();
 
+        // Keep non-determinism on engine side to retain awareness of it.
+        // Sometimes table scans are duplicated (e.g. MultipleDistinctAggregationsToSubqueries).
+        if (!project.getAssignments().assignments().values().stream().allMatch(DeterminismEvaluator::isDeterministic)) {
+            return Result.empty();
+        }
+
         // Extract translatable components from projection expressions. Prepare a mapping from these internal
         // expression nodes to corresponding ConnectorExpression translations.
         Map<NodeRef<Expression>, ConnectorExpression> partialTranslations = project.getAssignments().assignments().entrySet().stream()
@@ -143,11 +150,11 @@ public class PushProjectionIntoTableScan
         // Translate partial connector projections back to new partial projections
         List<Expression> newPartialProjections = newConnectorPartialProjections.stream()
                 .map(expression -> {
-                    Expression translated = ConnectorExpressionTranslator.translate(session, expression, plannerContext, variableMappings);
+                    Expression translated = ConnectorExpressionTranslator.translate(session, expression, plannerContext, variableMappings, context.getSymbolAllocator());
                     translated = LambdaCaptureDesugaringRewriter.rewrite(translated, context.getSymbolAllocator());
                     // ConnectorExpressionTranslator may or may not preserve optimized form of expressions during round-trip. Avoid potential optimizer loop
                     // by ensuring expression is optimized.
-                    return plannerContext.getExpressionOptimizer().process(translated, session, ImmutableMap.of()).orElse(translated);
+                    return plannerContext.getExpressionOptimizer().process(translated, session, context.getSymbolAllocator(), ImmutableMap.of()).orElse(translated);
                 })
                 .collect(toImmutableList());
 
@@ -175,7 +182,7 @@ public class PushProjectionIntoTableScan
                     continue;
                 }
                 String resultVariableName = variable.getName();
-                Expression inputExpression = ConnectorExpressionTranslator.translate(session, inputConnectorExpression, plannerContext, inputVariableMappings);
+                Expression inputExpression = ConnectorExpressionTranslator.translate(session, inputConnectorExpression, plannerContext, inputVariableMappings, context.getSymbolAllocator());
                 SymbolStatsEstimate symbolStatistics = scalarStatsCalculator.calculate(inputExpression, statistics, session);
                 builder.addSymbolStatistics(variableMappings.get(resultVariableName), symbolStatistics);
             }

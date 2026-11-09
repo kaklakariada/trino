@@ -51,6 +51,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 
 @DefunctConfig({
         "iceberg.allow-legacy-snapshot-syntax",
+        "iceberg.equality-deletes-blocks-hash-enabled",
         "iceberg.experimental.extended-statistics.enabled",
         "iceberg.extended-statistics.enabled",
         "iceberg.file-based-conflict-detection",
@@ -84,6 +85,7 @@ public class IcebergConfig
     private Duration removeOrphanFilesMinRetention = new Duration(7, DAYS);
     private DataSize targetMaxFileSize = DataSize.of(1, GIGABYTE);
     private DataSize idleWriterMinFileSize = DataSize.of(16, MEGABYTE);
+    private Optional<DataSize> maxSplitSize = Optional.empty();
     // This is meant to protect users who are misusing schema locations (by
     // putting schemas in locations with extraneous files), so default to false
     // to avoid deleting those files if Trino is unable to check.
@@ -105,9 +107,11 @@ public class IcebergConfig
     private boolean metadataCacheEnabled = true;
     private boolean objectStoreLayoutEnabled;
     private int metadataParallelism = 8;
+    private boolean metadataVirtualThreadsEnabled = true;
     private boolean bucketExecutionEnabled = true;
     private ParquetFooterCacheType parquetFooterCacheType = NONE;
     private DataSize parquetFooterCacheMemoryMaxSize = DataSize.of(10, MEGABYTE);
+    private int domainCompactionThreshold = 1000;
 
     public CatalogType getCatalogType()
     {
@@ -403,6 +407,19 @@ public class IcebergConfig
         return this;
     }
 
+    public Optional<DataSize> getMaxSplitSize()
+    {
+        return maxSplitSize;
+    }
+
+    @Config("iceberg.max-split-size")
+    @ConfigDescription("Target maximum split size for Iceberg tables")
+    public IcebergConfig setMaxSplitSize(DataSize maxSplitSize)
+    {
+        this.maxSplitSize = Optional.ofNullable(maxSplitSize);
+        return this;
+    }
+
     public boolean isDeleteSchemaLocationsFallback()
     {
         return this.deleteSchemaLocationsFallback;
@@ -674,6 +691,19 @@ public class IcebergConfig
         return this;
     }
 
+    public boolean isMetadataVirtualThreadsEnabled()
+    {
+        return metadataVirtualThreadsEnabled;
+    }
+
+    @ConfigDescription("Run blocking metadata enumeration I/O on virtual threads")
+    @Config("iceberg.metadata.virtual-threads-enabled")
+    public IcebergConfig setMetadataVirtualThreadsEnabled(boolean metadataVirtualThreadsEnabled)
+    {
+        this.metadataVirtualThreadsEnabled = metadataVirtualThreadsEnabled;
+        return this;
+    }
+
     public boolean isBucketExecutionEnabled()
     {
         return bucketExecutionEnabled;
@@ -712,6 +742,20 @@ public class IcebergConfig
     public IcebergConfig setParquetFooterCacheMemoryMaxSize(DataSize parquetFooterCacheMemoryMaxSize)
     {
         this.parquetFooterCacheMemoryMaxSize = parquetFooterCacheMemoryMaxSize;
+        return this;
+    }
+
+    @Min(1)
+    public int getDomainCompactionThreshold()
+    {
+        return domainCompactionThreshold;
+    }
+
+    @Config("iceberg.domain-compaction-threshold")
+    @ConfigDescription("Maximum ranges to allow in a tuple domain without compacting it")
+    public IcebergConfig setDomainCompactionThreshold(int domainCompactionThreshold)
+    {
+        this.domainCompactionThreshold = domainCompactionThreshold;
         return this;
     }
 }

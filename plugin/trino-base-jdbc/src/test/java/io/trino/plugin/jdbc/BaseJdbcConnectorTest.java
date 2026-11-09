@@ -20,6 +20,7 @@ import io.trino.Session;
 import io.trino.spi.QueryId;
 import io.trino.spi.connector.JoinCondition;
 import io.trino.spi.connector.SortOrder;
+import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.Plan;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.plan.AggregationNode;
@@ -76,7 +77,6 @@ import static io.trino.plugin.jdbc.JoinOperator.LEFT_JOIN;
 import static io.trino.plugin.jdbc.RemoteDatabaseEvent.Status.CANCELLED;
 import static io.trino.plugin.jdbc.RemoteDatabaseEvent.Status.RUNNING;
 import static io.trino.spi.connector.ConnectorMetadata.MODIFYING_ROWS_MESSAGE;
-import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.BROADCAST;
 import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.PARTITIONED;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
@@ -1189,9 +1189,9 @@ public abstract class BaseJdbcConnectorTest
 
                 List<String> nonEqualities = Stream.concat(
                                 Stream.of(JoinCondition.Operator.values())
-                                        .filter(operator -> operator != JoinCondition.Operator.EQUAL && operator != JoinCondition.Operator.IDENTICAL)
+                                        .filter(operator -> operator != JoinCondition.Operator.EQUAL)
                                         .map(JoinCondition.Operator::getValue),
-                                Stream.of("IS DISTINCT FROM", "IS NOT DISTINCT FROM"))
+                                Stream.of("IS DISTINCT FROM"))
                         .collect(toImmutableList());
 
                 // basic case
@@ -1413,9 +1413,6 @@ public abstract class BaseJdbcConnectorTest
 
     private JoinCondition.Operator toJoinConditionOperator(String operator)
     {
-        if (operator.equals("IS NOT DISTINCT FROM")) {
-            return JoinCondition.Operator.IDENTICAL;
-        }
         return Stream.of(JoinCondition.Operator.values())
                 .filter(joinOperator -> joinOperator.getValue().equals(operator))
                 .collect(toOptional())
@@ -1574,22 +1571,29 @@ public abstract class BaseJdbcConnectorTest
         try (TestView sleepingView = createSleepingView(new Duration(1, MINUTES))) {
             String tableNameToScan = sleepingView.getName().toLowerCase(ENGLISH);
 
-            RemoteLogTracingEvent runningTracingEvent = new RemoteLogTracingEvent(event -> event.getQuery().toLowerCase(ENGLISH).contains(tableNameToScan) && event.getStatus() == RUNNING);
+            RemoteLogTracingEvent runningTracingEvent = new RemoteLogTracingEvent(event -> isScanOf(event, tableNameToScan) && event.getStatus() == RUNNING);
             startTracingDatabaseEvent(runningTracingEvent);
 
             String query = "SELECT * FROM " + sleepingView.getName();
-            Future<?> future = executor.submit(() -> assertQueryFails(query, "Query killed. Message: Killed by test"));
+            Future<?> future = executor.submit(() -> assertQueryFails(query, "Query killed by user '.*'\\. Message: Killed by test"));
             QueryId queryId = getQueryId(getQueryRunner(), query);
             assertEventually(() -> assertThat(runningTracingEvent.hasHappened()).isTrue());
             stopTracingDatabaseEvent(runningTracingEvent);
 
-            RemoteLogTracingEvent cancelledTracingEvent = new RemoteLogTracingEvent(event -> event.getQuery().toLowerCase(ENGLISH).contains(tableNameToScan) && event.getStatus() == CANCELLED);
+            RemoteLogTracingEvent cancelledTracingEvent = new RemoteLogTracingEvent(event -> isScanOf(event, tableNameToScan) && event.getStatus() == CANCELLED);
             startTracingDatabaseEvent(cancelledTracingEvent);
             assertUpdate(format("CALL system.runtime.kill_query(query_id => '%s', message => '%s')", queryId, "Killed by test"));
             future.get();
             assertEventually(() -> assertThat(cancelledTracingEvent.hasHappened()).isTrue());
             stopTracingDatabaseEvent(cancelledTracingEvent);
         }
+    }
+
+    private static boolean isScanOf(RemoteDatabaseEvent event, String tableName)
+    {
+        // Remote logs arrive asynchronously, so the CREATE VIEW of the sleeping view may be traced too
+        String query = event.getQuery().toLowerCase(ENGLISH);
+        return query.startsWith("select") && query.contains(tableName);
     }
 
     protected void startTracingDatabaseEvent(RemoteLogTracingEvent event)
@@ -2290,7 +2294,7 @@ public abstract class BaseJdbcConnectorTest
         assertEqualsIgnoreOrder(
                 dynamicFilteringResult.result(),
                 dynamicFilteringWithCompactionThresholdResult.result(),
-                "For query: \n " + query);
+                "Rows for query [%s]".formatted(query));
 
         MaterializedResultWithPlan noDynamicFilteringResult = getDistributedQueryRunner().executeWithPlan(
                 dynamicFiltering(false),
@@ -2299,7 +2303,7 @@ public abstract class BaseJdbcConnectorTest
         assertEqualsIgnoreOrder(
                 dynamicFilteringWithCompactionThresholdResult.result(),
                 noDynamicFilteringResult.result(),
-                "For query: \n " + query);
+                "Rows for query [%s]".formatted(query));
 
         assertThat(unfilteredInputPositions)
                 .as("unfiltered input positions")
@@ -2339,13 +2343,16 @@ public abstract class BaseJdbcConnectorTest
 
         assertUpdate("CREATE TABLE " + schemaTableName + "(a int)");
         try {
-            assertUpdate("CALL system.execute('INSERT INTO " + schemaTableName + " VALUES (1)')");
+            assertThat(query("CALL system.execute('INSERT INTO " + schemaTableName + " VALUES (1)')"))
+                    .matches("VALUES (VARCHAR 'row_count', BIGINT '1')");
             assertQuery("SELECT * FROM " + schemaTableName, "VALUES 1");
 
-            assertUpdate("CALL system.execute('UPDATE " + schemaTableName + " SET a = 2')");
+            assertThat(query("CALL system.execute('UPDATE " + schemaTableName + " SET a = 2')"))
+                    .matches("VALUES (VARCHAR 'row_count', BIGINT '1')");
             assertQuery("SELECT * FROM " + schemaTableName, "VALUES 2");
 
-            assertUpdate("CALL system.execute('DELETE FROM " + schemaTableName + "')");
+            assertThat(query("CALL system.execute('DELETE FROM " + schemaTableName + "')"))
+                    .matches("VALUES (VARCHAR 'row_count', BIGINT '1')");
             assertQueryReturnsEmptyResult("SELECT * FROM " + schemaTableName);
 
             assertUpdate("EXECUTE IMMEDIATE 'CALL system.execute(?)' USING 'DROP TABLE " + schemaTableName + "'");
@@ -2409,7 +2416,7 @@ public abstract class BaseJdbcConnectorTest
         assertEqualsIgnoreOrder(
                 dynamicFilteringResultWithQueryId.result(),
                 noDynamicFilteringResultWithQueryId.result(),
-                "For query: \n " + sql);
+                "Rows for query [%s]".formatted(sql));
 
         long dynamicFilteringInputPositions = getPhysicalInputPositions(dynamicFilteringResultWithQueryId.queryId());
         long noDynamicFilteringInputPositions = getPhysicalInputPositions(noDynamicFilteringResultWithQueryId.queryId());

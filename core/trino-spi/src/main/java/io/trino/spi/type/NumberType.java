@@ -15,6 +15,7 @@ package io.trino.spi.type;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.XxHash64;
+import io.trino.spi.Unstable;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.VariableWidthBlock;
@@ -26,10 +27,12 @@ import io.trino.spi.function.FlatFixedOffset;
 import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
+import io.trino.spi.function.SqlNullable;
 
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
 import static io.trino.spi.function.OperatorType.EQUAL;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
 import static io.trino.spi.function.OperatorType.LESS_THAN;
 import static io.trino.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
 import static io.trino.spi.function.OperatorType.READ_VALUE;
@@ -45,7 +48,6 @@ import static java.lang.invoke.MethodHandles.lookup;
  * <p>
  * Stack representation of this type is {@link TrinoNumber} which wraps a slice with the format documented below.
  * <b>Note:</b> the binary format is not stable and may change between releases. Only the Java API is considered stable.
- * <p>
  * <h2>Current unstable binary format</h2>
  * <pre>
  *    ┌───────────────────────┬─────────────────────────┐
@@ -86,13 +88,19 @@ public class NumberType
 
     private NumberType()
     {
-        super(new TypeSignature(NAME), TrinoNumber.class);
+        super(new TypeDescriptor(NAME), TrinoNumber.class);
     }
 
     @Override
     public String getDisplayName()
     {
         return NAME;
+    }
+
+    @Unstable
+    public static int currentMaxPrecision()
+    {
+        return MAX_DECIMAL_PRECISION;
     }
 
     @Override
@@ -151,11 +159,20 @@ public class NumberType
     }
 
     @ScalarOperator(EQUAL)
-    private static boolean equalOperator(TrinoNumber left, TrinoNumber right)
+    static boolean equalOperator(TrinoNumber left, TrinoNumber right)
     {
         if (left.isNaN() || right.isNaN()) {
             // NaN is not equal to any value, including itself
             return false;
+        }
+        return left.bytes().equals(right.bytes());
+    }
+
+    @ScalarOperator(IDENTICAL)
+    static boolean identicalOperator(@SqlNullable TrinoNumber left, @SqlNullable TrinoNumber right)
+    {
+        if (left == null || right == null) {
+            return left == right;
         }
         return left.bytes().equals(right.bytes());
     }

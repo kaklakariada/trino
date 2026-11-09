@@ -36,6 +36,8 @@ import java.util.OptionalInt;
 import static com.google.common.collect.Iterators.getOnlyElement;
 import static io.trino.SequencePageBuilder.createSequencePage;
 import static io.trino.SequencePageBuilder.createSequencePageWithDictionaryBlocks;
+import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.block.BlockAssertions.createLongSequenceBlock;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.operator.PageAssertions.assertPageEquals;
@@ -57,7 +59,6 @@ public class TestColumnarPageProcessor
         Page outputPage = getOnlyElement(
                 processor.process(
                         SESSION,
-                        new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
                         SourcePage.create(page)))
                 .orElseThrow(() -> new AssertionError("page is not present"));
@@ -73,7 +74,6 @@ public class TestColumnarPageProcessor
         Page outputPage = getOnlyElement(
                 processor.process(
                         SESSION,
-                        new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
                         SourcePage.create(page)))
                 .orElseThrow(() -> new AssertionError("page is not present"));
@@ -99,7 +99,7 @@ public class TestColumnarPageProcessor
         Map<Symbol, Integer> layout = ImmutableMap.of(
                 new Symbol(types.get(0), "$col_0"), 3,
                 new Symbol(types.get(1), "$col_1"), 1);
-        return compiler.compilePageProcessor(true, true, Optional.empty(), Optional.empty(), projections, layout, Optional.empty(), OptionalInt.of(MAX_BATCH_SIZE))
+        return compiler.compilePageProcessor(getCharVarcharCoercion(TEST_SESSION), true, true, Optional.empty(), Optional.empty(), projections, layout, Optional.empty(), OptionalInt.of(MAX_BATCH_SIZE))
                 .apply(DynamicFilter.EMPTY);
     }
 }

@@ -33,6 +33,7 @@ import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.MemoryContext;
 
 import java.util.List;
 import java.util.Optional;
@@ -61,7 +62,7 @@ public class LakehousePageSourceProviderFactory
     }
 
     @Override
-    public ConnectorPageSourceProvider createPageSourceProvider()
+    public ConnectorPageSourceProvider createPageSourceProvider(MemoryContext sharedMemoryContext)
     {
         // createPageSourceProvider is called for each scan within a query
         // we hold on to ConnectorPageSourceProvider instance to allow IcebergPageSourceProvider to reuse equality deletes between splits of the same scan
@@ -77,40 +78,28 @@ public class LakehousePageSourceProviderFactory
                     ConnectorTableHandle table,
                     Optional<ConnectorTableCredentials> tableCredentials,
                     List<ColumnHandle> columns,
-                    DynamicFilter dynamicFilter)
+                    DynamicFilter dynamicFilter,
+                    MemoryContext memoryContext)
             {
                 if (delegate == null) {
                     synchronized (this) {
                         if (delegate == null) {
-                            delegate = forHandle(split, table);
+                            delegate = forHandle(split, table, sharedMemoryContext);
                         }
                     }
                 }
-                return delegate.createPageSource(transaction, session, split, table, tableCredentials, columns, dynamicFilter);
-            }
-
-            @Override
-            public long getMemoryUsage()
-            {
-                ConnectorPageSourceProvider provider = delegate;
-                if (provider == null) {
-                    // No page source was created, so no memory is used
-                    return 0;
-                }
-                return provider.getMemoryUsage();
+                return delegate.createPageSource(transaction, session, split, table, tableCredentials, columns, dynamicFilter, memoryContext);
             }
         };
     }
 
-    private ConnectorPageSourceProvider forHandle(ConnectorSplit split, ConnectorTableHandle handle)
+    private ConnectorPageSourceProvider forHandle(ConnectorSplit split, ConnectorTableHandle handle, MemoryContext sharedMemoryContext)
     {
-        if (split instanceof FilesTableSplit) {
-            return icebergPageSourceProviderFactory.createPageSourceProvider();
+        if (split instanceof FilesTableSplit || handle instanceof IcebergTableHandle) {
+            return icebergPageSourceProviderFactory.createPageSourceProvider(sharedMemoryContext);
         }
-
         return switch (handle) {
             case HiveTableHandle _ -> hivePageSourceProvider;
-            case IcebergTableHandle _ -> icebergPageSourceProviderFactory.createPageSourceProvider();
             case DeltaLakeTableHandle _ -> deltaLakePageSourceProvider;
             case HudiTableHandle _ -> hudiPageSourceProvider;
             default -> throw new UnsupportedOperationException("Unsupported table handle " + handle.getClass() + " with split " + split.getClass());

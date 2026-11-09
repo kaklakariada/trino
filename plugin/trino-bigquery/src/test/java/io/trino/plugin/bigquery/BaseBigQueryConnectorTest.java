@@ -23,6 +23,7 @@ import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.trino.Session;
+import io.trino.plugin.bigquery.BigQueryQueryRunner.BigQuerySqlExecutor;
 import io.trino.spi.QueryId;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
@@ -55,7 +56,6 @@ import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.common.base.Throwables.getCausalChain;
 import static com.google.common.collect.ImmutableMultiset.toImmutableMultiset;
 import static com.google.common.collect.MoreCollectors.onlyElement;
-import static io.trino.plugin.bigquery.BigQueryQueryRunner.BigQuerySqlExecutor;
 import static io.trino.plugin.bigquery.BigQueryQueryRunner.TEST_SCHEMA;
 import static io.trino.spi.connector.ConnectorMetadata.MODIFYING_ROWS_MESSAGE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -128,6 +128,46 @@ public abstract class BaseBigQueryConnectorTest
     }
 
     @Test
+    @Override // BigQuery connector exposes location property
+    public void testShowCreateSchema()
+    {
+        String schemaName = getSession().getSchema().orElseThrow();
+        assertThat((String) computeScalar("SHOW CREATE SCHEMA " + schemaName))
+                .isEqualTo(
+                        """
+                        CREATE SCHEMA %s.%s
+                        WITH (
+                           location = 'US'
+                        )""".formatted(getSession().getCatalog().orElseThrow(), schemaName));
+    }
+
+    @Test
+    public void testCreateSchemaWithLocation()
+    {
+        String schemaName = "test_schema_with_location_" + randomNameSuffix();
+        try {
+            assertUpdate("CREATE SCHEMA " + schemaName + " WITH (location = 'us-east1')");
+            assertThat((String) computeScalar("SHOW CREATE SCHEMA " + schemaName))
+                    .contains("location = 'us-east1'");
+        }
+        finally {
+            assertUpdate("DROP SCHEMA IF EXISTS " + schemaName);
+        }
+    }
+
+    @Test
+    public void testCreateSchemaWithInvalidLocation()
+    {
+        String schemaName = "test_schema_with_invalid_location_" + randomNameSuffix();
+        try {
+            assertQueryFails("CREATE SCHEMA " + schemaName + " WITH (location = 'invalid-location')", "Failed to create schema.*");
+        }
+        finally {
+            assertUpdate("DROP SCHEMA IF EXISTS " + schemaName);
+        }
+    }
+
+    @Test
     @Disabled // Disable this test because this test is slow and BigQuery connector doesn't support sample pushdown
     @Override
     public void testTableSampleBernoulli() {}
@@ -143,7 +183,7 @@ public abstract class BaseBigQueryConnectorTest
     protected MaterializedResult getDescribeOrdersResult()
     {
         // shippriority column is bigint (not integer) in BigQuery connector
-        return resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+        return resultBuilder(VARCHAR, VARCHAR, VARCHAR, VARCHAR)
                 .row("orderkey", "bigint", "", "")
                 .row("custkey", "bigint", "", "")
                 .row("orderstatus", "varchar", "", "")
@@ -294,6 +334,15 @@ public abstract class BaseBigQueryConnectorTest
     }
 
     @Test
+    @Override
+    public void testCharToVarcharCastCoercionAcrossPushdown()
+    {
+        assertThatThrownBy(super::testCharToVarcharCastCoercionAcrossPushdown)
+                .hasMessage("Unsupported column type: char(5)")
+                .hasStackTraceContaining("SQL: CREATE TABLE test_char_to_varchar_cast");
+    }
+
+    @Test
     public void testEmptyProjectionTable()
     {
         testEmptyProjection(
@@ -393,6 +442,12 @@ public abstract class BaseBigQueryConnectorTest
     protected boolean isColumnNameRejected(Exception exception, String columnName, boolean delimited)
     {
         return nullToEmpty(exception.getMessage()).matches(".*Invalid field name \"%s\". Fields must contain the allowed characters, and be at most 300 characters long..*".formatted(columnName.replace("\\", "\\\\")));
+    }
+
+    @Override
+    protected boolean isRowFieldNameRejected(Exception exception, String fieldName)
+    {
+        return nullToEmpty(exception.getMessage()).matches(".*Invalid field name \"%s\". Fields must contain .*".formatted(fieldName.replace("\\", "\\\\")));
     }
 
     @Test // TODO: Move this test to BaseConnectorTest
@@ -939,7 +994,7 @@ public abstract class BaseBigQueryConnectorTest
                 )\
                 """.formatted(expectedLabel);
 
-        assertEventually(new Duration(1, MINUTES), () -> assertThat(bigQuerySqlExecutor.executeQuery(checkForLabelQuery).getValues())
+        assertEventually(new Duration(3, MINUTES), new Duration(2, SECONDS), () -> assertThat(bigQuerySqlExecutor.executeQuery(checkForLabelQuery).getValues())
                 .extracting(values -> values.get("query").getStringValue())
                 .singleElement()
                 .matches(statement -> statement.contains(expectedView)));
@@ -1241,16 +1296,20 @@ public abstract class BaseBigQueryConnectorTest
 
         assertUpdate("CREATE TABLE " + schemaTableName + "(a int)");
         try {
-            assertUpdate("CALL system.execute('INSERT INTO " + schemaTableName + " VALUES (1)')");
+            assertThat(query("CALL system.execute('INSERT INTO " + schemaTableName + " VALUES (1)')"))
+                    .matches("VALUES (VARCHAR 'row_count', BIGINT '1')");
             assertQuery("SELECT * FROM " + schemaTableName, "VALUES 1");
 
-            assertUpdate("CALL system.execute('UPDATE " + schemaTableName + " SET a = 2 WHERE true')");
+            assertThat(query("CALL system.execute('UPDATE " + schemaTableName + " SET a = 2 WHERE true')"))
+                    .matches("VALUES (VARCHAR 'row_count', BIGINT '1')");
             assertQuery("SELECT * FROM " + schemaTableName, "VALUES 2");
 
-            assertUpdate("CALL system.execute('DELETE FROM " + schemaTableName + " WHERE true')");
+            assertThat(query("CALL system.execute('DELETE FROM " + schemaTableName + " WHERE true')"))
+                    .matches("VALUES (VARCHAR 'row_count', BIGINT '1')");
             assertQueryReturnsEmptyResult("SELECT * FROM " + schemaTableName);
 
-            assertUpdate("CALL system.execute('DROP TABLE " + schemaTableName + "')");
+            assertThat(query("CALL system.execute('DROP TABLE " + schemaTableName + "')"))
+                    .matches("VALUES (VARCHAR 'row_count', BIGINT '0')");
             assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
         }
         finally {

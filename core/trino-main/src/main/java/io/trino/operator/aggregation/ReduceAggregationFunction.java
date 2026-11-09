@@ -41,8 +41,8 @@ import java.lang.invoke.MethodHandle;
 import static io.trino.operator.aggregation.AggregationFunctionAdapter.AggregationParameterKind.INPUT_CHANNEL;
 import static io.trino.operator.aggregation.AggregationFunctionAdapter.AggregationParameterKind.STATE;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
-import static io.trino.spi.type.TypeSignature.functionType;
-import static io.trino.spi.type.TypeSignature.typeVariable;
+import static io.trino.spi.type.TypeTemplates.functionType;
+import static io.trino.spi.type.TypeTemplates.typeVariable;
 import static io.trino.util.Reflection.methodHandle;
 import static java.lang.String.format;
 
@@ -86,6 +86,7 @@ public class ReduceAggregationFunction
                                 .argumentType(functionType(typeVariable("S"), typeVariable("S"), typeVariable("S")))
                                 .build())
                         .description("Reduce input elements into a single value")
+                        .nullable()
                         .build(),
                 AggregationFunctionMetadata.builder()
                         .intermediateType(typeVariable("S"))

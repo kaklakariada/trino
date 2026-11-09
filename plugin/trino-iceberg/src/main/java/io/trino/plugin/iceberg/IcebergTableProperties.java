@@ -17,6 +17,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
+import io.airlift.units.DataSize;
 import io.trino.plugin.hive.HiveCompressionCodec;
 import io.trino.plugin.hive.HiveCompressionCodecs;
 import io.trino.plugin.hive.HiveCompressionOption;
@@ -35,6 +36,8 @@ import java.util.Set;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.trino.plugin.base.session.PropertyMetadataUtil.dataSizeProperty;
+import static io.trino.plugin.hive.parquet.ParquetWriterConfig.PARQUET_WRITER_MAX_ROW_GROUP_SIZE;
 import static io.trino.plugin.iceberg.IcebergConfig.FORMAT_VERSION_SUPPORT_MAX;
 import static io.trino.plugin.iceberg.IcebergConfig.FORMAT_VERSION_SUPPORT_MIN;
 import static io.trino.plugin.iceberg.IcebergFileFormat.AVRO;
@@ -50,10 +53,15 @@ import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT;
+import static org.apache.iceberg.TableProperties.ENCRYPTION_TABLE_KEY;
 import static org.apache.iceberg.TableProperties.FORMAT_VERSION;
+import static org.apache.iceberg.TableProperties.GC_ENABLED;
+import static org.apache.iceberg.TableProperties.METRICS_MAX_INFERRED_COLUMN_DEFAULTS;
 import static org.apache.iceberg.TableProperties.ORC_BLOOM_FILTER_COLUMNS;
 import static org.apache.iceberg.TableProperties.ORC_BLOOM_FILTER_FPP;
+import static org.apache.iceberg.TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES;
 import static org.apache.iceberg.TableProperties.RESERVED_PROPERTIES;
+import static org.apache.iceberg.TableProperties.WRITE_TARGET_FILE_SIZE_BYTES;
 
 public class IcebergTableProperties
 {
@@ -66,11 +74,15 @@ public class IcebergTableProperties
     public static final String MAX_COMMIT_RETRY = "max_commit_retry";
     public static final String DELETE_AFTER_COMMIT_ENABLED = "delete_after_commit_enabled";
     public static final String MAX_PREVIOUS_VERSIONS = "max_previous_versions";
+    public static final String MAX_INFERRED_METRICS_COLUMN_DEFAULTS = "max_inferred_metrics_column_defaults";
     public static final String ORC_BLOOM_FILTER_COLUMNS_PROPERTY = "orc_bloom_filter_columns";
     public static final String ORC_BLOOM_FILTER_FPP_PROPERTY = "orc_bloom_filter_fpp";
     public static final String PARQUET_BLOOM_FILTER_COLUMNS_PROPERTY = "parquet_bloom_filter_columns";
+    public static final String TARGET_MAX_FILE_SIZE = "target_max_file_size";
+    public static final String PARQUET_WRITER_ROW_GROUP_SIZE = "parquet_writer_row_group_size";
     public static final String OBJECT_STORE_LAYOUT_ENABLED_PROPERTY = "object_store_layout_enabled";
     public static final String DATA_LOCATION_PROPERTY = "data_location";
+    public static final String GC_ENABLED_PROPERTY = "gc_enabled";
     public static final String EXTRA_PROPERTIES_PROPERTY = "extra_properties";
 
     public static final Set<String> SUPPORTED_PROPERTIES = ImmutableSet.<String>builder()
@@ -83,21 +95,30 @@ public class IcebergTableProperties
             .add(MAX_COMMIT_RETRY)
             .add(DELETE_AFTER_COMMIT_ENABLED)
             .add(MAX_PREVIOUS_VERSIONS)
+            .add(MAX_INFERRED_METRICS_COLUMN_DEFAULTS)
             .add(ORC_BLOOM_FILTER_COLUMNS_PROPERTY)
             .add(ORC_BLOOM_FILTER_FPP_PROPERTY)
             .add(OBJECT_STORE_LAYOUT_ENABLED_PROPERTY)
             .add(DATA_LOCATION_PROPERTY)
+            .add(GC_ENABLED_PROPERTY)
             .add(EXTRA_PROPERTIES_PROPERTY)
             .add(PARQUET_BLOOM_FILTER_COLUMNS_PROPERTY)
+            .add(TARGET_MAX_FILE_SIZE)
+            .add(PARQUET_WRITER_ROW_GROUP_SIZE)
             .build();
 
     // These properties are used by Trino or Iceberg internally and cannot be set directly by users through extra_properties
     public static final Set<String> PROTECTED_ICEBERG_NATIVE_PROPERTIES = ImmutableSet.<String>builder()
             .addAll(RESERVED_PROPERTIES)
+            .add(METRICS_MAX_INFERRED_COLUMN_DEFAULTS)
             .add(ORC_BLOOM_FILTER_COLUMNS)
             .add(ORC_BLOOM_FILTER_FPP)
             .add(DEFAULT_FILE_FORMAT)
             .add(FORMAT_VERSION)
+            .add(WRITE_TARGET_FILE_SIZE_BYTES)
+            .add(PARQUET_ROW_GROUP_SIZE_BYTES)
+            .add(ENCRYPTION_TABLE_KEY)
+            .add(GC_ENABLED)
             .build();
 
     private final List<PropertyMetadata<?>> tableProperties;
@@ -165,6 +186,11 @@ public class IcebergTableProperties
                         "Whether to delete old tracked metadata files after each table commit",
                         icebergConfig.isDeleteAfterCommitEnabled().orElse(null),
                         false))
+                .add(booleanProperty(
+                        GC_ENABLED_PROPERTY,
+                        "Allows garbage collection operations such as expiring snapshots and removing orphan files",
+                        null,
+                        false))
                 .add(integerProperty(
                         MAX_PREVIOUS_VERSIONS,
                         "The number of old metadata files to keep",
@@ -172,6 +198,16 @@ public class IcebergTableProperties
                         value -> {
                             if (value < 1) {
                                 throw new TrinoException(INVALID_TABLE_PROPERTY, "%s must be greater than or equal to 1".formatted(MAX_PREVIOUS_VERSIONS));
+                            }
+                        },
+                        false))
+                .add(integerProperty(
+                        MAX_INFERRED_METRICS_COLUMN_DEFAULTS,
+                        "The maximum number of columns for which metrics are collected by default",
+                        null,
+                        value -> {
+                            if (value < 0) {
+                                throw new TrinoException(INVALID_TABLE_PROPERTY, "%s must be greater than or equal to 0".formatted(MAX_INFERRED_METRICS_COLUMN_DEFAULTS));
                             }
                         },
                         false))
@@ -205,6 +241,18 @@ public class IcebergTableProperties
                                 .map(name -> name.toLowerCase(ENGLISH))
                                 .collect(toImmutableList()),
                         value -> value))
+                .add(dataSizeProperty(
+                        TARGET_MAX_FILE_SIZE,
+                        "Target maximum size of written files; the actual size may be larger",
+                        null,
+                        value -> validateMaxDataSize(TARGET_MAX_FILE_SIZE, value, DataSize.ofBytes(Long.MAX_VALUE)),
+                        false))
+                .add(dataSizeProperty(
+                        PARQUET_WRITER_ROW_GROUP_SIZE,
+                        "Parquet writer row group size",
+                        null,
+                        value -> validateMaxDataSize(PARQUET_WRITER_ROW_GROUP_SIZE, value, DataSize.valueOf(PARQUET_WRITER_MAX_ROW_GROUP_SIZE)),
+                        false))
                 .add(new PropertyMetadata<>(
                         EXTRA_PROPERTIES_PROPERTY,
                         "Extra table properties",
@@ -326,6 +374,11 @@ public class IcebergTableProperties
         return Optional.ofNullable((Integer) tableProperties.get(MAX_PREVIOUS_VERSIONS));
     }
 
+    public static Optional<Integer> getMaxInferredMetricsColumnDefaults(Map<String, Object> tableProperties)
+    {
+        return Optional.ofNullable((Integer) tableProperties.get(MAX_INFERRED_METRICS_COLUMN_DEFAULTS));
+    }
+
     public static List<String> getOrcBloomFilterColumns(Map<String, Object> tableProperties)
     {
         List<String> orcBloomFilterColumns = (List<String>) tableProperties.get(ORC_BLOOM_FILTER_COLUMNS_PROPERTY);
@@ -344,6 +397,13 @@ public class IcebergTableProperties
         }
     }
 
+    private static void validateMaxDataSize(String name, DataSize value, DataSize max)
+    {
+        if (value.compareTo(max) > 0) {
+            throw new TrinoException(INVALID_TABLE_PROPERTY, "%s must be at most %s: %s".formatted(name, max, value));
+        }
+    }
+
     public static List<String> getParquetBloomFilterColumns(Map<String, Object> tableProperties)
     {
         List<String> parquetBloomFilterColumns = (List<String>) tableProperties.get(PARQUET_BLOOM_FILTER_COLUMNS_PROPERTY);
@@ -355,13 +415,35 @@ public class IcebergTableProperties
         return (boolean) tableProperties.getOrDefault(OBJECT_STORE_LAYOUT_ENABLED_PROPERTY, false);
     }
 
+    public static Optional<DataSize> getTargetMaxFileSize(Map<String, Object> tableProperties)
+    {
+        return Optional.ofNullable((DataSize) tableProperties.get(TARGET_MAX_FILE_SIZE));
+    }
+
+    public static Optional<DataSize> getParquetWriterRowGroupSize(Map<String, Object> tableProperties)
+    {
+        return Optional.ofNullable((DataSize) tableProperties.get(PARQUET_WRITER_ROW_GROUP_SIZE));
+    }
+
     public static Optional<String> getDataLocation(Map<String, Object> tableProperties)
     {
         return Optional.ofNullable((String) tableProperties.get(DATA_LOCATION_PROPERTY));
     }
 
+    public static Optional<Boolean> getGcEnabled(Map<String, Object> tableProperties)
+    {
+        return Optional.ofNullable((Boolean) tableProperties.get(GC_ENABLED_PROPERTY));
+    }
+
     public static Optional<Map<String, String>> getExtraProperties(Map<String, Object> tableProperties)
     {
         return Optional.ofNullable((Map<String, String>) tableProperties.get(EXTRA_PROPERTIES_PROPERTY));
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T getProperty(Map<String, Optional<Object>> properties, String key)
+    {
+        return (T) properties.get(key)
+                .orElseThrow(() -> new IllegalArgumentException("The %s property cannot be empty".formatted(key)));
     }
 }

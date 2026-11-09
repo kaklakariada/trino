@@ -15,7 +15,8 @@ package io.trino.operator.window;
 
 import org.junit.jupiter.api.Test;
 
-import static io.trino.SessionTestUtils.TEST_SESSION;
+import java.util.Optional;
+
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -24,11 +25,17 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 public class TestRankFunction
         extends AbstractTestWindowFunction
 {
+    @Override
+    protected Optional<WindowFunctionUnderTest> windowFunctionUnderTest()
+    {
+        return Optional.of(new WindowFunctionUnderTest("rank", "rank()"));
+    }
+
     @Test
     public void testRank()
     {
         assertWindowQuery("rank() OVER (ORDER BY orderstatus)",
-                resultBuilder(TEST_SESSION, INTEGER, VARCHAR, BIGINT)
+                resultBuilder(INTEGER, VARCHAR, BIGINT)
                         .row(3, "F", 1L)
                         .row(5, "F", 1L)
                         .row(6, "F", 1L)
@@ -41,7 +48,7 @@ public class TestRankFunction
                         .row(34, "O", 5L)
                         .build());
         assertWindowQueryWithNulls("rank() OVER (ORDER BY orderstatus)",
-                resultBuilder(TEST_SESSION, BIGINT, VARCHAR, BIGINT)
+                resultBuilder(BIGINT, VARCHAR, BIGINT)
                         .row(3L, "F", 1L)
                         .row(5L, "F", 1L)
                         .row(6L, "F", 1L)

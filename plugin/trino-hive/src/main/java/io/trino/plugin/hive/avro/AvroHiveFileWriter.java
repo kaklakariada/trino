@@ -15,6 +15,7 @@ package io.trino.plugin.hive.avro;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.CountingOutputStream;
+import io.trino.filesystem.TrinoOutputStream;
 import io.trino.hive.formats.avro.AvroCompressionKind;
 import io.trino.hive.formats.avro.AvroFileWriter;
 import io.trino.hive.formats.avro.AvroTypeBlockHandler;
@@ -22,6 +23,7 @@ import io.trino.hive.formats.avro.AvroTypeException;
 import io.trino.hive.formats.avro.AvroTypeManager;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.plugin.hive.FileWriter;
+import io.trino.plugin.hive.RollbackAction;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
@@ -32,7 +34,6 @@ import org.apache.avro.Schema.Field;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -54,25 +55,27 @@ public final class AvroHiveFileWriter
 
     private final AvroFileWriter fileWriter;
     private final List<Block> typeCorrectNullBlocks;
+    private final TrinoOutputStream outputStream;
     private final CountingOutputStream countingOutputStream;
     private final AggregatedMemoryContext outputStreamMemoryContext;
 
-    private final Closeable rollbackAction;
+    private final RollbackAction rollbackAction;
 
     public AvroHiveFileWriter(
-            OutputStream outputStream,
+            TrinoOutputStream outputStream,
             AggregatedMemoryContext outputStreamMemoryContext,
             Schema fileSchema,
             AvroTypeManager typeManager,
             AvroTypeBlockHandler avroTypeBlockHandler,
-            Closeable rollbackAction,
+            RollbackAction rollbackAction,
             List<String> inputColumnNames,
             List<Type> inputColumnTypes,
             AvroCompressionKind compressionKind,
             Map<String, String> metadata)
             throws IOException, AvroTypeException
     {
-        countingOutputStream = new CountingOutputStream(requireNonNull(outputStream, "outputStream is null"));
+        this.outputStream = requireNonNull(outputStream, "outputStream is null");
+        countingOutputStream = new CountingOutputStream(outputStream);
         this.outputStreamMemoryContext = requireNonNull(outputStreamMemoryContext, "outputStreamMemoryContext is null");
         verify(requireNonNull(fileSchema, "fileSchema is null").getType() == Schema.Type.RECORD, "file schema must be record schema");
         verify(inputColumnNames.size() == inputColumnTypes.size(), "column names must be equal to column types");
@@ -131,7 +134,7 @@ public final class AvroHiveFileWriter
     }
 
     @Override
-    public Closeable commit()
+    public RollbackAction commit()
     {
         try {
             fileWriter.close();
@@ -145,8 +148,8 @@ public final class AvroHiveFileWriter
     @Override
     public void rollback()
     {
-        try (rollbackAction) {
-            fileWriter.close();
+        try (Closeable _ = rollbackAction::run) {
+            outputStream.abort();
         }
         catch (Exception e) {
             throw new TrinoException(HIVE_WRITER_CLOSE_ERROR, "Error rolling back write to Hive", e);

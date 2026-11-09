@@ -14,7 +14,6 @@
 package io.trino.plugin.iceberg.catalog.jdbc;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.filesystem.Location;
 import io.trino.plugin.iceberg.BaseIcebergConnectorSmokeTest;
 import io.trino.plugin.iceberg.IcebergConfig;
 import io.trino.plugin.iceberg.IcebergQueryRunner;
@@ -27,6 +26,7 @@ import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.jdbc.JdbcCatalog;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.view.View;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -39,8 +39,6 @@ import java.nio.file.Path;
 
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
-import static io.trino.plugin.iceberg.IcebergTestUtils.checkOrcFileSorting;
-import static io.trino.plugin.iceberg.IcebergTestUtils.checkParquetFileSorting;
 import static io.trino.plugin.iceberg.catalog.jdbc.TestingIcebergJdbcServer.PASSWORD;
 import static io.trino.plugin.iceberg.catalog.jdbc.TestingIcebergJdbcServer.USER;
 import static io.trino.testing.TestingNames.randomNameSuffix;
@@ -50,7 +48,6 @@ import static org.apache.iceberg.CatalogProperties.CATALOG_IMPL;
 import static org.apache.iceberg.CatalogProperties.URI;
 import static org.apache.iceberg.CatalogProperties.WAREHOUSE_LOCATION;
 import static org.apache.iceberg.CatalogUtil.buildIcebergCatalog;
-import static org.apache.iceberg.FileFormat.PARQUET;
 import static org.apache.iceberg.jdbc.JdbcCatalog.PROPERTY_PREFIX;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -63,7 +60,7 @@ public abstract class BaseIcebergJdbcCatalogConnectorSmokeTest
 {
     private final SchemaVersion schemaVersion;
 
-    private JdbcCatalog jdbcCatalog;
+    protected JdbcCatalog jdbcCatalog;
     private File warehouseLocation;
 
     public BaseIcebergJdbcCatalogConnectorSmokeTest(SchemaVersion schemaVersion)
@@ -117,6 +114,7 @@ public abstract class BaseIcebergJdbcCatalogConnectorSmokeTest
                                 .put("iceberg.jdbc-catalog.default-warehouse-dir", warehouseLocation.getAbsolutePath())
                                 .put("iceberg.jdbc-catalog.retryable-status-codes", "57P01,57P05")
                                 .buildOrThrow())
+                .addIcebergProperty("fs.hadoop.enabled", "true")
                 .setInitialTables(REQUIRED_TPCH_TABLES)
                 .build();
     }
@@ -158,6 +156,25 @@ public abstract class BaseIcebergJdbcCatalogConnectorSmokeTest
 
         assertThat(jdbcCatalog.viewExists(sparkViewIdentifier)).isFalse();
         assertThat(jdbcCatalog.viewExists(trinoViewIdentifier)).isFalse();
+    }
+
+    @Test
+    void testReplaceViewReuseExistingLocation()
+    {
+        String viewName = "test_replace_view_reuse_location_" + randomNameSuffix();
+        TableIdentifier identifier = toIdentifier(viewName);
+
+        assertUpdate("CREATE VIEW " + viewName + " AS SELECT nationkey FROM nation");
+        View initialView = jdbcCatalog.loadView(identifier);
+        assertThat(initialView.location()).isNotNull();
+
+        assertUpdate("CREATE OR REPLACE VIEW " + viewName + " AS SELECT nationkey, name FROM nation");
+        View replacedView = jdbcCatalog.loadView(identifier);
+
+        assertThat(replacedView.location()).isEqualTo(initialView.location());
+        assertThat(replacedView.currentVersion().versionId()).isEqualTo(initialView.currentVersion().versionId() + 1);
+
+        assertUpdate("DROP VIEW " + viewName);
     }
 
     @Test
@@ -230,7 +247,7 @@ public abstract class BaseIcebergJdbcCatalogConnectorSmokeTest
         return Files.exists(Path.of(location));
     }
 
-    private TableIdentifier toIdentifier(String tableName)
+    protected TableIdentifier toIdentifier(String tableName)
     {
         return TableIdentifier.of(getSession().getSchema().orElseThrow(), tableName);
     }
@@ -244,14 +261,5 @@ public abstract class BaseIcebergJdbcCatalogConnectorSmokeTest
         catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-    }
-
-    @Override
-    protected boolean isFileSorted(Location path, String sortColumnName)
-    {
-        if (format == PARQUET) {
-            return checkParquetFileSorting(fileSystem.newInputFile(path), sortColumnName);
-        }
-        return checkOrcFileSorting(fileSystem, path, sortColumnName);
     }
 }

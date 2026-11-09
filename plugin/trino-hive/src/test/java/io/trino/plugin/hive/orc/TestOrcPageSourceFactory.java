@@ -27,6 +27,7 @@ import io.trino.plugin.hive.HiveConfig;
 import io.trino.plugin.hive.HivePageSourceFactory;
 import io.trino.plugin.hive.Schema;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
@@ -198,7 +199,7 @@ public class TestOrcPageSourceFactory
     {
         List<Nation> expected = new ArrayList<>();
         for (Nation nation : ImmutableList.copyOf(new NationGenerator().iterator())) {
-            if (nationKeyPredicate.isPresent() && nationKeyPredicate.getAsLong() != nation.nationKey()) {
+            if (nationKeyPredicate.isPresent() && nationKeyPredicate.orElseThrow() != nation.nationKey()) {
                 continue;
             }
             if (deletedRows.test(nation.nationKey())) {
@@ -229,7 +230,7 @@ public class TestOrcPageSourceFactory
     {
         TupleDomain<HiveColumnHandle> tupleDomain = TupleDomain.all();
         if (nationKeyPredicate.isPresent()) {
-            tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(toHiveColumnHandle(NATION_KEY, 0), Domain.singleValue(INTEGER, nationKeyPredicate.getAsLong())));
+            tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(toHiveColumnHandle(NATION_KEY, 0), Domain.singleValue(INTEGER, nationKeyPredicate.orElseThrow())));
         }
 
         List<HiveColumnHandle> columnHandles = columns.entrySet().stream()
@@ -259,7 +260,8 @@ public class TestOrcPageSourceFactory
                         acidInfo,
                         OptionalInt.empty(),
                         false,
-                        NO_ACID_TRANSACTION)
+                        NO_ACID_TRANSACTION,
+                        MemoryContext.NO_LIMIT)
                 .orElseThrow();
 
         int nationKeyColumn = columnNames.indexOf("n_nationkey");

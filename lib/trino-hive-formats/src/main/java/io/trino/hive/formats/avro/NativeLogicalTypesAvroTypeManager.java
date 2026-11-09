@@ -110,31 +110,14 @@ public class NativeLogicalTypesAvroTypeManager
     static Type getAvroLogicalTypeSpiType(AvroLogicalType avroLogicalType)
     {
         return switch (avroLogicalType) {
-            case DateLogicalType __ -> DateType.DATE;
+            case DateLogicalType _ -> DateType.DATE;
             case BytesDecimalLogicalType bytesDecimalLogicalType -> DecimalType.createDecimalType(bytesDecimalLogicalType.precision(), bytesDecimalLogicalType.scale());
             case FixedDecimalLogicalType fixedDecimalLogicalType -> DecimalType.createDecimalType(fixedDecimalLogicalType.precision(), fixedDecimalLogicalType.scale());
-            case TimeMillisLogicalType __ -> TimeType.TIME_MILLIS;
-            case TimeMicrosLogicalType __ -> TimeType.TIME_MICROS;
-            case TimestampMillisLogicalType __ -> TimestampType.TIMESTAMP_MILLIS;
-            case TimestampMicrosLogicalType __ -> TimestampType.TIMESTAMP_MICROS;
-            case StringUUIDLogicalType __ -> UuidType.UUID;
-        };
-    }
-
-    static Type getAvroLogicalTypeSpiType(LogicalType logicalType)
-    {
-        return switch (logicalType.getName()) {
-            case DATE -> DateType.DATE;
-            case DECIMAL -> {
-                LogicalTypes.Decimal decimal = (LogicalTypes.Decimal) logicalType;
-                yield DecimalType.createDecimalType(decimal.getPrecision(), decimal.getScale());
-            }
-            case TIME_MILLIS -> TimeType.TIME_MILLIS;
-            case TIME_MICROS -> TimeType.TIME_MICROS;
-            case TIMESTAMP_MILLIS -> TimestampType.TIMESTAMP_MILLIS;
-            case TIMESTAMP_MICROS -> TimestampType.TIMESTAMP_MICROS;
-            case UUID -> UuidType.UUID;
-            default -> throw new IllegalStateException("Unreachable unfiltered logical type");
+            case TimeMillisLogicalType _ -> TimeType.TIME_MILLIS;
+            case TimeMicrosLogicalType _ -> TimeType.TIME_MICROS;
+            case TimestampMillisLogicalType _ -> TimestampType.TIMESTAMP_MILLIS;
+            case TimestampMicrosLogicalType _ -> TimestampType.TIMESTAMP_MICROS;
+            case StringUUIDLogicalType _ -> UuidType.UUID;
         };
     }
 
@@ -228,10 +211,10 @@ public class NativeLogicalTypesAvroTypeManager
     static Optional<AvroLogicalType> validateAndLogIssues(Schema schema)
     {
         switch (validateLogicalType(schema)) {
-            case NoLogicalType ignored -> {
+            case NoLogicalType _ -> {
                 return Optional.empty();
             }
-            case NonNativeAvroLogicalType ignored -> {
+            case NonNativeAvroLogicalType _ -> {
                 log.debug("Unrecognized logical type %s", schema);
                 return Optional.empty();
             }
@@ -257,7 +240,7 @@ public class NativeLogicalTypesAvroTypeManager
                 logicalType = fromSchemaIgnoreInvalid(schema);
                 break;
             case LOCAL_TIMESTAMP_MICROS, LOCAL_TIMESTAMP_MILLIS:
-                log.debug("Logical type %s not currently supported by by Trino", typeName);
+                log.debug("Logical type %s not currently supported by Trino", typeName);
                 // fall through
             default:
                 return new NonNativeAvroLogicalType(typeName);

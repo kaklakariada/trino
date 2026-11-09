@@ -42,6 +42,7 @@ public class OAuth2Config
     private Set<String> scopes = ImmutableSet.of(OPENID_SCOPE);
     private String principalField = "sub";
     private List<String> additionalAudiences = Collections.emptyList();
+    private boolean requireAudience;
     private Duration challengeTimeout = new Duration(15, TimeUnit.MINUTES);
     private Duration maxClockSkew = new Duration(1, TimeUnit.MINUTES);
     private Optional<String> jwtType = Optional.empty();
@@ -49,6 +50,7 @@ public class OAuth2Config
     private Optional<File> userMappingFile = Optional.empty();
     private boolean enableRefreshTokens;
     private boolean enableDiscovery = true;
+    private Optional<String> domainHint = Optional.empty();
 
     public Optional<String> getStateKey()
     {
@@ -118,6 +120,19 @@ public class OAuth2Config
     public OAuth2Config setAdditionalAudiences(List<String> additionalAudiences)
     {
         this.additionalAudiences = ImmutableList.copyOf(additionalAudiences);
+        return this;
+    }
+
+    public boolean isRequireAudience()
+    {
+        return requireAudience;
+    }
+
+    @Config("http-server.authentication.oauth2.require-audience")
+    @ConfigDescription("Reject access tokens without an audience claim")
+    public OAuth2Config setRequireAudience(boolean requireAudience)
+    {
+        this.requireAudience = requireAudience;
         return this;
     }
 
@@ -241,6 +256,19 @@ public class OAuth2Config
     public OAuth2Config setEnableDiscovery(boolean enableDiscovery)
     {
         this.enableDiscovery = enableDiscovery;
+        return this;
+    }
+
+    public Optional<String> getDomainHint()
+    {
+        return domainHint;
+    }
+
+    @Config("http-server.authentication.oauth2.domain-hint")
+    @ConfigDescription("Domain hint to restrict SSO account selection to a specific domain (e.g. for Azure AD)")
+    public OAuth2Config setDomainHint(String domainHint)
+    {
+        this.domainHint = Optional.ofNullable(domainHint);
         return this;
     }
 }

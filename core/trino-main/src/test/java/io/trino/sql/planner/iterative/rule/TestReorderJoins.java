@@ -23,7 +23,6 @@ import io.trino.metadata.TestingFunctionResolution;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Type;
 import io.trino.sql.ir.Call;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy;
@@ -46,11 +45,13 @@ import static io.airlift.testing.Closeables.closeAllRuntimeException;
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
 import static io.trino.SystemSessionProperties.JOIN_MAX_BROADCAST_TABLE_SIZE;
 import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
+import static io.trino.SystemSessionProperties.MAX_REORDERED_JOINS;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
-import static io.trino.sql.ir.Comparison.Operator.EQUAL;
-import static io.trino.sql.ir.Comparison.Operator.LESS_THAN;
+import static io.trino.sql.ir.ComparisonOperator.EQUAL;
+import static io.trino.sql.ir.ComparisonOperator.LESS_THAN;
+import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.AUTOMATIC;
 import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.BROADCAST;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
@@ -62,6 +63,7 @@ import static io.trino.sql.planner.plan.JoinNode.DistributionType.PARTITIONED;
 import static io.trino.sql.planner.plan.JoinNode.DistributionType.REPLICATED;
 import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.type.UnknownType.UNKNOWN;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
@@ -351,7 +353,7 @@ public class TestReorderJoins
                                 ImmutableList.of(new EquiJoinClause(p.symbol("A1", DOUBLE), p.symbol("B1", DOUBLE))),
                                 ImmutableList.of(p.symbol("A1", DOUBLE)),
                                 ImmutableList.of(p.symbol("B1", DOUBLE)),
-                                Optional.of(new Comparison(
+                                Optional.of(comparison(
                                         LESS_THAN,
                                         p.symbol("A1", DOUBLE).toSymbolReference(),
                                         new TestingFunctionResolution().functionCallBuilder("random").build()))))
@@ -391,7 +393,7 @@ public class TestReorderJoins
                                         new EquiJoinClause(p.symbol("B2", BIGINT), p.symbol("C1", BIGINT))),
                                 ImmutableList.of(p.symbol("A1", BIGINT)),
                                 ImmutableList.of(),
-                                Optional.of(new Comparison(EQUAL, p.symbol("A1", BIGINT).toSymbolReference(), p.symbol("B1", BIGINT).toSymbolReference()))))
+                                Optional.of(comparison(EQUAL, p.symbol("A1", BIGINT).toSymbolReference(), p.symbol("B1", BIGINT).toSymbolReference()))))
                 .matches(
                         project(
                                 join(INNER, builder -> builder
@@ -441,7 +443,7 @@ public class TestReorderJoins
                                 ImmutableList.of(new EquiJoinClause(p.symbol("P1", BIGINT), p.symbol("C1", BIGINT))),
                                 ImmutableList.of(p.symbol("P1", BIGINT)),
                                 ImmutableList.of(),
-                                Optional.of(new Comparison(EQUAL, p.symbol("P2", BIGINT).toSymbolReference(), p.symbol("C1", BIGINT).toSymbolReference()))))
+                                Optional.of(comparison(EQUAL, p.symbol("P2", BIGINT).toSymbolReference(), p.symbol("C1", BIGINT).toSymbolReference()))))
                 .matches(
                         project(
                                 join(INNER, builder -> builder
@@ -542,7 +544,7 @@ public class TestReorderJoins
                                         new EquiJoinClause(p.symbol("B2", BIGINT), p.symbol("C1", BIGINT))),
                                 ImmutableList.of(p.symbol("A1", BIGINT)),
                                 ImmutableList.of(),
-                                Optional.of(new Comparison(EQUAL, p.symbol("A1", BIGINT).toSymbolReference(), p.symbol("B1", BIGINT).toSymbolReference()))))
+                                Optional.of(comparison(EQUAL, p.symbol("A1", BIGINT).toSymbolReference(), p.symbol("B1", BIGINT).toSymbolReference()))))
                 .matches(
                         project(join(INNER, builder -> builder
                                 .equiCriteria("A1", "B1")
@@ -674,6 +676,19 @@ public class TestReorderJoins
                                         .distributionType(REPLICATED)
                                         .left(values(ImmutableMap.of("B1", 0)))
                                         .right(values(ImmutableMap.of("A1", 0))))));
+    }
+
+    @Test
+    public void testRejectsMaxReorderedJoinsAboveEnumerationLimit()
+    {
+        // JoinNodeFlattener turns max_reordered_joins into that many + 1 sources, and the bit-mask
+        // enumerator only handles 63 sources, so the property is capped at 62. Above that the join
+        // enumerator would fail the query during planning, so the value is rejected up front.
+        assertThatThrownBy(() -> assertReorderJoins()
+                .setSystemProperty(MAX_REORDERED_JOINS, "63")
+                .on(p -> p.values(p.symbol("a", BIGINT)))
+                .matches(values("a")))
+                .hasMessageContaining("max_reordered_joins must be less than or equal to 62: 63");
     }
 
     private RuleBuilder assertReorderJoins()

@@ -1,26 +1,52 @@
 # OAuth 2.0 authentication
 
 Trino can be configured to enable OAuth 2.0 authentication over HTTPS for the
-Web UI and the JDBC driver. Trino uses the [Authorization Code](https://tools.ietf.org/html/rfc6749#section-1.3.1) flow which exchanges an
-Authorization Code for a token. At a high level, the flow includes the following
-steps:
+Web UI and the JDBC driver. Two flows are supported:
 
-1. the Trino coordinator redirects a user's browser to the Authorization Server
-2. the user authenticates with the Authorization Server, and it approves the Trino's permissions request
-3. the user's browser is redirected back to the Trino coordinator with an authorization code
-4. the Trino coordinator exchanges the authorization code for a token
+- **Authorization code flow** — browser-based, interactive authentication for end users.
+- **Client credentials flow** — non-interactive, machine-to-machine authentication.
+
+(trino-oauth2-authorization-code)=
+## Authorization code flow
+
+Trino uses the [Authorization Code](https://tools.ietf.org/html/rfc6749#section-1.3.1)
+flow which exchanges an Authorization Code for a token. At a high level, the flow
+includes the following steps:
+
+1. The Trino coordinator redirects a user's browser to the Authorization Server
+2. The user authenticates with the Authorization Server, and it approves the Trino's permissions request
+3. The user's browser is redirected back to the Trino coordinator with an authorization code
+4. The Trino coordinator exchanges the authorization code for a token
+
+(trino-oauth2-client-credentials)=
+## Client credentials flow
+
+The OAuth 2.0 [client credentials](https://tools.ietf.org/html/rfc6749#section-1.3.4)
+flow enables non-interactive (machine-to-machine) authentication. Unlike the
+authorization code flow, no browser or user interaction is required. At a high 
+level, the flow includes the following steps:
+
+1. The client sends a request to Trino without a valid access token.
+2. Trino responds with an HTTP 401 challenge containing the token endpoint URL
+   and required scopes in the `WWW-Authenticate` header.
+3. The client POSTs a `grant_type=client_credentials` request to the token
+   endpoint using its client ID and secret.
+4. The client re-sends the original request to Trino with the resulting access
+   token.
+
+## Authorization server setup
 
 To enable OAuth 2.0 authentication for Trino, configuration changes are made on
 the Trino coordinator. No changes are required to the worker configuration;
 only the communication from the clients to the coordinator is authenticated.
 
-Set the callback/redirect URL to `https://<trino-coordinator-domain-name>/oauth2/callback`,
-when configuring an OAuth 2.0 authorization server like an OpenID Connect (OIDC)
-provider.
+For the authorization code flow, configure the following URLs in the
+authorization server:
 
-If Web UI is enabled, set the post-logout callback URL to
-`https://<trino-coordinator-domain-name>/ui/logout/logout.html` when configuring
-an OAuth 2.0 authentication server like an OpenID Connect (OIDC) provider.
+- Set the callback/redirect URL to
+  `https://<trino-coordinator-domain-name>/oauth2/callback`.
+- If Web UI is enabled, set the post-logout callback URL to
+  `https://<trino-coordinator-domain-name>/ui/logout/logout.html`.
 
 Using {doc}`TLS <tls>` and {doc}`a configured shared secret
 </security/internal-communication>` is required for OAuth 2.0 authentication.
@@ -106,6 +132,11 @@ The following configuration properties are available:
     order to begin the OAuth 2.0 authorization process. Providing this value
     while OIDC discovery is enabled overrides the value from the OpenID provider
     metadata document.
+* - `http-server.authentication.oauth2.domain-hint`
+  - Domain hint to restrict SSO account selection to a specific domain. When
+    set, it is included in the authorization URL as a `domain_hint` parameter
+    together with `prompt=select_account`, which some IdPs (for example Azure
+    AD) use to filter the account picker shown to users during login.
 * - `http-server.authentication.oauth2.token-url`
   - The URL of the endpoint on the authorization server which Trino uses to
     obtain an access token. Providing this value while OIDC discovery is enabled
@@ -129,6 +160,15 @@ The following configuration properties are available:
 * - `http-server.authentication.oauth2.additional-audiences`
   - Additional audiences to trust in addition to the client ID which is
     always a trusted audience.
+* - `http-server.authentication.oauth2.require-audience`
+  - Reject access tokens without an `aud` claim. Access tokens with an `aud`
+    claim must always contain the client ID or one of the additional
+    audiences. When enabled, the IdP must include `aud` in every access
+    token, including tokens issued during the authorization code flow,
+    because Trino does not request an audience from the IdP. Has no effect
+    when access tokens are validated with the userinfo endpoint; set
+    `http-server.authentication.oauth2.oidc.use-userinfo-endpoint=false` when
+    using OIDC discovery. Defaults to `false`.
 * - `http-server.authentication.oauth2.scopes`
   - Scopes requested by the server during the authorization challenge. See:
     https://tools.ietf.org/html/rfc6749#section-3.3
@@ -229,11 +269,11 @@ The following configuration properties are available:
     maximum session time for an OAuth2-authenticated client with refresh tokens
     enabled. For more details, see [](trino-oauth2-troubleshooting).
 * - `http-server.authentication.oauth2.refresh-tokens.issued-token.issuer`
-  - Issuer representing the coordinator instance, that is referenced in the
+  - Issuer representing the coordinator instance that is referenced in the
     issued token, defaults to `Trino_coordinator`. The current Trino version is
     appended to the value. This is mainly used for debugging purposes.
 * - `http-server.authentication.oauth2.refresh-tokens.issued-token.audience`
-  - Audience representing this coordinator instance, that is used in the
+  - Audience representing this coordinator instance that is used in the
     issued token. Defaults to `Trino_coordinator`.
 * - `http-server.authentication.oauth2.refresh-tokens.secret-key`
   - Base64-encoded secret key used to encrypt the generated token. By default

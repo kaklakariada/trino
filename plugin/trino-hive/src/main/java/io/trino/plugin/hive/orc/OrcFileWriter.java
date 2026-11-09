@@ -26,6 +26,7 @@ import io.trino.orc.metadata.ColumnMetadata;
 import io.trino.orc.metadata.CompressionKind;
 import io.trino.orc.metadata.OrcType;
 import io.trino.plugin.hive.FileWriter;
+import io.trino.plugin.hive.RollbackAction;
 import io.trino.plugin.hive.WriterKind;
 import io.trino.plugin.hive.acid.AcidTransaction;
 import io.trino.spi.Page;
@@ -73,7 +74,7 @@ public final class OrcFileWriter
     private final AcidTransaction transaction;
     private final boolean useAcidSchema;
     private final OptionalInt bucketNumber;
-    private final Closeable rollbackAction;
+    private final RollbackAction rollbackAction;
     private final int[] fileInputColumnIndexes;
     private final List<Block> nullBlocks;
     private final Optional<Supplier<OrcDataSource>> validationInputFactory;
@@ -88,7 +89,7 @@ public final class OrcFileWriter
             AcidTransaction transaction,
             boolean useAcidSchema,
             OptionalInt bucketNumber,
-            Closeable rollbackAction,
+            RollbackAction rollbackAction,
             List<String> columnNames,
             List<Type> fileColumnTypes,
             ColumnMetadata<OrcType> fileColumnOrcTypes,
@@ -175,7 +176,7 @@ public final class OrcFileWriter
     }
 
     @Override
-    public Closeable commit()
+    public RollbackAction commit()
     {
         try {
             if (transaction.isAcidTransactionRunning() && useAcidSchema) {
@@ -185,7 +186,7 @@ public final class OrcFileWriter
         }
         catch (IOException | UncheckedIOException e) {
             try {
-                rollbackAction.close();
+                rollbackAction.run();
             }
             catch (Exception ex) {
                 // ignore
@@ -213,7 +214,7 @@ public final class OrcFileWriter
     private void updateAcidUserMetadata()
     {
         int bucketValue = computeBucketValue(bucketNumber.orElse(0), 0);
-        long writeId = maxWriteId.isPresent() ? maxWriteId.getAsLong() : transaction.getWriteId();
+        long writeId = maxWriteId.isPresent() ? maxWriteId.orElseThrow() : transaction.getWriteId();
         int stripeRowCount = orcWriter.getStripeRowCount();
         Map<String, String> userMetadata = new HashMap<>();
         switch (writerKind) {
@@ -236,8 +237,8 @@ public final class OrcFileWriter
     @Override
     public void rollback()
     {
-        try (rollbackAction) {
-            orcWriter.close();
+        try (Closeable _ = rollbackAction::run) {
+            orcWriter.abort();
         }
         catch (Exception e) {
             throw new TrinoException(HIVE_WRITER_CLOSE_ERROR, "Error rolling back write to Hive", e);

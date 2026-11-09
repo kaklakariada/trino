@@ -19,13 +19,13 @@ import io.trino.Session;
 import io.trino.metadata.ResolvedFunction;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.analyzer.Analysis;
 import io.trino.sql.analyzer.Field;
 import io.trino.sql.analyzer.RelationId;
 import io.trino.sql.analyzer.RelationType;
 import io.trino.sql.analyzer.Scope;
-import io.trino.sql.ir.Cast;
 import io.trino.sql.ir.ExpressionRewriter;
 import io.trino.sql.ir.ExpressionTreeRewriter;
 import io.trino.sql.ir.Reference;
@@ -78,7 +78,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.sql.ir.IrExpressions.call;
+import static io.trino.sql.ir.IrExpressions.cast;
 import static io.trino.sql.ir.IrExpressions.constantNull;
 import static io.trino.sql.planner.LogicalPlanner.buildLambdaDeclarationToSymbolMap;
 import static java.util.Locale.ENGLISH;
@@ -200,11 +202,11 @@ public final class SqlRoutinePlanner
 
                     io.trino.sql.ir.Expression testValue = new Reference(valueVariable.type(), variableReferenceName(valueVariable));
                     if (!testValue.type().equals(conditionValue.type())) {
-                        ResolvedFunction castFunction = plannerContext.getMetadata().getCoercion(testValue.type(), conditionValue.type());
+                        ResolvedFunction castFunction = plannerContext.getMetadata().getCoercion(getCharVarcharCoercion(session), testValue.type(), conditionValue.type());
                         testValue = call(castFunction, testValue);
                     }
 
-                    ResolvedFunction equals = plannerContext.getMetadata().resolveOperator(OperatorType.EQUAL, ImmutableList.of(testValue.type(), conditionValue.type()));
+                    ResolvedFunction equals = plannerContext.getMetadata().resolveOperator(getCharVarcharCoercion(session), OperatorType.EQUAL, ImmutableList.of(testValue.type(), conditionValue.type()));
                     io.trino.sql.ir.Expression condition = call(equals, testValue, conditionValue);
 
                     IrStatement ifTrue = block(statements(whenClause.getStatements(), context));
@@ -309,7 +311,7 @@ public final class SqlRoutinePlanner
                     .withRelationType(RelationId.of(expression), new RelationType(fields))
                     .build();
 
-            SymbolAllocator symbolAllocator = new SymbolAllocator();
+            SymbolAllocator symbolAllocator = new SymbolAllocator(ImmutableList.of());
             List<Symbol> fieldSymbols = fields.stream()
                     .map(symbolAllocator::newSymbol)
                     .collect(toImmutableList());
@@ -317,14 +319,14 @@ public final class SqlRoutinePlanner
             Map<NodeRef<LambdaArgumentDeclaration>, Symbol> nodeRefSymbolMap = buildLambdaDeclarationToSymbolMap(analysis, symbolAllocator);
 
             // Apply casts, desugar expression, and perform other rewrites
-            TranslationMap translationMap = new TranslationMap(Optional.empty(), scope, analysis, nodeRefSymbolMap, fieldSymbols, session, plannerContext);
-            io.trino.sql.ir.Expression translated = coerceIfNecessary(analysis, expression, translationMap.rewrite(expression));
+            TranslationMap translationMap = new TranslationMap(Optional.empty(), scope, analysis, nodeRefSymbolMap, fieldSymbols, session, plannerContext, symbolAllocator);
+            io.trino.sql.ir.Expression translated = coerceIfNecessary(plannerContext.getTypeManager(), session, analysis, expression, translationMap.rewrite(expression));
 
             // desugar the lambda captures
             io.trino.sql.ir.Expression lambdaCaptureDesugared = LambdaCaptureDesugaringRewriter.rewrite(translated, symbolAllocator);
 
             // optimize the expression
-            io.trino.sql.ir.Expression optimized = optimizer.process(lambdaCaptureDesugared, session, ImmutableMap.of()).orElse(lambdaCaptureDesugared);
+            io.trino.sql.ir.Expression optimized = optimizer.process(lambdaCaptureDesugared, session, symbolAllocator, ImmutableMap.of()).orElse(lambdaCaptureDesugared);
 
             // Replace symbol references with routine variable references
             List<Map.Entry<String, IrVariable>> variableEntries = List.copyOf(context.variables().entrySet());
@@ -350,13 +352,13 @@ public final class SqlRoutinePlanner
             }, optimized);
         }
 
-        public static io.trino.sql.ir.Expression coerceIfNecessary(Analysis analysis, Expression original, io.trino.sql.ir.Expression rewritten)
+        public static io.trino.sql.ir.Expression coerceIfNecessary(TypeManager typeManager, Session session, Analysis analysis, Expression original, io.trino.sql.ir.Expression rewritten)
         {
             Type coercion = analysis.getCoercion(original);
             if (coercion == null) {
                 return rewritten;
             }
-            return new Cast(rewritten, coercion);
+            return cast(typeManager, getCharVarcharCoercion(session), rewritten, coercion);
         }
 
         private List<IrStatement> statements(List<ControlStatement> statements, Context context)

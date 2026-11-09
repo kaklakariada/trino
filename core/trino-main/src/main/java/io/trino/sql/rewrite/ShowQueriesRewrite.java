@@ -13,7 +13,6 @@
  */
 package io.trino.sql.rewrite;
 
-import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Multimap;
@@ -52,8 +51,10 @@ import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeSyntax;
 import io.trino.sql.SqlEnvironmentConfig;
 import io.trino.sql.analyzer.AnalyzerFactory;
+import io.trino.sql.analyzer.TypeDescriptorTranslator;
 import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
@@ -76,6 +77,7 @@ import io.trino.sql.tree.Node;
 import io.trino.sql.tree.NodeRef;
 import io.trino.sql.tree.NullLiteral;
 import io.trino.sql.tree.Parameter;
+import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.PrincipalSpecification;
 import io.trino.sql.tree.Property;
 import io.trino.sql.tree.QualifiedName;
@@ -118,7 +120,7 @@ import static io.trino.connector.informationschema.InformationSchemaTable.TABLES
 import static io.trino.connector.informationschema.InformationSchemaTable.TABLE_PRIVILEGES;
 import static io.trino.execution.CreateFunctionTask.defaultFunctionSchema;
 import static io.trino.execution.CreateFunctionTask.qualifiedFunctionName;
-import static io.trino.metadata.MetadataListing.listCatalogNames;
+import static io.trino.metadata.MetadataListing.listAllCatalogNames;
 import static io.trino.metadata.MetadataListing.listCatalogs;
 import static io.trino.metadata.MetadataListing.listSchemas;
 import static io.trino.metadata.MetadataUtil.createCatalogSchemaName;
@@ -138,6 +140,7 @@ import static io.trino.spi.StandardErrorCode.MISSING_CATALOG_NAME;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.SYNTAX_ERROR;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -159,7 +162,7 @@ import static io.trino.sql.QueryUtil.singleValueQuery;
 import static io.trino.sql.QueryUtil.table;
 import static io.trino.sql.SqlFormatter.formatSql;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
-import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
+import static io.trino.sql.analyzer.TypeDescriptorTranslator.toSqlType;
 import static io.trino.sql.tree.BooleanLiteral.FALSE_LITERAL;
 import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static io.trino.sql.tree.CreateView.Security.DEFINER;
@@ -168,6 +171,7 @@ import static io.trino.sql.tree.LogicalExpression.and;
 import static io.trino.sql.tree.SaveMode.FAIL;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 
 public final class ShowQueriesRewrite
@@ -266,10 +270,7 @@ public final class ShowQueriesRewrite
 
             Optional<String> likePattern = showTables.getLikePattern();
             if (likePattern.isPresent()) {
-                Expression likePredicate = new LikePredicate(
-                        identifier("table_name"),
-                        new StringLiteral(likePattern.get()),
-                        showTables.getEscape().map(StringLiteral::new));
+                Expression likePredicate = new Predicated(null, identifier("table_name"), new LikePredicate(null, false, new StringLiteral(likePattern.get()), showTables.getEscape().map(StringLiteral::new)));
                 predicate = logicalAnd(predicate, likePredicate);
             }
 
@@ -409,10 +410,7 @@ public final class ShowQueriesRewrite
             Optional<Expression> predicate = Optional.empty();
             Optional<String> likePattern = node.getLikePattern();
             if (likePattern.isPresent()) {
-                predicate = Optional.of(new LikePredicate(
-                        identifier("schema_name"),
-                        new StringLiteral(likePattern.get()),
-                        node.getEscape().map(StringLiteral::new)));
+                predicate = Optional.of(new Predicated(null, identifier("schema_name"), new LikePredicate(null, false, new StringLiteral(likePattern.get()), node.getEscape().map(StringLiteral::new))));
             }
 
             return simpleQuery(
@@ -425,7 +423,7 @@ public final class ShowQueriesRewrite
         @Override
         protected Node visitShowCatalogs(ShowCatalogs node, Void context)
         {
-            List<Expression> rows = listCatalogNames(session, metadata, accessControl, Domain.all(VARCHAR)).stream()
+            List<Expression> rows = listAllCatalogNames(session, metadata, accessControl, Domain.all(VARCHAR)).stream()
                     .map(name -> row(new StringLiteral(name)))
                     .collect(toImmutableList());
 
@@ -435,10 +433,7 @@ public final class ShowQueriesRewrite
                 predicate = Optional.of(BooleanLiteral.FALSE_LITERAL);
             }
             else if (node.getLikePattern().isPresent()) {
-                predicate = Optional.of(new LikePredicate(
-                        identifier("catalog"),
-                        new StringLiteral(node.getLikePattern().get()),
-                        node.getEscape().map(StringLiteral::new)));
+                predicate = Optional.of(new Predicated(null, identifier("catalog"), new LikePredicate(null, false, new StringLiteral(node.getLikePattern().get()), node.getEscape().map(StringLiteral::new))));
             }
 
             return simpleQuery(
@@ -499,10 +494,7 @@ public final class ShowQueriesRewrite
                     equal(identifier("table_name"), new StringLiteral(targetTableName.objectName())));
             Optional<String> likePattern = showColumns.getLikePattern();
             if (likePattern.isPresent()) {
-                Expression likePredicate = new LikePredicate(
-                        identifier("column_name"),
-                        new StringLiteral(likePattern.get()),
-                        showColumns.getEscape().map(StringLiteral::new));
+                Expression likePredicate = new Predicated(null, identifier("column_name"), new LikePredicate(null, false, new StringLiteral(likePattern.get()), showColumns.getEscape().map(StringLiteral::new)));
                 predicate = logicalAnd(predicate, likePredicate);
             }
 
@@ -552,10 +544,10 @@ public final class ShowQueriesRewrite
             Identifier schemaName = (parts.size() > 1) ? parts.get(1) : new Identifier(objectName.schemaName());
             Identifier catalogName = (parts.size() > 2) ? parts.get(2) : new Identifier(objectName.catalogName());
 
-            accessControl.checkCanShowCreateTable(session.toSecurityContext(), new QualifiedObjectName(catalogName.getValue(), schemaName.getValue(), tableName.getValue()));
+            accessControl.checkCanShowCreateTable(session.toSecurityContext(), objectName);
 
             Map<String, Object> properties = metadata.getMaterializedViewProperties(session, objectName, viewDefinition.get());
-            CatalogHandle catalogHandle = getRequiredCatalogHandle(metadata, session, node, catalogName.getValue());
+            CatalogHandle catalogHandle = getRequiredCatalogHandle(metadata, session, node, objectName.catalogName());
             Collection<PropertyMetadata<?>> allMaterializedViewProperties = materializedViewPropertyManager.getAllProperties(catalogHandle);
             List<Property> propertyNodes = toSqlProperties("materialized view " + objectName, INVALID_MATERIALIZED_VIEW_PROPERTY, properties, allMaterializedViewProperties);
 
@@ -604,10 +596,10 @@ public final class ShowQueriesRewrite
             Identifier schemaName = (parts.size() > 1) ? parts.get(1) : new Identifier(objectName.schemaName());
             Identifier catalogName = (parts.size() > 2) ? parts.get(2) : new Identifier(objectName.catalogName());
 
-            accessControl.checkCanShowCreateTable(session.toSecurityContext(), new QualifiedObjectName(catalogName.getValue(), schemaName.getValue(), tableName.getValue()));
+            accessControl.checkCanShowCreateTable(session.toSecurityContext(), objectName);
 
             Map<String, Object> properties = metadata.getViewProperties(session, objectName);
-            CatalogHandle catalogHandle = getRequiredCatalogHandle(metadata, session, node, catalogName.getValue());
+            CatalogHandle catalogHandle = getRequiredCatalogHandle(metadata, session, node, objectName.catalogName());
             Collection<PropertyMetadata<?>> allViewProperties = viewPropertyManager.getAllProperties(catalogHandle);
             List<Property> propertyNodes = toSqlProperties("view " + objectName, INVALID_VIEW_PROPERTY, properties, allViewProperties);
             CreateView.Security security = viewDefinition.get().isRunAsInvoker() ? INVOKER : DEFINER;
@@ -615,6 +607,7 @@ public final class ShowQueriesRewrite
                     node.getLocation().orElseThrow(),
                     QualifiedName.of(ImmutableList.of(catalogName, schemaName, tableName)),
                     query,
+                    false,
                     false,
                     viewDefinition.get().getComment(),
                     Optional.of(security),
@@ -726,7 +719,14 @@ public final class ShowQueriesRewrite
             }
 
             List<Expression> rows = functions.stream()
-                    .map(function -> row(new StringLiteral("CREATE " + function.sql())))
+                    .map(function -> {
+                        try {
+                            return row(new StringLiteral("CREATE " + formatSql(parser.createFunctionSpecification(function.sql(), TypeDescriptorTranslator::normalizeStoredIntervalType))));
+                        }
+                        catch (ParsingException e) {
+                            throw semanticException(SYNTAX_ERROR, node, e, "Failed parsing stored function '%s': %s", functionName, e.getMessage());
+                        }
+                    })
                     .collect(toImmutableList());
 
             return simpleQuery(
@@ -771,10 +771,7 @@ public final class ShowQueriesRewrite
                             .collect(toImmutableList())),
                     aliased(new Values(rows), "functions", ImmutableList.copyOf(columns.keySet())),
                     node.getLikePattern()
-                            .map(like -> new LikePredicate(
-                                    identifier("function_name"),
-                                    new StringLiteral(like),
-                                    node.getEscape().map(StringLiteral::new)))
+                            .map(like -> new Predicated(null, identifier("function_name"), new LikePredicate(null, false, new StringLiteral(like), node.getEscape().map(StringLiteral::new))))
                             .map(Expression.class::cast)
                             .orElse(TRUE_LITERAL),
                     ordering(
@@ -791,8 +788,10 @@ public final class ShowQueriesRewrite
         {
             return row(
                     new StringLiteral(alias),
-                    new StringLiteral(function.getSignature().getReturnType().toString()),
-                    new StringLiteral(Joiner.on(", ").join(function.getSignature().getArgumentTypes())),
+                    new StringLiteral(TypeSyntax.toSql(function.getSignature().getReturnType())),
+                    new StringLiteral(function.getSignature().getArgumentTypes().stream()
+                            .map(TypeSyntax::toSql)
+                            .collect(joining(", "))),
                     new StringLiteral(getFunctionType(function)),
                     function.isDeterministic() ? TRUE_LITERAL : FALSE_LITERAL,
                     new StringLiteral(nullToEmpty(function.getDescription())));
@@ -901,10 +900,7 @@ public final class ShowQueriesRewrite
             Expression predicate = identifier("include");
             Optional<String> likePattern = node.getLikePattern();
             if (likePattern.isPresent()) {
-                predicate = and(predicate, new LikePredicate(
-                        identifier("name"),
-                        new StringLiteral(likePattern.get()),
-                        node.getEscape().map(StringLiteral::new)));
+                predicate = and(predicate, new Predicated(null, identifier("name"), new LikePredicate(null, false, new StringLiteral(likePattern.get()), node.getEscape().map(StringLiteral::new))));
             }
 
             return simpleQuery(
@@ -924,7 +920,7 @@ public final class ShowQueriesRewrite
         private Query parseView(String view, QualifiedObjectName name, Node node)
         {
             try {
-                Statement statement = parser.createStatement(view);
+                Statement statement = parser.createStatement(view, TypeDescriptorTranslator::normalizeStoredIntervalType);
                 return (Query) statement;
             }
             catch (ParsingException e) {

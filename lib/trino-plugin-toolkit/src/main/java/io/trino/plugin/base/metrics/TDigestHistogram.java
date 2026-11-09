@@ -16,15 +16,16 @@ package io.trino.plugin.base.metrics;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.google.common.base.MoreObjects.ToStringHelper;
 import com.google.errorprone.annotations.DoNotCall;
 import io.airlift.stats.TDigest;
 import io.trino.spi.metrics.Distribution;
 
+import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
-import static com.google.common.base.MoreObjects.ToStringHelper;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.lang.String.format;
@@ -61,17 +62,23 @@ public class TDigestHistogram
         return TDigest.copyOf(digest);
     }
 
-    @JsonProperty(DIGEST_PROPERTY)
     public synchronized byte[] serialize()
     {
         return digest.serialize().getBytes();
     }
 
+    // Base64 text in the same form Jackson writes for byte[], decoded in bulk by the JDK codec
+    @JsonProperty(DIGEST_PROPERTY)
+    public String getDigestBase64()
+    {
+        return Base64.getEncoder().encodeToString(serialize());
+    }
+
     @JsonCreator
     @DoNotCall
-    public static TDigestHistogram deserialize(@JsonProperty(DIGEST_PROPERTY) byte[] digest)
+    public static TDigestHistogram deserialize(@JsonProperty(DIGEST_PROPERTY) String digest)
     {
-        return new TDigestHistogram(TDigest.deserialize(wrappedBuffer(digest)));
+        return new TDigestHistogram(TDigest.deserialize(wrappedBuffer(Base64.getDecoder().decode(digest))));
     }
 
     @Override

@@ -14,6 +14,7 @@
 package io.trino.plugin.faker;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -21,8 +22,9 @@ import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
-import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
+
+import java.util.Set;
 
 import static java.lang.Math.min;
 
@@ -37,21 +39,19 @@ public class FakerSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle table,
-            DynamicFilter dynamicFilter,
+            Set<ColumnHandle> dynamicFilterColumns,
             Constraint constraint)
     {
         FakerTableHandle fakerTable = (FakerTableHandle) table;
         ImmutableList.Builder<ConnectorSplit> splits = ImmutableList.builder();
 
-        int splitNum = 0;
         long rowsOffset = 0;
         long remainingRows = fakerTable.limit();
         while (remainingRows > 0) {
             long splitSize = min(remainingRows, MAX_ROWS_PER_SPLIT);
-            splits.add(new FakerSplit(splitNum, rowsOffset, splitSize));
+            splits.add(new FakerSplit(rowsOffset, splitSize));
             rowsOffset += splitSize;
             remainingRows -= splitSize;
-            splitNum++;
         }
         return new FixedSplitSource(splits.build());
     }

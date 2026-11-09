@@ -26,6 +26,7 @@ import io.trino.plugin.deltalake.DeltaLakeConfig;
 import io.trino.plugin.deltalake.DeltaLakeFileSystemFactory;
 import io.trino.plugin.deltalake.DeltaLakeMetadata;
 import io.trino.plugin.deltalake.DeltaLakeMetadataFactory;
+import io.trino.plugin.deltalake.DeltaLakeTableCredentials;
 import io.trino.plugin.deltalake.metastore.DeltaLakeMetastore;
 import io.trino.plugin.deltalake.metastore.VendedCredentialsHandle;
 import io.trino.plugin.deltalake.statistics.CachingExtendedStatisticsAccess;
@@ -48,7 +49,9 @@ import java.util.Optional;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static io.trino.plugin.base.util.Procedures.checkProcedureArgument;
 import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_FILESYSTEM_ERROR;
+import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_INVALID_SCHEMA;
 import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_INVALID_TABLE;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.getExactColumnNames;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.getTransactionLogDir;
 import static io.trino.plugin.hive.metastore.MetastoreUtil.buildInitialPrivilegeSet;
 import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
@@ -155,14 +158,15 @@ public class RegisterTableProcedure
                 throw new SchemaNotFoundException(schemaTableName.getSchemaName());
             }
 
-            TrinoFileSystem fileSystem = fileSystemFactory.create(session, tableLocation);
+            TrinoFileSystem fileSystem;
             try {
+                fileSystem = fileSystemFactory.create(session, tableLocation);
                 Location transactionLogDir = Location.of(getTransactionLogDir(tableLocation));
                 if (!fileSystem.listFiles(transactionLogDir).hasNext()) {
                     throw new TrinoException(GENERIC_USER_ERROR, format("No transaction log found in location %s", transactionLogDir));
                 }
             }
-            catch (IOException e) {
+            catch (IOException | IllegalArgumentException e) {
                 throw new TrinoException(DELTA_LAKE_FILESYSTEM_ERROR, format("Failed checking table location %s", tableLocation), e);
             }
 
@@ -172,8 +176,14 @@ public class RegisterTableProcedure
             TableSnapshot tableSnapshot;
             MetadataEntry metadataEntry;
             try {
-                VendedCredentialsHandle credentialsHandle = VendedCredentialsHandle.empty(tableLocation);
-                tableSnapshot = transactionLogAccess.loadSnapshot(session, new FileSystemTransactionLogReader(tableLocation, credentialsHandle, fileSystemFactory), schemaTableName, tableLocation, Optional.empty(), credentialsHandle);
+                Optional<DeltaLakeTableCredentials> tableCredentials = metadata.getTableCredentials(VendedCredentialsHandle.empty(tableLocation));
+                tableSnapshot = transactionLogAccess.loadSnapshot(
+                        session,
+                        new FileSystemTransactionLogReader(tableLocation, tableCredentials, fileSystemFactory),
+                        schemaTableName,
+                        tableLocation,
+                        Optional.empty(),
+                        tableCredentials);
                 metadataEntry = transactionLogAccess.getMetadataEntry(session, fileSystem, tableSnapshot);
             }
             catch (TrinoException e) {
@@ -181,6 +191,9 @@ public class RegisterTableProcedure
             }
             catch (IOException | RuntimeException e) {
                 throw new TrinoException(DELTA_LAKE_INVALID_TABLE, "Failed to access table location: " + tableLocation, e);
+            }
+            if (getExactColumnNames(metadataEntry).isEmpty()) {
+                throw new TrinoException(DELTA_LAKE_INVALID_SCHEMA, "Cannot register table %s: the schema at %s has no columns".formatted(schemaTableName, tableLocation));
             }
 
             Table table = metadata.buildTable(

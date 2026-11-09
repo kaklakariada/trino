@@ -45,7 +45,6 @@ import static io.airlift.configuration.ConfigBinder.configBinder;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
-import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
 public class JdbcModule
         extends AbstractConfigurationAwareModule
@@ -66,7 +65,6 @@ public class JdbcModule
 
         newOptionalBinder(binder, JdbcMetadataFactory.class).setDefault().to(DefaultJdbcMetadataFactory.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, IdentityCacheMapping.class).setDefault().to(SingletonIdentityCacheMapping.class).in(Scopes.SINGLETON);
-        newOptionalBinder(binder, TimestampTimeZoneDomain.class).setDefault().toInstance(TimestampTimeZoneDomain.ANY);
         newOptionalBinder(binder, Key.get(ConnectorSplitManager.class, ForJdbcDynamicFiltering.class)).setDefault().to(JdbcSplitManager.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, ConnectorSplitManager.class).setDefault().to(JdbcDynamicFilteringSplitManager.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, ConnectorPageSourceProvider.class).setDefault().to(JdbcPageSourceProvider.class).in(Scopes.SINGLETON);
@@ -84,11 +82,6 @@ public class JdbcModule
         bindSessionPropertiesProvider(binder, JdbcMetadataSessionProperties.class);
         bindSessionPropertiesProvider(binder, JdbcWriteSessionProperties.class);
         bindSessionPropertiesProvider(binder, JdbcDynamicFilteringSessionProperties.class);
-
-        binder.bind(DynamicFilteringStats.class).in(Scopes.SINGLETON);
-        Provider<CatalogName> catalogName = binder.getProvider(CatalogName.class);
-        newExporter(binder).export(DynamicFilteringStats.class)
-                .as(generator -> generator.generatedNameOf(DynamicFilteringStats.class, catalogName.get().toString()));
 
         binder.bind(JdbcClient.class).annotatedWith(ForCaching.class).to(Key.get(RetryingJdbcClient.class)).in(Scopes.SINGLETON);
         binder.bind(CachingJdbcClient.class).in(Scopes.SINGLETON);
@@ -133,11 +126,6 @@ public class JdbcModule
     public static Multibinder<Procedure> procedureBinder(Binder binder)
     {
         return newSetBinder(binder, Procedure.class);
-    }
-
-    public static void bindProcedure(Binder binder, Class<? extends Provider<? extends Procedure>> type)
-    {
-        procedureBinder(binder).addBinding().toProvider(type).in(Scopes.SINGLETON);
     }
 
     public static Multibinder<TablePropertiesProvider> tablePropertiesProviderBinder(Binder binder)

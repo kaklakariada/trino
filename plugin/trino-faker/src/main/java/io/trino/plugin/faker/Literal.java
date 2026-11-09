@@ -57,12 +57,10 @@ import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.plugin.faker.DateTimeParsing.parseDate;
-import static io.trino.plugin.faker.DateTimeParsing.parseDayTimeInterval;
 import static io.trino.plugin.faker.DateTimeParsing.parseTime;
 import static io.trino.plugin.faker.DateTimeParsing.parseTimeWithTimeZone;
 import static io.trino.plugin.faker.DateTimeParsing.parseTimestamp;
 import static io.trino.plugin.faker.DateTimeParsing.parseTimestampWithTimeZone;
-import static io.trino.plugin.faker.DateTimeParsing.parseYearMonthInterval;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
@@ -75,7 +73,6 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimeZoneKey.getTimeZoneKey;
-import static io.trino.spi.type.Timestamps.MILLISECONDS_PER_SECOND;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.UuidType.javaUuidToTrinoUuid;
@@ -83,10 +80,9 @@ import static io.trino.spi.type.UuidType.trinoUuidToJavaUuid;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Float.intBitsToFloat;
-import static java.lang.Math.floorDiv;
-import static java.lang.Math.floorMod;
 import static java.lang.Math.toIntExact;
 import static java.lang.System.arraycopy;
+import static java.math.RoundingMode.HALF_UP;
 import static java.util.Locale.ENGLISH;
 
 public class Literal
@@ -96,6 +92,7 @@ public class Literal
             .or(CharMatcher.inRange('0', '9'))
             .precomputed();
     private static final Pattern DECIMAL_PATTERN = Pattern.compile("([+-]?)(\\d(?:_?\\d)*)?(?:\\.(\\d(?:_?\\d)*)?)?");
+    private static final Pattern FRACTION_PATTERN = Pattern.compile("\\.(\\d+)");
 
     private Literal() {}
 
@@ -104,8 +101,19 @@ public class Literal
         if (value == null) {
             return null;
         }
-        if (BIGINT.equals(type) || INTEGER.equals(type) || SMALLINT.equals(type) || TINYINT.equals(type)) {
+        if (BIGINT.equals(type)) {
             return parseLong(value);
+        }
+        if (INTEGER.equals(type)) {
+            long integer = parseLong(value);
+            checkArgument(integer >= Integer.MIN_VALUE && integer <= Integer.MAX_VALUE, "Out of range: %s", integer);
+            return integer;
+        }
+        if (SMALLINT.equals(type)) {
+            return (long) Shorts.checkedCast(parseLong(value));
+        }
+        if (TINYINT.equals(type)) {
+            return (long) SignedBytes.checkedCast(parseLong(value));
         }
         if (BOOLEAN.equals(type)) {
             return parseBoolean(value);
@@ -123,22 +131,23 @@ public class Literal
             return Double.parseDouble(value);
         }
         // not supported: HYPER_LOG_LOG, QDIGEST, TDIGEST, P4_HYPER_LOG_LOG
-        if (type.getBaseName().equals(StandardTypes.INTERVAL_DAY_TO_SECOND)) {
-            return parseDayTimeInterval(value);
-        }
-        if (type.getBaseName().equals(StandardTypes.INTERVAL_YEAR_TO_MONTH)) {
-            return parseYearMonthInterval(value);
+        if (IntervalValues.isInterval(type)) {
+            return IntervalValues.parse(value, type);
         }
         if (type instanceof TimestampType timestampType) {
+            checkFractionPrecision(value, timestampType.getPrecision());
             return parseTimestamp(timestampType.getPrecision(), value);
         }
         if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
+            checkFractionPrecision(value, timestampWithTimeZoneType.getPrecision());
             return parseTimestampWithTimeZone(timestampWithTimeZoneType.getPrecision(), value);
         }
-        if (type instanceof TimeType) {
+        if (type instanceof TimeType timeType) {
+            checkFractionPrecision(value, timeType.getPrecision());
             return parseTime(value);
         }
         if (type instanceof TimeWithTimeZoneType timeWithTimeZoneType) {
+            checkFractionPrecision(value, timeWithTimeZoneType.getPrecision());
             return parseTimeWithTimeZone(timeWithTimeZoneType.getPrecision(), value);
         }
         if (VARBINARY.equals(type)) {
@@ -156,6 +165,17 @@ public class Literal
             return javaUuidToTrinoUuid(UUID.fromString(value));
         }
         throw new IllegalArgumentException("Unsupported literal type: " + type);
+    }
+
+    // values are stored with the precision of the literal, so a more precise value would be generated as is,
+    // or rounded outside the range set by the min and max properties
+    private static void checkFractionPrecision(String value, int precision)
+    {
+        Matcher matcher = FRACTION_PATTERN.matcher(value);
+        if (matcher.find()) {
+            String significantDigits = CharMatcher.is('0').trimTrailingFrom(matcher.group(1));
+            checkArgument(significantDigits.length() <= precision, "Value has more than %s fractional digits: %s", precision, value);
+        }
     }
 
     private static long parseLong(String value)
@@ -208,10 +228,16 @@ public class Literal
         fractionalPart = fractionalPart.replace("_", "");
 
         String unscaledValue = sign + (integralPart.isEmpty() ? "0" : "") + integralPart + fractionalPart;
-        if (decimalType.isShort()) {
-            return Long.parseLong(unscaledValue);
+        // round like a cast to the decimal type
+        BigDecimal decimal = new BigDecimal(new BigInteger(unscaledValue), fractionalPart.length())
+                .setScale(decimalType.getScale(), HALF_UP);
+        if (decimal.precision() > decimalType.getPrecision()) {
+            throw new IllegalArgumentException("DECIMAL value '" + value + "' is out of range for " + decimalType);
         }
-        return Int128.valueOf(new BigInteger(unscaledValue));
+        if (decimalType.isShort()) {
+            return decimal.unscaledValue().longValueExact();
+        }
+        return Int128.valueOf(decimal.unscaledValue());
     }
 
     private static String getMatcherGroup(MatchResult matcher, int group)
@@ -250,7 +276,7 @@ public class Literal
     {
         byte[] address;
         try {
-            address = InetAddresses.forString(value).getAddress();
+            address = InetAddress.ofLiteral(value).getAddress();
         }
         catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("Cannot cast value to IPADDRESS: " + value);
@@ -347,9 +373,7 @@ public class Literal
             }
 
             if (type.getBaseName().equals(StandardTypes.INTERVAL_DAY_TO_SECOND)) {
-                long epochSeconds = floorDiv(typedValue, (long) MILLISECONDS_PER_SECOND);
-                long fractionalSecond = floorMod(typedValue, (long) MILLISECONDS_PER_SECOND);
-                return "%d.%03d".formatted(epochSeconds, fractionalSecond);
+                return BigDecimal.valueOf(typedValue, 6).toPlainString();
             }
 
             if (type.getBaseName().equals(StandardTypes.INTERVAL_YEAR_TO_MONTH)) {

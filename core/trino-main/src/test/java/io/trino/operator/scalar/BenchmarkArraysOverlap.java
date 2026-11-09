@@ -18,7 +18,6 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slices;
 import io.trino.jmh.Benchmarks;
 import io.trino.metadata.TestingFunctionResolution;
-import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.ArrayBlockBuilder;
@@ -49,10 +48,11 @@ import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
 import static io.trino.sql.ir.IrExpressions.call;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 
@@ -73,7 +73,6 @@ public class BenchmarkArraysOverlap
     {
         return ImmutableList.copyOf(data.getPageProcessor().process(
                 SESSION,
-                new DriverYieldSignal(),
                 newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
                 SourcePage.create(data.getPage())));
     }
@@ -110,7 +109,7 @@ public class BenchmarkArraysOverlap
                     new Reference(arrayType, "$col_1")));
 
             ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
-            pageProcessor = compiler.compilePageProcessor(Optional.empty(), projections, ImmutableMap.of(
+            pageProcessor = compiler.compilePageProcessor(TEST_SESSION, Optional.empty(), projections, ImmutableMap.of(
                     new Symbol(arrayType, "$col_0"), 0,
                     new Symbol(arrayType, "$col_1"), 1)).get();
 

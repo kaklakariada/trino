@@ -16,10 +16,17 @@ package io.trino.parquet;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
+import io.trino.plugin.tpcds.TpcdsRecordSet;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.connector.RecordPageSource;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.Type;
+import io.trino.tpcds.Results;
+import io.trino.tpcds.Session;
+import io.trino.tpcds.Table;
+import io.trino.tpcds.column.Column;
 import io.trino.tpch.TpchColumn;
 import io.trino.tpch.TpchEntity;
 import io.trino.tpch.TpchTable;
@@ -35,6 +42,7 @@ import java.util.Random;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static io.trino.spi.connector.MemoryContext.NO_LIMIT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -49,10 +57,33 @@ public final class BenchmarkParquetFormatUtils
 
     private BenchmarkParquetFormatUtils() {}
 
-    @SafeVarargs
-    public static <E extends TpchEntity> TestData createTpchDataSet(TpchTable<E> tpchTable, TpchColumn<E>... columns)
+    public static TestData createTpcdsDataSet(Table table)
     {
-        return createTpchDataSet(tpchTable, ImmutableList.copyOf(columns));
+        List<Column> columns = ImmutableList.copyOf(table.getColumns());
+        Session session = Session.getDefaultSession()
+                .withScale(1)
+                .withParallelism(1)
+                .withChunkNumber(1)
+                .withTable(table);
+        TpcdsRecordSet recordSet = new TpcdsRecordSet(Results.constructResults(table, session), columns, 1);
+
+        ImmutableList.Builder<Page> pages = ImmutableList.builder();
+        long dataSize = 0;
+        try (RecordPageSource pageSource = new RecordPageSource(recordSet, NO_LIMIT)) {
+            while (!pageSource.isFinished() && dataSize < MIN_DATA_SIZE) {
+                SourcePage sourcePage = pageSource.getNextSourcePage();
+                if (sourcePage != null) {
+                    Page page = sourcePage.getPage();
+                    pages.add(page);
+                    dataSize += page.getSizeInBytes();
+                }
+            }
+        }
+
+        return new TestData(
+                columns.stream().map(Column::getName).collect(toImmutableList()),
+                recordSet.getColumnTypes(),
+                pages.build());
     }
 
     public static <E extends TpchEntity> TestData createTpchDataSet(TpchTable<E> tpchTable, List<TpchColumn<E>> columns)

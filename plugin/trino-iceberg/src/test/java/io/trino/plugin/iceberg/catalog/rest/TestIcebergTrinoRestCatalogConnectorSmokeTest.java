@@ -15,12 +15,16 @@ package io.trino.plugin.iceberg.catalog.rest;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.http.server.testing.TestingHttpServer;
-import io.trino.filesystem.Location;
+import io.trino.plugin.base.metrics.DistributionSnapshot;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.plugin.iceberg.BaseIcebergConnectorSmokeTest;
 import io.trino.plugin.iceberg.IcebergConfig;
 import io.trino.plugin.iceberg.IcebergQueryRunner;
+import io.trino.spi.metrics.Metric;
+import io.trino.spi.metrics.Metrics;
 import io.trino.testing.QueryFailedException;
 import io.trino.testing.QueryRunner;
+import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
 import io.trino.testing.TestingConnectorBehavior;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.Schema;
@@ -29,6 +33,7 @@ import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.jdbc.JdbcCatalog;
 import org.apache.iceberg.rest.DelegatingRestSessionCatalog;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.view.View;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -37,16 +42,14 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
-import static io.trino.plugin.iceberg.IcebergTestUtils.checkOrcFileSorting;
-import static io.trino.plugin.iceberg.IcebergTestUtils.checkParquetFileSorting;
 import static io.trino.plugin.iceberg.catalog.rest.RestCatalogTestUtils.backendCatalog;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.lang.String.format;
-import static org.apache.iceberg.FileFormat.PARQUET;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -103,6 +106,7 @@ public class TestIcebergTrinoRestCatalogConnectorSmokeTest
                                 .put("iceberg.register-table-procedure.enabled", "true")
                                 .put("iceberg.writer-sort-buffer-size", "1MB")
                                 .buildOrThrow())
+                .addIcebergProperty("fs.hadoop.enabled", "true")
                 .setInitialTables(REQUIRED_TPCH_TABLES)
                 .build();
     }
@@ -111,6 +115,28 @@ public class TestIcebergTrinoRestCatalogConnectorSmokeTest
     public void teardown()
     {
         backend = null; // closed by closeAfterClass
+    }
+
+    @Test
+    void testCatalogMetadataMetrics()
+    {
+        MaterializedResultWithPlan result = getQueryRunner().executeWithPlan(
+                getSession(),
+                "SELECT count(*) FROM region r, nation n WHERE r.regionkey = n.regionkey");
+        Map<String, Metrics> catalogMetrics = getDistributedQueryRunner().getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(result.queryId())
+                .getQueryStats()
+                .getCatalogMetadataMetrics();
+        assertThat(catalogMetrics).containsKey("iceberg");
+        Map<String, Metric<?>> metrics = catalogMetrics.get("iceberg").getMetrics();
+        assertThat(((LongCount) metrics.get("metastore.all.time.total")).getTotal()).isGreaterThan(0);
+        assertThat(((DistributionSnapshot) metrics.get("metastore.all.time.distribution")).total()).isGreaterThan(0);
+        assertThat(((LongCount) metrics.get("metastore.loadTable.time.total")).getTotal()).isGreaterThan(0);
+        assertThat(((DistributionSnapshot) metrics.get("metastore.loadTable.time.distribution")).total()).isEqualTo(2);
+        // view lookups that miss are not failures
+        assertThat(((DistributionSnapshot) metrics.get("metastore.loadView.time.distribution")).total()).isGreaterThan(0);
+        assertThat(metrics).doesNotContainKeys("metastore.all.failures", "metastore.loadView.failures");
     }
 
     @Test
@@ -143,6 +169,57 @@ public class TestIcebergTrinoRestCatalogConnectorSmokeTest
 
         assertThat(backend.viewExists(sparkViewIdentifier)).isFalse();
         assertThat(backend.viewExists(trinoViewIdentifier)).isFalse();
+    }
+
+    @Test
+    void testViewProperty()
+    {
+        String viewName = "test_view_property_" + randomNameSuffix();
+        assertUpdate("CREATE VIEW " + viewName + " AS SELECT * FROM nation");
+        View view = backend.loadView(toIdentifier(viewName));
+
+        assertThat(computeScalar("SHOW CREATE VIEW " + viewName))
+                .isEqualTo(
+                        """
+                        CREATE VIEW iceberg.tpch.%s SECURITY DEFINER
+                        WITH (
+                           location = '%s'
+                        ) AS
+                        SELECT *
+                        FROM
+                          nation""".formatted(viewName, view.location()));
+
+        assertUpdate("DROP  VIEW " + viewName);
+    }
+
+    @Test
+    void testCreateViewWithLocation()
+    {
+        String viewName = "test_create_view_with_location_" + randomNameSuffix();
+        String namespaceLocation = backend.loadNamespaceMetadata(Namespace.of("tpch")).get("location");
+        String viewLocation = namespaceLocation + "/" + viewName;
+
+        assertUpdate("CREATE VIEW " + viewName + " WITH (location = '" + viewLocation + "') AS SELECT * FROM nation");
+        View view = backend.loadView(toIdentifier(viewName));
+        assertThat(view.location()).isEqualTo(viewLocation);
+
+        assertUpdate("DROP  VIEW " + viewName);
+    }
+
+    @Test
+    void testReplaceViewWithDifferentLocation()
+    {
+        String viewName = "test_replace_view_with_different_location_" + randomNameSuffix();
+        String namespaceLocation = backend.loadNamespaceMetadata(Namespace.of("tpch")).get("location");
+        String viewLocation = namespaceLocation + "/" + viewName;
+
+        assertUpdate("CREATE VIEW " + viewName + " WITH (location = '" + viewLocation + "') AS SELECT * FROM nation");
+
+        assertQueryFails(
+                "CREATE OR REPLACE VIEW " + viewName + " WITH (location = '" + viewLocation + "_changed') AS SELECT * FROM nation",
+                "Cannot change location of existing view '.*'");
+
+        assertUpdate("DROP  VIEW " + viewName);
     }
 
     @Test
@@ -220,7 +297,7 @@ public class TestIcebergTrinoRestCatalogConnectorSmokeTest
     public void testDropTableWithMissingMetadataFile()
     {
         assertThatThrownBy(super::testDropTableWithMissingMetadataFile)
-                .hasMessageMatching("Failed to load table: (.*)");
+                .hasMessageContaining("Cannot drop corrupted table");
     }
 
     @Test
@@ -247,16 +324,7 @@ public class TestIcebergTrinoRestCatalogConnectorSmokeTest
     public void testDropTableWithNonExistentTableLocation()
     {
         assertThatThrownBy(super::testDropTableWithNonExistentTableLocation)
-                .hasMessageMatching("Failed to load table: (.*)");
-    }
-
-    @Override
-    protected boolean isFileSorted(Location path, String sortColumnName)
-    {
-        if (format == PARQUET) {
-            return checkParquetFileSorting(fileSystem.newInputFile(path), sortColumnName);
-        }
-        return checkOrcFileSorting(fileSystem, path, sortColumnName);
+                .hasMessageContaining("Cannot drop corrupted table");
     }
 
     @Override

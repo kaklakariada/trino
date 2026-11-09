@@ -19,6 +19,7 @@ import com.google.common.collect.Lists;
 import com.google.common.primitives.Ints;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import io.trino.json.Json;
 import io.trino.metadata.InternalFunctionBundle;
 import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
@@ -48,8 +49,15 @@ import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.OPERATOR_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
+import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_FIRST;
+import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
+import static io.trino.spi.function.OperatorType.EQUAL;
+import static io.trino.spi.function.OperatorType.HASH_CODE;
 import static io.trino.spi.function.OperatorType.IDENTICAL;
 import static io.trino.spi.function.OperatorType.INDETERMINATE;
+import static io.trino.spi.function.OperatorType.LESS_THAN;
+import static io.trino.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
+import static io.trino.spi.function.OperatorType.XX_HASH_64;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DecimalType.createDecimalType;
@@ -108,12 +116,14 @@ public class TestArrayOperators
         assertions = null;
     }
 
+    // Test-only escape hatch that injects raw text into a JSON-typed column without running it
+    // through json_parse, so the tests can assert how the cast handles malformed input.
     @ScalarFunction
     @LiteralParameters("x")
     @SqlType(StandardTypes.JSON)
-    public static Slice uncheckedToJson(@SqlType("varchar(x)") Slice slice)
+    public static Json uncheckedToJson(@SqlType("varchar(x)") Slice slice)
     {
-        return slice;
+        return Json.unchecked(slice);
     }
 
     @Test
@@ -293,6 +303,24 @@ public class TestArrayOperators
     }
 
     @Test
+    public void testArrayUnionSize()
+    {
+        int size = toIntExact(MAX_FUNCTION_MEMORY.toBytes() + 1);
+        assertTrinoExceptionThrownBy(
+                () -> assertions.expression("array_union(ARRAY[lpad('', %1$s , 'x')], ARRAY[lpad('', %1$s , 'y'), lpad('', %1$s , 'z')])".formatted(size)).evaluate())
+                .hasErrorCode(EXCEEDED_FUNCTION_MEMORY_LIMIT);
+    }
+
+    @Test
+    public void testArrayIntersectSize()
+    {
+        int size = toIntExact(MAX_FUNCTION_MEMORY.toBytes() + 1);
+        assertTrinoExceptionThrownBy(
+                () -> assertions.expression("array_intersect(ARRAY[lpad('', %1$s , 'x'), lpad('', %1$s , 'y')], ARRAY[lpad('', %1$s , 'x'), lpad('', %1$s , 'y')])".formatted(size)).evaluate())
+                .hasErrorCode(EXCEEDED_FUNCTION_MEMORY_LIMIT);
+    }
+
+    @Test
     public void testArrayToJsonSmoke()
     {
         assertThat(assertions.expression("CAST(a AS JSON)")
@@ -418,7 +446,7 @@ public class TestArrayOperators
 
         assertTrinoExceptionThrownBy(assertions.expression("CAST(json_parse(a) AS array(BIGINT))")
                 .binding("a", "'null 123 some invalid JSON content'")::evaluate)
-                .hasMessage("Cannot cast to array(bigint). Unexpected trailing token: 123\nnull 123 some invalid JSON content");
+                .hasMessage("Cannot convert value to JSON: 'null 123 some invalid JSON content'");
 
         assertThat(assertions.expression("CAST(a AS array(BIGINT))")
                 .binding("a", "JSON '[]'"))
@@ -494,7 +522,7 @@ public class TestArrayOperators
         assertThat(assertions.expression("CAST(a AS array(VARCHAR))")
                 .binding("a", "JSON '[true, false, 12, 12.3, \"puppies\", \"kittens\", \"null\", \"\", null]'"))
                 .hasType(new ArrayType(VARCHAR))
-                .isEqualTo(asList("true", "false", "12", "1.23E1", "puppies", "kittens", "null", "", null));
+                .isEqualTo(asList("true", "false", "12", "12.3", "puppies", "kittens", "null", "", null));
 
         assertThat(assertions.expression("CAST(a AS array(JSON))")
                 .binding("a", "JSON '[5, 3.14, [1, 2, 3], \"e\", {\"a\": \"b\"}, null, \"null\", [null]]'"))
@@ -552,22 +580,22 @@ public class TestArrayOperators
         // invalid cast
         assertTrinoExceptionThrownBy(() -> assertions.expression("CAST(a AS array(BIGINT))")
                 .binding("a", "JSON '{\"a\": 1}'").evaluate())
-                .hasMessage("Cannot cast to array(bigint). Expected a json array, but got {\n{\"a\":1}")
+                .hasMessage("Cannot cast to array(bigint). Expected a json array, but got OBJECT\n{\"a\":1}")
                 .hasErrorCode(INVALID_CAST_ARGUMENT);
 
         assertTrinoExceptionThrownBy(() -> assertions.expression("CAST(a AS array(ARRAY(BIGINT)))")
                 .binding("a", "JSON '[1, 2, 3]'").evaluate())
-                .hasMessage("Cannot cast to array(array(bigint)). Expected a json array, but got 1\n[1,2,3]")
+                .hasMessage("Cannot cast to array(array(bigint)). Expected a json array, but got INTEGER\n[1,2,3]")
                 .hasErrorCode(INVALID_CAST_ARGUMENT);
 
         assertTrinoExceptionThrownBy(() -> assertions.expression("CAST(a AS array(BIGINT))")
                 .binding("a", "JSON '[1, {}]'").evaluate())
-                .hasMessage("Cannot cast to array(bigint). Unexpected token when cast to bigint: {\n[1,{}]")
+                .hasMessage("Cannot cast to array(bigint). Unexpected OBJECT when cast to bigint\n[1,{}]")
                 .hasErrorCode(INVALID_CAST_ARGUMENT);
 
         assertTrinoExceptionThrownBy(() -> assertions.expression("CAST(a AS array(ARRAY(BIGINT)))")
                 .binding("a", "JSON '[[1], {}]'").evaluate())
-                .hasMessage("Cannot cast to array(array(bigint)). Expected a json array, but got {\n[[1],{}]")
+                .hasMessage("Cannot cast to array(array(bigint)). Expected a json array, but got OBJECT\n[[1],{}]")
                 .hasErrorCode(INVALID_CAST_ARGUMENT);
 
         assertTrinoExceptionThrownBy(() -> assertions.expression("CAST(a AS array(BIGINT))")
@@ -592,7 +620,7 @@ public class TestArrayOperators
 
         assertTrinoExceptionThrownBy(() -> assertions.expression("CAST(a AS array(INTEGER))")
                 .binding("a", "JSON '[1234567890123.456]'").evaluate())
-                .hasMessage("Cannot cast to array(integer). Out of range for integer: 1.234567890123456E12\n[1234567890123.456]")
+                .hasMessage("Cannot cast to array(integer). Out of range for integer: 1234567890123\n[1234567890123.456]")
                 .hasErrorCode(INVALID_CAST_ARGUMENT);
 
         assertThat(assertions.expression("CAST(a AS array(DECIMAL(10,5)))")
@@ -1209,16 +1237,18 @@ public class TestArrayOperators
 
         // array with various types including scientific notation and string "null"
         String inputJsonArray = "[true, false, 12, 12.3, 1.23E1, 0, 0.000000000000000, 0e1000, 0e-1000, 1, 100000000000000000000000000000000000000000000000000000000000000000000e-68, 0.100000000000000, \"puppies\", \"kittens\", \"null\", null]";
-        String expectedVarcharArray = "ARRAY[VARCHAR 'true', 'false', '12', '1.23E1', '1.23E1', '0', '0E0', '0E0', '0E0', '1', '1.0E0', '1.0E-1', 'puppies', 'kittens', 'null', null]";
+        // Both bindings converge: the cast reads the JSON value's items, so the result does not
+        // depend on whether the plan carried the JSON as a literal or as json_parse. An exact
+        // literal (12.3) is a DECIMAL and renders as itself; an exponent literal (1.23E1,
+        // 100...0e-68, 0e1000) is approximate, so it is a double and renders in scientific form.
         assertThat(assertions.expression("cast(a as ARRAY(VARCHAR))")
                 .binding("a", "JSON '" + inputJsonArray + "'"))
                 .hasType(new ArrayType(VARCHAR))
-                .matches(expectedVarcharArray);
-        // Same with json_parse, exercising SpecializeCastWithJsonParse
+                .matches("ARRAY[VARCHAR 'true', 'false', '12', '12.3', '1.23E1', '0', '0.000000000000000', '0E0', '0E0', '1', '1.0E0', '0.100000000000000', 'puppies', 'kittens', 'null', null]");
         assertThat(assertions.expression("cast(json_parse(a) as ARRAY(VARCHAR))")
                 .binding("a", "'" + inputJsonArray + "'"))
                 .hasType(new ArrayType(VARCHAR))
-                .matches(expectedVarcharArray);
+                .matches("ARRAY[VARCHAR 'true', 'false', '12', '12.3', '1.23E1', '0', '0.000000000000000', '0E0', '0E0', '1', '1.0E0', '0.100000000000000', 'puppies', 'kittens', 'null', null]");
 
         // Number with leading zeros
         assertTrinoExceptionThrownBy(assertions.expression("cast(a as ARRAY(VARCHAR))")
@@ -1227,15 +1257,13 @@ public class TestArrayOperators
         assertTrinoExceptionThrownBy(assertions.expression("cast(a as ARRAY(VARCHAR))")
                 .binding("a", "JSON '[000.0]'")::evaluate)
                 .hasMessage("line 3:16: '[000.0]' is not a valid JSON literal");
-        // Number with leading zeros with json_parse, exercising SpecializeCastWithJsonParse
+        // Malformed JSON is rejected when the value is built, before any cast runs.
         assertTrinoExceptionThrownBy(assertions.expression("cast(json_parse(a) as ARRAY(VARCHAR))")
                 .binding("a", "'[000]'")::evaluate)
-                // TODO the exception message could be better
-                .hasMessage("Cannot cast to array(varchar).\n[000]");
+                .hasMessage("Cannot convert value to JSON: '[000]'");
         assertTrinoExceptionThrownBy(assertions.expression("cast(json_parse(a) as ARRAY(VARCHAR))")
                 .binding("a", "'[000.0]'")::evaluate)
-                // TODO the exception message could be better
-                .hasMessage("Cannot cast to array(varchar).\n[000.0]");
+                .hasMessage("Cannot convert value to JSON: '[000.0]'");
 
         // non-array JSON should fail
         assertTrinoExceptionThrownBy(() -> assertions.expression("cast(a as ARRAY(VARCHAR))")
@@ -2601,6 +2629,13 @@ public class TestArrayOperators
         assertThat(assertions.function("array_min", "ARRAY[ARRAY[REAL '1'], ARRAY[CAST(NaN() AS REAL)], ARRAY[REAL '3']]"))
                 .hasType(new ArrayType(REAL))
                 .isEqualTo(ImmutableList.of(1.0f));
+
+        assertThat(assertions.function("array_min", "ARRAY[1, 2, 3]"))
+                .neverFails();
+        assertThat(assertions.function("array_min", "ARRAY[ARRAY[1, NULL], ARRAY[1, 2]]"))
+                .neverFails();
+        assertThat(assertions.function("array_min", "ARRAY[ROW(1, NULL), ROW(1, 2), ROW(2, NULL)]"))
+                .neverFails();
     }
 
     @Test
@@ -2818,6 +2853,13 @@ public class TestArrayOperators
         assertThat(assertions.function("array_max", "ARRAY[ARRAY[REAL '1'], ARRAY[CAST(NaN() AS REAL)], ARRAY[REAL '3']]"))
                 .hasType(new ArrayType(REAL))
                 .isEqualTo(ImmutableList.of(3.0f));
+
+        assertThat(assertions.function("array_max", "ARRAY[1, 2, 3]"))
+                .neverFails();
+        assertThat(assertions.function("array_max", "ARRAY[ARRAY[1, NULL], ARRAY[1, 2]]"))
+                .neverFails();
+        assertThat(assertions.function("array_max", "ARRAY[ROW(1, NULL), ROW(1, 2), ROW(2, NULL)]"))
+                .neverFails();
     }
 
     @Test
@@ -3548,6 +3590,15 @@ public class TestArrayOperators
         assertThat(assertions.function("array_sort", "ARRAY[1, null, null, -1, 0]"))
                 .hasType(new ArrayType(INTEGER))
                 .isEqualTo(asList(-1, 0, 1, null, null));
+
+        assertThat(assertions.function("array_sort", "ARRAY[ROW(1, 2), ROW(1, 3)]"))
+                .neverFails();
+        assertThat(assertions.function("array_sort", "ARRAY[ARRAY[1, 2], ARRAY[1, 3]]"))
+                .neverFails();
+        assertThat(assertions.expression("array_sort(ARRAY[ROW(1, NULL), ROW(1, 2)])"))
+                .matches("ARRAY[ROW(1, 2), ROW(1, NULL)]");
+        assertThat(assertions.expression("array_sort(ARRAY[ARRAY[1, NULL], ARRAY[1, 2]])"))
+                .matches("ARRAY[ARRAY[1, 2], ARRAY[1, NULL]]");
 
         // invalid functions
         assertTrinoExceptionThrownBy(assertions.function("array_sort", "ARRAY[color('red'), color('blue')]")::evaluate)
@@ -5776,6 +5827,13 @@ public class TestArrayOperators
     @Test
     public void testFlatten()
     {
+        assertThat(assertions.function("flatten", "CAST(ARRAY[] AS ARRAY(ARRAY(INTEGER)))"))
+                .matches("CAST(ARRAY[] AS ARRAY(INTEGER))");
+        assertThat(assertions.function("flatten", "CAST(ARRAY[NULL, ARRAY[], NULL] AS ARRAY(ARRAY(INTEGER)))"))
+                .matches("CAST(ARRAY[] AS ARRAY(INTEGER))");
+        assertThat(assertions.function("flatten", "ARRAY[ARRAY[], sequence(1, 1000), NULL, ARRAY[NULL], ARRAY[]]"))
+                .matches("concat(sequence(1, 1000), ARRAY[CAST(NULL AS BIGINT)])");
+
         // BOOLEAN Tests
         assertThat(assertions.function("flatten", "ARRAY[ARRAY[TRUE, FALSE], ARRAY[FALSE]]"))
                 .hasType(new ArrayType(BOOLEAN))
@@ -5889,5 +5947,187 @@ public class TestArrayOperators
         assertThat(assertions.function("flatten", "ARRAY[NULL, ARRAY[MAP(ARRAY[3, 4], ARRAY[3, 4])]]"))
                 .hasType(new ArrayType(mapType(INTEGER, INTEGER)))
                 .isEqualTo(ImmutableList.of(ImmutableMap.of(3, 3, 4, 4)));
+    }
+
+    /**
+     * Probe every {@code Generic*Operator} class on an ARRAY with a NULL element, in both SQL form
+     * (when one exists) and the mangled {@code "$operator$x"(...)} form. The assertions document
+     * which {@code Generic*Operator.neverFails} declarations match the operator's actual runtime
+     * behavior. A mismatch (planner-belief {@code .neverFails()} passing while the runtime
+     * assertion proves the operator can throw) indicates the declaration is incorrect — see
+     * https://github.com/trinodb/trino/issues/29891.
+     *
+     * Planner-belief assertions use NULL-free input of the same type, since the planner reasons
+     * type-wise, not value-wise.
+     */
+    @Test
+    public void testOperatorsOnArrayWithNullElement()
+    {
+        String arrayWithNull = "ARRAY[1, CAST(NULL AS INTEGER)]";
+        String arrayWithLeadingNull = "ARRAY[CAST(NULL AS INTEGER), 1]";
+        String arrayConcrete = "ARRAY[1, 2]";
+        String arrayConcreteOther = "ARRAY[3, 4]";
+
+        // EQUAL — three-valued; a NULL element makes equality unknown
+        assertThat(assertions.expression("a = b")
+                .binding("a", arrayWithNull)
+                .binding("b", arrayConcrete))
+                .isNull(BOOLEAN);
+        assertThat(assertions.operator(EQUAL, arrayWithNull, arrayConcrete))
+                .isNull(BOOLEAN);
+        assertThat(assertions.operator(EQUAL, arrayConcrete, arrayConcreteOther))
+                .neverFails();
+
+        // IDENTICAL — NULL-aware (NULL ≡ NULL is TRUE)
+        assertThat(assertions.expression("a IS NOT DISTINCT FROM b")
+                .binding("a", arrayWithNull)
+                .binding("b", arrayWithNull))
+                .isEqualTo(true);
+        assertThat(assertions.operator(IDENTICAL, arrayWithNull, arrayWithNull))
+                .isEqualTo(true);
+        assertThat(assertions.operator(IDENTICAL, arrayConcrete, arrayConcreteOther))
+                .neverFails();
+
+        // INDETERMINATE — detects the NULL element
+        assertThat(assertions.operator(INDETERMINATE, arrayWithNull))
+                .isEqualTo(true);
+        assertThat(assertions.operator(INDETERMINATE, arrayConcrete))
+                .neverFails();
+
+        // LESS_THAN — three-valued: unknown when the NULL element decides, decided by an earlier element otherwise
+        assertThat(assertions.expression("a < b")
+                .binding("a", arrayWithNull)
+                .binding("b", arrayConcrete))
+                .isNull(BOOLEAN);
+        assertThat(assertions.expression("a < b")
+                .binding("a", arrayWithNull)
+                .binding("b", arrayConcreteOther))
+                .isEqualTo(true);
+        assertThat(assertions.expression("a < b")
+                .binding("a", arrayConcreteOther)
+                .binding("b", arrayWithNull))
+                .isEqualTo(false);
+        assertThat(assertions.expression("a < b")
+                .binding("a", arrayWithLeadingNull)
+                .binding("b", arrayConcrete))
+                .isNull(BOOLEAN);
+        assertThat(assertions.operator(LESS_THAN, arrayWithNull, arrayConcrete))
+                .isNull(BOOLEAN);
+        assertThat(assertions.operator(LESS_THAN, arrayConcrete, arrayConcreteOther))
+                .neverFails();
+
+        // LESS_THAN_OR_EQUAL — same three-valued logic, true when the arrays are equal
+        assertThat(assertions.expression("a <= b")
+                .binding("a", arrayWithNull)
+                .binding("b", arrayConcrete))
+                .isNull(BOOLEAN);
+        assertThat(assertions.expression("a <= b")
+                .binding("a", arrayConcrete)
+                .binding("b", arrayConcrete))
+                .isEqualTo(true);
+        assertThat(assertions.operator(LESS_THAN_OR_EQUAL, arrayWithNull, arrayConcrete))
+                .isNull(BOOLEAN);
+        assertThat(assertions.operator(LESS_THAN_OR_EQUAL, arrayConcrete, arrayConcreteOther))
+                .neverFails();
+
+        // COMPARISON_UNORDERED_FIRST / LAST — total ordering, never fails on a NULL element
+        assertThat(assertions.operator(COMPARISON_UNORDERED_FIRST, arrayWithNull, arrayConcrete))
+                .neverFails();
+        assertThat(assertions.operator(COMPARISON_UNORDERED_LAST, arrayWithNull, arrayConcrete))
+                .neverFails();
+
+        // BETWEEN — desugars to two ordering comparisons, so it is three-valued too
+        assertThat(assertions.expression("a BETWEEN b AND c")
+                .binding("a", arrayWithNull)
+                .binding("b", arrayConcrete)
+                .binding("c", arrayConcreteOther))
+                .isNull(BOOLEAN);
+        assertThat(assertions.expression("a BETWEEN b AND c")
+                .binding("a", arrayConcrete)
+                .binding("b", arrayConcrete)
+                .binding("c", arrayConcreteOther))
+                .isEqualTo(true);
+
+        // HASH_CODE / XX_HASH_64 — tolerate NULL elements
+        assertThat(assertions.operator(HASH_CODE, arrayWithNull))
+                .neverFails();
+        assertThat(assertions.operator(XX_HASH_64, arrayWithNull))
+                .neverFails();
+    }
+
+    @Test
+    public void testArrayOrderingWithNullElement()
+    {
+        // ORDER BY uses the total array comparison: a NULL element sorts last in ascending order,
+        // examined only after the preceding elements tie
+        assertThat(assertions.query(
+                """
+                SELECT x
+                FROM (VALUES
+                        ARRAY[1, 2],
+                        ARRAY[1, CAST(NULL AS INTEGER)],
+                        ARRAY[1, 1],
+                        ARRAY[CAST(NULL AS INTEGER), 9]) t(x)
+                ORDER BY x"""))
+                .ordered()
+                .matches(
+                        """
+                        VALUES
+                            ARRAY[1, 1],
+                            ARRAY[1, 2],
+                            ARRAY[1, CAST(NULL AS INTEGER)],
+                            ARRAY[CAST(NULL AS INTEGER), 9]""");
+
+        // a shorter array sorts before a longer one that shares its prefix, regardless of trailing nulls
+        assertThat(assertions.query(
+                """
+                SELECT x
+                FROM (VALUES
+                        ARRAY[1, 2],
+                        ARRAY[1],
+                        ARRAY[1, CAST(NULL AS INTEGER)]) t(x)
+                ORDER BY x"""))
+                .ordered()
+                .matches(
+                        """
+                        VALUES
+                            ARRAY[1],
+                            ARRAY[1, 2],
+                            ARRAY[1, CAST(NULL AS INTEGER)]""");
+    }
+
+    @Test
+    public void testArrayComparisonWithNanAndNegativeZero()
+    {
+        // NaN and -0.0 follow the element type's semantics and coexist with NULL handling
+        assertThat(assertions.expression("a = b")
+                .binding("a", "ARRAY[nan()]")
+                .binding("b", "ARRAY[nan()]"))
+                .isEqualTo(false);
+        assertThat(assertions.expression("a < b")
+                .binding("a", "ARRAY[nan()]")
+                .binding("b", "ARRAY[1e0]"))
+                .isEqualTo(false);
+        assertThat(assertions.expression("a <= b")
+                .binding("a", "ARRAY[-0e0]")
+                .binding("b", "ARRAY[0e0]"))
+                .isEqualTo(true);
+
+        // ordering treats NaN as the largest non-null value and a NULL element as last
+        assertThat(assertions.query(
+                """
+                SELECT x
+                FROM (VALUES
+                        ARRAY[nan()],
+                        ARRAY[1e0],
+                        ARRAY[CAST(NULL AS DOUBLE)]) t(x)
+                ORDER BY x"""))
+                .ordered()
+                .matches(
+                        """
+                        VALUES
+                            ARRAY[1e0],
+                            ARRAY[nan()],
+                            ARRAY[CAST(NULL AS DOUBLE)]""");
     }
 }

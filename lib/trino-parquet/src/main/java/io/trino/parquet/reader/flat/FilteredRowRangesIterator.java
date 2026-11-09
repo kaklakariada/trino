@@ -14,6 +14,7 @@
 package io.trino.parquet.reader.flat;
 
 import io.trino.parquet.reader.FilteredRowRanges;
+import io.trino.parquet.reader.FilteredRowRanges.RowRange;
 
 import java.util.Iterator;
 import java.util.OptionalLong;
@@ -21,7 +22,6 @@ import java.util.OptionalLong;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
-import static io.trino.parquet.reader.FilteredRowRanges.RowRange;
 import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -185,14 +185,14 @@ public class FilteredRowRangesIterator
     public void resetForNewPage(OptionalLong firstRowIndex)
     {
         checkArgument(firstRowIndex.isPresent(), "Missing firstRowIndex for selecting rowRanges");
-        checkArgument(firstRowIndex.getAsLong() >= 0, "firstRowIndex %s cannot be negative", firstRowIndex.getAsLong());
+        checkArgument(firstRowIndex.orElseThrow() >= 0, "firstRowIndex %s cannot be negative", firstRowIndex.orElseThrow());
         checkArgument(
-                firstRowIndex.getAsLong() >= pageFirstRowIndex,
+                firstRowIndex.orElseThrow() >= pageFirstRowIndex,
                 "firstRowIndex %s cannot be less than current pageFirstRowIndex %s",
-                firstRowIndex.getAsLong(),
+                firstRowIndex.orElseThrow(),
                 pageFirstRowIndex);
 
-        pageFirstRowIndex = firstRowIndex.getAsLong();
+        pageFirstRowIndex = firstRowIndex.orElseThrow();
         pageValuesConsumed = 0;
         long rangeEnd = currentRange.end();
         if (pageFirstRowIndex > rangeEnd) {

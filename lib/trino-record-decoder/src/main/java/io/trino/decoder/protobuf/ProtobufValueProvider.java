@@ -20,6 +20,8 @@ import com.google.protobuf.DynamicMessage;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.decoder.FieldValueProvider;
+import io.trino.json.Json;
+import io.trino.json.JsonItems;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -40,8 +42,8 @@ import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import jakarta.annotation.Nullable;
@@ -81,7 +83,7 @@ public class ProtobufValueProvider
         this.value = value;
         this.columnType = requireNonNull(columnType, "columnType is null");
         this.columnName = requireNonNull(columnName, "columnName is null");
-        this.jsonType = typeManager.getType(new TypeSignature(JSON));
+        this.jsonType = typeManager.getType(new TypeDescriptor(JSON));
     }
 
     @Override
@@ -271,10 +273,8 @@ public class ProtobufValueProvider
     private void buildMap(String columnName, Collection<DynamicMessage> dynamicMessages, Type keyType, Type valueType, BlockBuilder keyBuilder, BlockBuilder valueBuilder)
     {
         for (DynamicMessage dynamicMessage : dynamicMessages) {
-            if (dynamicMessage.getField(dynamicMessage.getDescriptorForType().findFieldByNumber(1)) != null) {
-                serializeObject(keyBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 1)), keyType, columnName);
-                serializeObject(valueBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 2)), valueType, columnName);
-            }
+            serializeObject(keyBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 1)), keyType, columnName);
+            serializeObject(valueBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 2)), valueType, columnName);
         }
     }
 
@@ -312,13 +312,15 @@ public class ProtobufValueProvider
     }
 
     @Nullable
-    private static Block serializeJson(BlockBuilder builder, Object value, Type type)
+    private static Object serializeJson(BlockBuilder builder, Object value, Type type)
     {
+        // The decoder carries the JSON value as its canonical text; JsonType's native value is Json.
+        Json json = JsonItems.fromText((Slice) value);
         if (builder != null) {
-            type.writeObject(builder, value);
+            type.writeObject(builder, json);
             return null;
         }
-        return (Block) value;
+        return json;
     }
 
     private static long parseTimestamp(int precision, DynamicMessage timestamp)

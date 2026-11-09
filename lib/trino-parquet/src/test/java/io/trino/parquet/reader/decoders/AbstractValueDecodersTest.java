@@ -22,6 +22,7 @@ import io.trino.parquet.PrimitiveField;
 import io.trino.parquet.dictionary.Dictionary;
 import io.trino.parquet.reader.SimpleSliceInputStream;
 import io.trino.parquet.reader.TestingValuesWriters;
+import io.trino.parquet.reader.decoders.ValueDecoder.ValueDecodersProvider;
 import io.trino.parquet.reader.flat.ColumnAdapter;
 import io.trino.parquet.reader.flat.DictionaryDecoder;
 import io.trino.spi.type.DecimalType;
@@ -34,6 +35,7 @@ import org.apache.parquet.column.values.ValuesReader;
 import org.apache.parquet.column.values.ValuesWriter;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -59,14 +61,12 @@ import static io.trino.parquet.ParquetEncoding.PLAIN;
 import static io.trino.parquet.ParquetEncoding.PLAIN_DICTIONARY;
 import static io.trino.parquet.ParquetEncoding.RLE_DICTIONARY;
 import static io.trino.parquet.ValuesType.VALUES;
-import static io.trino.parquet.reader.decoders.ValueDecoder.ValueDecodersProvider;
 import static io.trino.testing.DataProviders.cartesianProduct;
 import static io.trino.testing.DataProviders.concat;
 import static io.trino.testing.DataProviders.toDataProvider;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
-import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 @TestInstance(PER_CLASS)
@@ -157,9 +157,9 @@ public abstract class AbstractValueDecodersTest
     static DataBuffer getWrittenBuffer(ValuesWriter valuesWriter)
     {
         try {
-            return new DataBuffer(
-                    Slices.wrappedBuffer(valuesWriter.getBytes().toByteArray()),
-                    valuesWriter.toDictPageAndClose());
+            Slice dataPage = Slices.wrappedBuffer(valuesWriter.getBytes().toByteArray());
+            DictionaryPage dictionaryPage = valuesWriter.toDictPageAndClose();
+            return new DataBuffer(dataPage, dictionaryPage == null ? null : dictionaryPage.copy());
         }
         catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -241,7 +241,7 @@ public abstract class AbstractValueDecodersTest
     {
         Types.PrimitiveBuilder<PrimitiveType> builder = Types.required(typeName);
         if (typeLength.isPresent()) {
-            builder = builder.length(typeLength.getAsInt());
+            builder = builder.length(typeLength.orElseThrow());
         }
         if (trinoType instanceof DecimalType decimalType) {
             builder = builder.as(LogicalTypeAnnotation.decimalType(decimalType.getScale(), decimalType.getPrecision()));

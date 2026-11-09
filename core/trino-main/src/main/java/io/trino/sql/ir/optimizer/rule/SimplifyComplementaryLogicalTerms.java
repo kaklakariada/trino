@@ -24,6 +24,7 @@ import io.trino.sql.ir.IsNull;
 import io.trino.sql.ir.Logical;
 import io.trino.sql.ir.optimizer.IrOptimizerRule;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.SymbolAllocator;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -32,11 +33,13 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
 import static io.trino.sql.ir.IrExpressions.not;
 import static io.trino.sql.ir.Logical.Operator.AND;
 import static io.trino.sql.ir.Logical.Operator.OR;
 import static io.trino.sql.planner.DeterminismEvaluator.isDeterministic;
+import static io.trino.type.BooleanOperators.NOT_FUNCTION_NAME;
 
 /**
  * Simplifies logical expression containing terms and negations of those terms.
@@ -57,7 +60,7 @@ public class SimplifyComplementaryLogicalTerms
     }
 
     @Override
-    public Optional<Expression> apply(Expression expression, Session session, Map<Symbol, Expression> bindings)
+    public Optional<Expression> apply(Expression expression, Session session, SymbolAllocator symbolAllocator, Map<Symbol, Expression> bindings)
     {
         if (!(expression instanceof Logical(Logical.Operator operator, List<Expression> terms))) {
             return Optional.empty();
@@ -67,7 +70,7 @@ public class SimplifyComplementaryLogicalTerms
         Set<Expression> negatives = new HashSet<>();
         for (Expression term : terms) {
             if (isDeterministic(term)) {
-                if (term instanceof Call(ResolvedFunction function, List<Expression> arguments) && function.name().equals(builtinFunctionName("$not"))) {
+                if (term instanceof Call(ResolvedFunction function, List<Expression> arguments) && function.name().equals(builtinFunctionName(NOT_FUNCTION_NAME))) {
                     negatives.add(arguments.getFirst());
                 }
                 else {
@@ -86,7 +89,7 @@ public class SimplifyComplementaryLogicalTerms
         for (Expression term : terms) {
             if (isDeterministic(term)) {
                 Expression unwrapped = term;
-                if (term instanceof Call(ResolvedFunction function, List<Expression> arguments) && function.name().equals(builtinFunctionName("$not"))) {
+                if (term instanceof Call(ResolvedFunction function, List<Expression> arguments) && function.name().equals(builtinFunctionName(NOT_FUNCTION_NAME))) {
                     unwrapped = arguments.getFirst();
                 }
 
@@ -95,7 +98,7 @@ public class SimplifyComplementaryLogicalTerms
                         changed = true;
                         newTerms.add(switch (operator) {
                             case AND -> new Logical(AND, ImmutableList.of(unwrapped, new IsNull(unwrapped)));
-                            case OR -> new Logical(OR, ImmutableList.of(unwrapped, not(metadata, new IsNull(unwrapped))));
+                            case OR -> new Logical(OR, ImmutableList.of(unwrapped, not(metadata, getCharVarcharCoercion(session), new IsNull(unwrapped))));
                         });
                         seen.add(unwrapped);
                     }

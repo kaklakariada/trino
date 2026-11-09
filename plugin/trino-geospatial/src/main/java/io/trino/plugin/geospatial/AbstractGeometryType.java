@@ -28,9 +28,9 @@ import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 import io.trino.spi.type.AbstractVariableWidthType;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeOperatorDeclaration;
 import io.trino.spi.type.TypeOperators;
-import io.trino.spi.type.TypeSignature;
 import org.locationtech.jts.geom.Geometry;
 
 import java.lang.invoke.MethodHandles;
@@ -58,9 +58,9 @@ public abstract class AbstractGeometryType
 
     private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION = extractOperatorDeclaration(GeometryTypeOperators.class, lookup(), Geometry.class);
 
-    protected AbstractGeometryType(TypeSignature signature)
+    protected AbstractGeometryType(TypeDescriptor descriptor)
     {
-        super(signature, Geometry.class);
+        super(descriptor, Geometry.class);
     }
 
     @Override

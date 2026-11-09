@@ -21,6 +21,7 @@ import com.google.inject.Inject;
 import io.airlift.bytecode.BytecodeBlock;
 import io.airlift.bytecode.BytecodeNode;
 import io.airlift.bytecode.ClassDefinition;
+import io.airlift.bytecode.CompilationException;
 import io.airlift.bytecode.DynamicClassLoader;
 import io.airlift.bytecode.FieldDefinition;
 import io.airlift.bytecode.MethodDefinition;
@@ -48,6 +49,7 @@ import io.trino.operator.join.PagesHash;
 import io.trino.operator.join.nonspilling.PartitionedLookupSource;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.ValueBlock;
@@ -68,12 +70,14 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.stream.IntStream;
 
+import static com.google.common.base.Throwables.getCausalChain;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.bytecode.Access.FINAL;
 import static io.airlift.bytecode.Access.PRIVATE;
 import static io.airlift.bytecode.Access.PUBLIC;
 import static io.airlift.bytecode.Access.STATIC;
 import static io.airlift.bytecode.Access.a;
+import static io.airlift.bytecode.BytecodeUtils.estimateMaxCodeSize;
 import static io.airlift.bytecode.Parameter.arg;
 import static io.airlift.bytecode.ParameterizedType.type;
 import static io.airlift.bytecode.expression.BytecodeExpressions.add;
@@ -83,24 +87,31 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.constantInt;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantLong;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantTrue;
 import static io.airlift.bytecode.expression.BytecodeExpressions.getStatic;
-import static io.airlift.bytecode.expression.BytecodeExpressions.invokeDynamic;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
 import static io.airlift.bytecode.expression.BytecodeExpressions.newInstance;
 import static io.airlift.bytecode.expression.BytecodeExpressions.setStatic;
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.operator.join.JoinUtils.getSingleBigintJoinChannel;
+import static io.trino.spi.StandardErrorCode.COMPILER_ERROR;
+import static io.trino.spi.StandardErrorCode.QUERY_EXCEEDED_COMPILER_LIMIT;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.DEFAULT_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
-import static io.trino.sql.gen.Bootstrap.BOOTSTRAP_METHOD;
-import static io.trino.util.CompilerUtils.defineClass;
+import static io.trino.sql.gen.BytecodeUtils.fitsJitCompilableMethod;
+import static io.trino.sql.gen.BytecodeUtils.invoke;
+import static io.trino.util.CompilerUtils.defineHiddenClass;
+import static io.trino.util.CompilerUtils.isClassDumpEnabled;
+import static io.trino.util.CompilerUtils.isCompilerLimitExceeded;
 import static io.trino.util.CompilerUtils.makeClassName;
 import static java.util.Objects.requireNonNull;
 
 public class JoinCompiler
 {
+    // The default HugeMethodLimit, so each helper is JIT compilable
+    private static final int MAX_HELPER_CODE_SIZE = 8000;
+
     private final TypeOperators typeOperators;
     private final boolean enableSingleChannelBigintLookupSource;
 
@@ -147,11 +158,16 @@ public class JoinCompiler
 
     public LookupSourceSupplierFactory compileLookupSourceFactory(List<? extends Type> types, List<Integer> joinChannels, OptionalInt sortChannel, Optional<List<Integer>> outputChannels)
     {
-        return lookupSourceFactories.getUnchecked(new CacheKey(
-                types,
-                outputChannels.orElseGet(() -> rangeList(types.size())),
-                joinChannels,
-                sortChannel));
+        try {
+            return lookupSourceFactories.getUnchecked(new CacheKey(
+                    types,
+                    outputChannels.orElseGet(() -> rangeList(types.size())),
+                    joinChannels,
+                    sortChannel));
+        }
+        catch (RuntimeException e) {
+            throw convertCompilationException(e);
+        }
     }
 
     public PagesHashStrategyFactory compilePagesHashStrategyFactory(List<Type> types, List<Integer> joinChannels)
@@ -165,11 +181,16 @@ public class JoinCompiler
         requireNonNull(joinChannels, "joinChannels is null");
         requireNonNull(outputChannels, "outputChannels is null");
 
-        return new PagesHashStrategyFactory(hashStrategies.getUnchecked(new CacheKey(
-                types,
-                outputChannels.orElseGet(() -> rangeList(types.size())),
-                joinChannels,
-                OptionalInt.empty())));
+        try {
+            return new PagesHashStrategyFactory(hashStrategies.getUnchecked(new CacheKey(
+                    types,
+                    outputChannels.orElseGet(() -> rangeList(types.size())),
+                    joinChannels,
+                    OptionalInt.empty())));
+        }
+        catch (RuntimeException e) {
+            throw convertCompilationException(e);
+        }
     }
 
     private List<Integer> rangeList(int endExclusive)
@@ -181,7 +202,9 @@ public class JoinCompiler
 
     private LookupSourceSupplierFactory internalCompileLookupSourceFactory(List<Type> types, List<Integer> outputChannels, List<Integer> joinChannels, OptionalInt sortChannel)
     {
-        Class<? extends PagesHashStrategy> pagesHashStrategyClass = internalCompileHashStrategy(types, outputChannels, joinChannels, sortChannel);
+        // the same strategy is reachable through compilePagesHashStrategyFactory, so it is
+        // taken from the cache rather than compiled again into a second identical class
+        Class<? extends PagesHashStrategy> pagesHashStrategyClass = hashStrategies.getUnchecked(new CacheKey(types, outputChannels, joinChannels, sortChannel));
 
         OptionalInt singleBigintJoinChannel = OptionalInt.empty();
         if (enableSingleChannelBigintLookupSource) {
@@ -251,7 +274,7 @@ public class JoinCompiler
         generateCompareSortChannelPositionsMethod(classDefinition, callSiteBinder, types, channelFields, sortChannel);
         generateIsSortChannelPositionNull(classDefinition, channelFields, sortChannel);
 
-        return defineClass(classDefinition, PagesHashStrategy.class, callSiteBinder.getBindings(), getClass().getClassLoader());
+        return defineHiddenClass(classDefinition, PagesHashStrategy.class, callSiteBinder.getClassData());
     }
 
     private static void generateConstructor(
@@ -326,31 +349,101 @@ public class JoinCompiler
         Parameter blockPosition = arg("blockPosition", int.class);
         Parameter pageBuilder = arg("pageBuilder", PageBuilder.class);
         Parameter outputChannelOffset = arg("outputChannelOffset", int.class);
-        MethodDefinition appendToMethod = classDefinition.declareMethod(a(PUBLIC), "appendTo", type(void.class), blockIndex, blockPosition, pageBuilder, outputChannelOffset);
 
-        Variable thisVariable = appendToMethod.getThis();
-        BytecodeBlock appendToBody = appendToMethod.getBody();
+        generateOutputChannelsMethod(
+                classDefinition,
+                "appendTo",
+                ImmutableList.of(blockIndex, blockPosition, pageBuilder, outputChannelOffset),
+                outputChannels.size(),
+                (thisVariable, block, pageBuilderOutputChannel) -> {
+                    BytecodeBlock appendToBody = new BytecodeBlock();
+                    appendToBody.append(block.set(
+                            thisVariable.getField(channelFields.get(outputChannels.get(pageBuilderOutputChannel)))
+                                    .invoke("get", Object.class, blockIndex)
+                                    .cast(Block.class)));
 
-        int pageBuilderOutputChannel = 0;
-        Variable block = appendToMethod.getScope().declareVariable(Block.class, "block");
-        for (int outputChannel : outputChannels) {
-            appendToBody.append(block.set(
-                    thisVariable.getField(channelFields.get(outputChannel))
-                            .invoke("get", Object.class, blockIndex)
-                            .cast(Block.class)));
+                    BytecodeExpression blockBuilderExpression = pageBuilder
+                            .invoke("getBlockBuilder", BlockBuilder.class, add(outputChannelOffset, constantInt(pageBuilderOutputChannel)));
+                    if (isClassDumpEnabled()) {
+                        appendToBody.comment("pageBuilder.getBlockBuilder(outputChannelOffset + %s).append(block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(blockPosition));", pageBuilderOutputChannel);
+                    }
+                    appendToBody
+                            .append(blockBuilderExpression.invoke(
+                                    "append",
+                                    void.class,
+                                    block.invoke("getUnderlyingValueBlock", ValueBlock.class),
+                                    block.invoke("getUnderlyingValuePosition", int.class, blockPosition)));
+                    return appendToBody;
+                });
+    }
 
-            BytecodeExpression blockBuilderExpression = pageBuilder
-                    .invoke("getBlockBuilder", BlockBuilder.class, add(outputChannelOffset, constantInt(pageBuilderOutputChannel)));
-            appendToBody
-                    .comment("pageBuilder.getBlockBuilder(outputChannelOffset + %s).append(block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(blockPosition));", pageBuilderOutputChannel)
-                    .append(blockBuilderExpression.invoke(
-                            "append",
-                            void.class,
-                            block.invoke("getUnderlyingValueBlock", ValueBlock.class),
-                            block.invoke("getUnderlyingValuePosition", int.class, blockPosition)));
-            pageBuilderOutputChannel++;
+    /**
+     * Generates a public method running the code of every output channel, split into private helpers when it does not fit one JIT compilable method.
+     * A wide build side gets helpers named after their first output channel:
+     * <pre>
+     *     public void appendTo(int blockIndex, int blockPosition, PageBuilder pageBuilder, int outputChannelOffset) {
+     *         this.appendTo_0(blockIndex, blockPosition, pageBuilder, outputChannelOffset);
+     *         this.appendTo_180(blockIndex, blockPosition, pageBuilder, outputChannelOffset);
+     *         ...
+     *     }
+     * </pre>
+     */
+    private static void generateOutputChannelsMethod(
+            ClassDefinition classDefinition,
+            String methodName,
+            List<Parameter> parameters,
+            int outputChannelCount,
+            OutputChannelCodeGenerator outputChannelCode)
+    {
+        MethodDefinition method = classDefinition.declareMethod(a(PUBLIC), methodName, type(void.class), parameters);
+        Variable thisVariable = method.getThis();
+        BytecodeBlock body = method.getBody();
+
+        BytecodeBlock allOutputChannels = new BytecodeBlock();
+        Variable block = method.getScope().declareVariable(Block.class, "block");
+        for (int outputChannel = 0; outputChannel < outputChannelCount; outputChannel++) {
+            allOutputChannels.append(outputChannelCode.generate(thisVariable, block, outputChannel));
         }
-        appendToBody.ret();
+        if (fitsJitCompilableMethod(allOutputChannels, method.getScope())) {
+            body.append(allOutputChannels).ret();
+            return;
+        }
+
+        int outputChannel = 0;
+        while (outputChannel < outputChannelCount) {
+            MethodDefinition helper = classDefinition.declareMethod(a(PRIVATE), methodName + "_" + outputChannel, type(void.class), parameters);
+            int nextOutputChannel = generateOutputChannelsHelper(helper, outputChannel, outputChannelCount, outputChannelCode);
+            body.append(thisVariable.invoke(helper, parameters));
+            outputChannel = nextOutputChannel;
+        }
+        body.ret();
+    }
+
+    private static int generateOutputChannelsHelper(MethodDefinition helper, int start, int outputChannelCount, OutputChannelCodeGenerator outputChannelCode)
+    {
+        Variable thisVariable = helper.getThis();
+        Variable block = helper.getScope().declareVariable(Block.class, "block");
+        BytecodeBlock body = new BytecodeBlock();
+        int outputChannel = start;
+        int size = 0;
+        while (outputChannel < outputChannelCount) {
+            BytecodeNode code = outputChannelCode.generate(thisVariable, block, outputChannel);
+            int codeSize = estimateMaxCodeSize(code, helper.getScope());
+            // always emit at least one output channel, so an oversized one still makes progress
+            if (outputChannel > start && size + codeSize > MAX_HELPER_CODE_SIZE) {
+                break;
+            }
+            size += codeSize;
+            body.append(code);
+            outputChannel++;
+        }
+        helper.getBody().append(body).ret();
+        return outputChannel;
+    }
+
+    private interface OutputChannelCodeGenerator
+    {
+        BytecodeNode generate(Variable thisVariable, Variable block, int outputIndex);
     }
 
     private static void generateIsPositionNull(ClassDefinition classDefinition, List<FieldDefinition> joinChannelFields)
@@ -460,7 +553,7 @@ public class JoinCompiler
         return new IfStatement()
                 .condition(blockRef.invoke("isNull", boolean.class, blockPosition))
                 .ifTrue(constantLong(0L))
-                .ifFalse(invokeDynamic(BOOTSTRAP_METHOD, ImmutableList.of(callSiteBinder.bind(hashCodeOperator).getBindingId()), "hash", hashCodeOperator.type(), blockRef, blockPosition));
+                .ifFalse(invoke(callSiteBinder.bind(hashCodeOperator), "hash", blockRef, blockPosition));
     }
 
     private void generateRowIdenticalToRowMethod(
@@ -682,15 +775,7 @@ public class JoinCompiler
             BytecodeExpression rightBlockPosition)
     {
         MethodHandle identicalOperator = typeOperators.getIdenticalOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION_NOT_NULL, BLOCK_POSITION_NOT_NULL));
-        return invokeDynamic(
-                BOOTSTRAP_METHOD,
-                ImmutableList.of(callSiteBinder.bind(identicalOperator).getBindingId()),
-                "identical",
-                identicalOperator.type(),
-                leftBlock,
-                leftBlockPosition,
-                rightBlock,
-                rightBlockPosition);
+        return invoke(callSiteBinder.bind(identicalOperator), "identical", leftBlock, leftBlockPosition, rightBlock, rightBlockPosition);
     }
 
     private void generatePositionEqualsPositionMethod(
@@ -822,7 +907,7 @@ public class JoinCompiler
 
         Variable thisVariable = compareMethod.getThis();
 
-        int index = sortChannel.getAsInt();
+        int index = sortChannel.orElseThrow();
 
         BytecodeExpression leftBlock = thisVariable
                 .getField(channelFields.get(index))
@@ -836,15 +921,7 @@ public class JoinCompiler
 
         // choice of placing unordered values first or last does not matter for this code
         MethodHandle comparisonOperator = typeOperators.getComparisonUnorderedLastOperator(types.get(index), simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION));
-        BytecodeNode comparison = invokeDynamic(
-                BOOTSTRAP_METHOD,
-                ImmutableList.of(callSiteBinder.bind(comparisonOperator).getBindingId()),
-                "comparison",
-                long.class,
-                leftBlock,
-                leftBlockPosition,
-                rightBlock,
-                rightBlockPosition)
+        BytecodeNode comparison = invoke(callSiteBinder.bind(comparisonOperator), "comparison", leftBlock, leftBlockPosition, rightBlock, rightBlockPosition)
                 .cast(int.class)
                 .ret();
 
@@ -876,7 +953,7 @@ public class JoinCompiler
 
         Variable thisVariable = isSortChannelPositionNullMethod.getThis();
 
-        int index = sortChannel.getAsInt();
+        int index = sortChannel.orElseThrow();
 
         BytecodeExpression block = thisVariable
                 .getField(channelFields.get(index))
@@ -902,15 +979,21 @@ public class JoinCompiler
             BytecodeExpression rightBlockPosition)
     {
         MethodHandle equalOperator = typeOperators.getEqualOperator(type, simpleConvention(DEFAULT_ON_NULL, BLOCK_POSITION_NOT_NULL, BLOCK_POSITION_NOT_NULL));
-        return invokeDynamic(
-                BOOTSTRAP_METHOD,
-                ImmutableList.of(callSiteBinder.bind(equalOperator).getBindingId()),
-                "equal",
-                equalOperator.type(),
-                leftBlock,
-                leftBlockPosition,
-                rightBlock,
-                rightBlockPosition);
+        return invoke(callSiteBinder.bind(equalOperator), "equal", leftBlock, leftBlockPosition, rightBlock, rightBlockPosition);
+    }
+
+    private static RuntimeException convertCompilationException(RuntimeException e)
+    {
+        if (isCompilerLimitExceeded(e)) {
+            return new TrinoException(
+                    QUERY_EXCEEDED_COMPILER_LIMIT,
+                    "Compiler failed. Possible reasons include: the query may have too many columns",
+                    e);
+        }
+        if (getCausalChain(e).stream().anyMatch(CompilationException.class::isInstance)) {
+            return new TrinoException(COMPILER_ERROR, e);
+        }
+        return e;
     }
 
     @UsedByGeneratedCode

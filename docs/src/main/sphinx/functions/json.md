@@ -4,16 +4,31 @@ The SQL standard describes functions and operators to process JSON data. They
 allow you to access JSON data according to its structure, generate JSON data,
 and store it persistently in SQL tables.
 
-Importantly, the SQL standard imposes that there is no dedicated data type to
-represent JSON data in SQL. Instead, JSON data is represented as character or
-binary strings. Although Trino supports `JSON` type, it is not used or
-produced by the following functions.
+These functions accept `JSON` values as well as character and binary strings.
+A `JSON` value retains the SQL types of its scalars during internal processing.
+Returning a `JSON` value preserves those types; serializing it as JSON text uses
+the representations available in JSON text. Parsing preserves object member
+order and duplicate keys.
+
+JSON parsing, SQL construction, and text output support at most 1,024 nested
+arrays and objects. Constructing a container around an existing JSON value counts
+toward the same limit. Exceeding the limit raises a SQL error; `JSON_QUERY` handles
+construction failures according to its `ON ERROR` clause.
+
+SQL/JSON output preserves the declared padding of `CHAR` values as JSON strings.
+This includes `JSON_QUERY` results from `PASSING` parameters, with or without an
+array wrapper. Ordinary SQL `PASSING` values retain their SQL type during path
+evaluation and follow the session coercion policy.
 
 Trino supports three functions for querying JSON data:
 {ref}`json_exists<json-exists>`,
 {ref}`json_query<json-query>`, and {ref}`json_value<json-value>`. Each of them
 is based on the same mechanism of exploring and processing JSON input using
 JSON path.
+
+For convenient navigation of `JSON`-typed columns, Trino also supports the
+{ref}`JSON simplified accessor <json-simplified-accessor>` syntax, which lets
+you reach into JSON values using familiar dotted/subscripted notation.
 
 Trino also supports two functions for generating JSON data --
 {ref}`json_array<json-array>`, and {ref}`json_object<json-object>`.
@@ -179,10 +194,6 @@ evaluation fails. In lax mode, the second object is silently skipped, and the
 resulting sequence is `100, 300`.
 
 All items in the input sequence must be JSON objects.
-
-:::{note}
-Trino does not support JSON objects with duplicate keys.
-:::
 
 #### wildcard member accessor
 
@@ -570,12 +581,52 @@ Let `<path>` return a sequence of three JSON arrays:
 <path>.size() --> 3, 4, 2
 ```
 
-### Limitations
-
-The SQL standard describes the `datetime()` JSON path item method. Trino does
-not support it.
-
 ### Trino-specific behavior
+
+Without a format template, `datetime()` parses the value as the most specific of
+`DATE` / `TIME(p)` / `TIME(p) WITH TIME ZONE` / `TIMESTAMP(p)` /
+`TIMESTAMP(p) WITH TIME ZONE` based on the value's shape.
+
+The `datetime()` format template is a string of fields and literal text.
+Fields are case-insensitive and consume digits from the value; literal text
+must match the value verbatim.
+
+Supported fields:
+
+| Field            | Width | Description                                              |
+|------------------|-------|----------------------------------------------------------|
+| `YYYY` `YYY` `YY` `Y` | 4 / 3 / 2 / 1 | Year. Widths below 4 are prefixed with the leading digits of the reference year `1970` (e.g. `YY=24` → `1924`). |
+| `RRRR` `RR`      | 4 / 2 | Rounded year. With width 2, values 0–49 map to the current century, 50–99 to the previous century. |
+| `MM`             | 2     | Month, 1–12. |
+| `DD`             | 2     | Day of month, 1–31. |
+| `DDD`            | 3     | Day of year, 1–366. Mutually exclusive with `MM` / `DD`. |
+| `HH24`           | 2     | Hour of day, 0–23. Mutually exclusive with `HH` / `HH12` / `A.M.` / `P.M.`. |
+| `HH` `HH12`      | 2     | Hour of half-day, 1–12. Requires `A.M.` or `P.M.`. |
+| `A.M.` `P.M.`    | 4     | Half-day marker. Case-insensitive (both `a.m.` and `A.M.` are accepted). Requires `HH` or `HH12`. |
+| `MI`             | 2     | Minute, 0–59. |
+| `SS`             | 2     | Second, 0–59. |
+| `SSSSS`          | 5     | Second of day, 0–86399. Mutually exclusive with `HH` / `HH12` / `HH24` / `MI` / `SS` / `A.M.` / `P.M.`. |
+| `FF1`–`FF9`      | 1–9   | Fractional seconds, with the given digit width. |
+| `TZH`            | 3     | Time zone hour offset with sign, e.g. `+05` or `-08`. |
+| `TZM`            | 2     | Time zone minute offset, 0–59. Requires `TZH`. |
+
+Literal text is any of the single-character delimiters `-`, `.`, `/`, `,`,
+`'`, `;`, `:`, ` ` (space), or a double-quoted string (escape an embedded `"`
+as `""`). Two adjacent delimiters are rejected; a delimiter next to a quoted
+literal is fine.
+
+Examples:
+
+```text
+YYYY-MM-DD                          -> 2024-01-02
+YYYY-MM-DD"T"HH24:MI:SS.FF3         -> 2024-01-02T12:34:56.789
+HH12:MI:SS A.M.                     -> 09:30:00 P.M.
+YYYY-MM-DD HH24:MI:SS.FF3 TZH:TZM   -> 2024-01-02 12:34:56.789 +05:30
+```
+
+Trino additionally accepts `FF10`, `FF11`, and `FF12` to match Trino's maximum
+`TIME(p)` / `TIMESTAMP(p)` precision of 12 — these widths are a Trino
+extension and may not be portable across other SQL/JSON implementations.
 
 `like_regex()` accepts the standard SQL/XQuery flags (`i`, `m`, `s`, `x`).
 
@@ -660,6 +711,131 @@ method, the item `"a"` causes type mismatch.
 <path>.floor() --> ERROR
 ```
 
+(json-typed-arguments)=
+## JSON-typed arguments
+
+`JSON_ARRAY`, `JSON_OBJECT`, and SQL/JSON `PASSING` clauses consume values of type
+`JSON` directly, without requiring `FORMAT JSON`:
+
+```sql
+SELECT json_array(JSON '1', JSON '[2,3]'); -- '[1,[2,3]]'
+SELECT json_object('value': JSON '{"x":1}'); -- '{"value":{"x":1}}'
+SELECT json_query('{}', 'strict $p.x' PASSING JSON '{"x":1}' AS "p"); -- '1'
+```
+
+Earlier versions cast these arguments to `VARCHAR`. Scalar values could therefore
+become JSON strings, while object and array values could fail that cast. To request
+the scalar string behavior explicitly, cast the JSON value to `VARCHAR` before
+passing it: `json_array(CAST(JSON '1' AS VARCHAR))` returns `'["1"]'`.
+
+(json-simplified-accessor)=
+## JSON simplified accessor
+
+For convenient navigation of a `JSON`-typed value, Trino lets you write
+dotted/subscripted accessor chains that read as if you were navigating a row
+or array. The receiver of the chain must be a value of declared type `JSON`;
+each step extends a JSON path applied to that value.
+
+| Syntax | Equivalent to |
+|--------|---------------|
+| `j.name` | `JSON_QUERY(j, 'lax $.name' RETURNING VARCHAR WITH CONDITIONAL ARRAY WRAPPER NULL ON EMPTY NULL ON ERROR)` |
+| `j."FooBar"` | `JSON_QUERY(j, 'lax $."FooBar"' …)` — delimited identifier, case-sensitive |
+| `j.'foo bar'` | same as the delimited form |
+| `j[3]` | `JSON_QUERY(j, 'lax $[3]' …)` — integer subscript |
+| `j[*]` | `JSON_QUERY(j, 'lax $[*]' …)` — array wildcard |
+| `j.*` (in `SELECT`) | `JSON_QUERY(j, 'lax $.*' …)` — member wildcard, produces one `VARCHAR` column |
+| `j.name.bigint()` | `JSON_VALUE(j, 'lax $.name' RETURNING BIGINT …)` — item method |
+| `j.payload.amount.decimal(18,2)` | `JSON_VALUE(j, 'lax $.payload.amount' RETURNING DECIMAL(18,2) …)` |
+
+Accessors without an item method return `VARCHAR`. The abbreviated `JSON_QUERY`
+expressions above include the same `RETURNING VARCHAR` and behavior clauses.
+
+Member, index, wildcard, and item-method steps compose freely:
+`j.rows[1].cells[*]`, `j.items[0].label`, `j.payload.*`, etc.
+
+### Case sensitivity
+
+Member-name identifiers are matched case-sensitively against the JSON keys
+they reference:
+
+* `j.Foo` matches the member literally named `Foo`.
+* `j."Foo"` and `j.'Foo'` are the same path — both quote the member name.
+
+This is different from regular SQL identifier handling, where `j.foo` and
+`j.FOO` refer to the same column. The JSON path language is case-sensitive,
+and the simplified accessor preserves the source case so JSON keys match
+exactly as written.
+
+Item-method names (`bigint`, `time`, `decimal`, …) are SQL identifiers and
+remain case-insensitive — `j.x.BIGINT()`, `j.x.Bigint()`, and `j.x.bigint()`
+all resolve to the same item method.
+
+### Item methods
+
+Item methods cover the same set of casts that `json_value`'s `RETURNING`
+clause does. The supported names and the type they return:
+
+| Method | Returns |
+|--------|---------|
+| `bigint()` | `BIGINT` |
+| `boolean()` | `BOOLEAN` |
+| `date()` | `DATE` |
+| `decimal()` | `DECIMAL` (unparameterized) |
+| `decimal(p)` | `DECIMAL(p)` |
+| `decimal(p, s)` | `DECIMAL(p, s)` |
+| `integer()` | `INTEGER` |
+| `number()` | `DOUBLE` |
+| `string()` | `VARCHAR` |
+| `time()` | `TIME(3)` |
+| `time(p)` | `TIME(p)` |
+| `time_tz()` | `TIME(3) WITH TIME ZONE` |
+| `time_tz(p)` | `TIME(p) WITH TIME ZONE` |
+| `timestamp()` | `TIMESTAMP(3)` |
+| `timestamp(p)` | `TIMESTAMP(p)` |
+| `timestamp_tz()` | `TIMESTAMP(3) WITH TIME ZONE` |
+| `timestamp_tz(p)` | `TIMESTAMP(p) WITH TIME ZONE` |
+
+The `ON EMPTY` and `ON ERROR` clauses default to `NULL`.
+
+### Member wildcard in `SELECT`
+
+`SELECT j.*` is shorthand for `SELECT JSON_QUERY(j, 'lax $.*' RETURNING VARCHAR …)`. It
+produces one `VARCHAR` output column whose value is a JSON array of the
+top-level members of `j`. An optional `AS (column_alias)` may supply the
+output column's name:
+
+```
+SELECT j.* AS (payload) FROM (VALUES (CAST('{"a":1,"b":2}' AS JSON))) AS t(j);
+```
+
+```text
+  payload
+-----------
+ [1,2]
+(1 row)
+```
+
+The same wildcard is also recognized inside subscripted chains in a value-
+expression position, where it expands the path under that prefix:
+`j.payload.*`, `j.items[*]`, `j.items[*].label`, etc.
+
+### Outer scope
+
+The receiver of the chain may reference a column from an outer scope, for
+correlated subqueries:
+
+```
+SELECT (SELECT o.j.foo)
+FROM (VALUES (CAST('{"foo":1}' AS JSON))) AS o(j);
+```
+
+An outer-scope receiver is supported for member access (`o.j.foo`),
+subscripts (`o.j.items[0]`), item methods on a subscripted chain
+(`o.j.items[0].bigint()`), and the member wildcard (`o.j.*`). Item methods
+applied directly to a dotted member chain without an intervening subscript —
+e.g. `o.j.foo.bigint()` — are not supported on outer-scope columns; query
+the column locally or insert an explicit `JSON_VALUE` call in those cases.
+
 (json-exists)=
 ## json_exists
 
@@ -686,8 +862,8 @@ kinds of errors:
 - Input conversion errors, such as malformed JSON
 - JSON path evaluation errors, e.g. division by zero
 
-`json_input` is a character string or a binary string. It should contain
-a single JSON item. For a binary string, you can specify encoding.
+`json_input` is a `JSON` value, a character string, or a binary string. A string
+should contain a single JSON item; for a binary string, you can specify encoding.
 
 `json_path` is a string literal, containing the path mode specification, and
 the path expression, following the syntax rules described in
@@ -804,13 +980,14 @@ The constant string `json_path` is evaluated using the `json_input` as the
 context variable (`$`), and the passed arguments as the named variables
 (`$variable_name`).
 
-The returned value is a JSON item returned by the path. By default, it is
-represented as a character string (`varchar`). In the `RETURNING` clause,
-you can specify other character string type or `varbinary`. With
-`varbinary`, you can also specify the desired encoding.
+The returned value is a JSON item returned by the path. With no `RETURNING`
+clause it is a `JSON` value when the input is `JSON`-typed, and a character
+string (`varchar`) otherwise. In the `RETURNING` clause, you can specify
+another character string type or `varbinary`. With `varbinary`, you can also
+specify the desired encoding.
 
-`json_input` is a character string or a binary string. It should contain
-a single JSON item. For a binary string, you can specify encoding.
+`json_input` is a `JSON` value, a character string, or a binary string. A string
+should contain a single JSON item; for a binary string, you can specify encoding.
 
 `json_path` is a string literal, containing the path mode specification, and
 the path expression, following the syntax rules described in
@@ -1005,8 +1182,8 @@ The returned value is the SQL scalar returned by the path. By default, it is
 converted to string (`varchar`). In the `RETURNING` clause, you can specify
 other desired type: a character string type, numeric, boolean or datetime type.
 
-`json_input` is a character string or a binary string. It should contain
-a single JSON item. For a binary string, you can specify encoding.
+`json_input` is a `JSON` value, a character string, or a binary string. A string
+should contain a single JSON item; for a binary string, you can specify encoding.
 
 `json_path` is a string literal, containing the path mode specification, and
 the path expression, following the syntax rules described in
@@ -1190,7 +1367,8 @@ column_name FOR ORDINALITY
 | NESTED [ PATH ] json_path [ AS path_name ] COLUMNS ( column_definition [, ...] )
 ```
 
-`json_input` is a character string or a binary string. It must contain a single
+`json_input` is a `JSON` value, a character string, or a binary string. A string
+must contain a single
 JSON item.
 
 `json_path` is a string literal containing the path mode specification and the
@@ -1421,8 +1599,9 @@ SELECT json_array(true, 12e-1, 'text')
 --> '[true,1.2,"text"]'
 ```
 
-Additionally to SQL values, you can pass JSON values. They are character or
-binary strings with a specified format and optional encoding:
+Values of type `JSON` are consumed as JSON without a `FORMAT` clause. This also
+applies to JSON-typed columns and expressions. Character or binary strings require
+a specified format and optional encoding to be interpreted as JSON:
 
 ```
 SELECT json_array(
@@ -1479,8 +1658,6 @@ SELECT json_array(true, null, 1 NULL ON NULL)
 
 ### Returned type
 
-The SQL standard imposes that there is no dedicated data type to represent JSON
-data in SQL. Instead, JSON data is represented as character or binary strings.
 By default, the `json_array` function returns varchar containing the textual
 representation of the JSON array. With the `RETURNING` clause, you can
 specify other character string type:
@@ -1558,8 +1735,9 @@ SELECT json_object('x' : true, 'y' : 12e-1, 'z' : 'text')
 --> '{"x":true,"y":1.2,"z":"text"}'
 ```
 
-Additionally to SQL values, you can pass JSON values. They are character or
-binary strings with a specified format and optional encoding:
+Values of type `JSON` are consumed as JSON without a `FORMAT` clause. This also
+applies to JSON-typed columns and expressions. Character or binary strings require
+a specified format and optional encoding to be interpreted as JSON:
 
 ```
 SELECT json_object(
@@ -1628,17 +1806,21 @@ SELECT json_object('x' : null, 'x' : 1 WITH UNIQUE KEYS)
 --> failure: "duplicate key passed to JSON_OBJECT function"
 ```
 
-Note that this option is not supported if any of the arguments has a
-`FORMAT` specification.
+Keys are checked in every nested object, including objects inside arrays. This
+applies both to JSON-typed arguments and to strings supplied with `FORMAT JSON`.
+The same key can occur in separate sibling objects; uniqueness is local to each
+object. An argument containing duplicate keys in any one object is rejected:
 
-If `WITHOUT UNIQUE KEYS` is specified, duplicate keys are not supported due
-to implementation limitation. `WITHOUT UNIQUE KEYS` is the default
-configuration.
+```
+SELECT json_object('x' : '{"a": 1, "a": 2}' FORMAT JSON WITH UNIQUE KEYS)
+--> failure: "duplicate key passed to JSON_OBJECT function"
+```
+
+`WITHOUT UNIQUE KEYS` is the default configuration; duplicate keys are
+preserved in insertion order.
 
 ### Returned type
 
-The SQL standard imposes that there is no dedicated data type to represent JSON
-data in SQL. Instead, JSON data is represented as character or binary strings.
 By default, the `json_object` function returns varchar containing the textual
 representation of the JSON object. With the `RETURNING` clause, you can
 specify other character string type:
@@ -1672,6 +1854,73 @@ standard, there shall be no `JSON` data type. Instead, JSON values
 should be represented as string values. The remaining functionality of the
 following functions is covered by the functions described previously.
 :::
+
+(json-value-constructor)=
+## JSON value constructor
+
+```text
+JSON(value_expression [ FORMAT JSON [ ENCODING { UTF8 | UTF16 | UTF32 } ] ])
+```
+
+Converts a character or binary string into a `JSON` value. With no `FORMAT` clause the input is treated as JSON
+text; `FORMAT JSON ENCODING …` parses a binary input with the named
+character encoding. Always returns `JSON`; there is no `RETURNING` clause.
+
+```
+SELECT JSON('[1, 2, 3]');                                     -- JSON '[1,2,3]'
+SELECT JSON(X'5B312C20322C20335D' FORMAT JSON ENCODING UTF8); -- JSON '[1,2,3]'
+SELECT JSON(JSON '{"a": 1}');                                 -- JSON '{"a":1}'
+```
+
+`JSON(...)` has no `ON ERROR` clause; malformed input raises a SQL error.
+
+Duplicate object keys are preserved, each with its own value, and member order
+follows the input. A `JSON` literal and {func}`json_parse` parse through the
+same value model, so they behave the same way:
+
+```
+SELECT json_format(JSON('{"a": 1, "a": 2}'));  -- '{"a":1,"a":2}'
+SELECT json_format(JSON '{"a": 1, "a": 2}');   -- '{"a":1,"a":2}'
+```
+
+`JSON` is not a reserved word, so a function named `json` remains callable: a
+qualified call such as `catalog.schema.json(...)` resolves to the function, and
+only the unqualified `JSON(x)` is the constructor.
+Other call forms, such as `json()`, `json(x, y)`, and `json(DISTINCT x)`, are
+parsed as ordinary function calls and require a matching function definition.
+
+(json-serialize)=
+## json_serialize
+
+```text
+JSON_SERIALIZE(
+    json_value_expression
+    [ RETURNING data_type [ FORMAT JSON [ ENCODING { UTF8 | UTF16 | UTF32 } ] ] ]
+    [ { NULL | ERROR } ON ERROR ]
+    )
+```
+
+Serializes a JSON value to its canonical text or binary form. The returned
+type defaults to `VARCHAR`; pass `RETURNING` to choose a `CHAR(n)`,
+`VARCHAR(n)`, or `VARBINARY` target. When the target is `VARBINARY`, the
+optional `FORMAT JSON ENCODING` clause selects the byte encoding (UTF-8,
+UTF-16, or UTF-32). Returning `JSON` itself is not allowed; use the
+[`JSON(...)`](#json-value-constructor) constructor for the no-op case.
+
+The `ON ERROR` clause controls what happens when the input is malformed
+or the conversion to the target type fails. `ERROR ON ERROR` (the default)
+raises a SQL error; `NULL ON ERROR` yields SQL `NULL` instead.
+
+Trino also accepts character and binary string input, which is read with an
+implicit `FORMAT JSON`, and supports `{ NULL | ERROR } ON ERROR`.
+
+```
+SELECT JSON_SERIALIZE(JSON '[1, 2, 3]');                         -- VARCHAR '[1,2,3]'
+SELECT JSON_SERIALIZE('[1, 2]' RETURNING varchar(20));           -- VARCHAR(20) '[1,2]'
+SELECT JSON_SERIALIZE(JSON '{"a": 1}'
+                      RETURNING varbinary FORMAT JSON ENCODING UTF16);
+SELECT JSON_SERIALIZE('not json' NULL ON ERROR);                 -- NULL
+```
 
 ## Cast to JSON
 
@@ -1751,11 +2000,51 @@ from a standalone `NULL` will produce SQL `NULL` instead of
 
 ## Cast from JSON
 
+Direct casts from JSON to `TIMESTAMP`, `TIME WITH TIME ZONE`, and
+`TIMESTAMP WITH TIME ZONE` are not currently available. `JSON_VALUE` can extract a
+typed datetime scalar using a matching `RETURNING` type, for example:
+
+```sql
+SELECT json_value(
+    CAST(TIMESTAMP '2024-01-02 03:04:05.123456789' AS JSON),
+    'strict $' RETURNING TIMESTAMP(9));
+```
+
+
 Casting to `BOOLEAN`, `TINYINT`, `SMALLINT`, `INTEGER`,
-`BIGINT`, `REAL`, `DOUBLE` or `VARCHAR` is supported.
+`BIGINT`, `REAL`, `DOUBLE`, `VARCHAR`, `DATE` or `TIME` is supported.
 Casting to `ARRAY` and `MAP` is supported when the element type of
 the array is one of the supported types, or when the key type of the map
 is `VARCHAR` and value type of the map is one of the supported types.
+
+Casts use the SQL type carried by the JSON scalar. Integer and decimal literals
+without an exponent retain exact values, using `INTEGER`, `BIGINT`, `DECIMAL`,
+or `NUMBER` as needed. Literals containing `e` or `E` use approximate `DOUBLE`
+semantics. For example, a decimal-form value can be cast to `BIGINT` without
+first rounding through `DOUBLE`:
+
+```sql
+SELECT CAST(JSON '1234567890123456789.0' AS BIGINT);
+-- 1234567890123456789
+```
+
+Scalar numeric casts can report the error code of the corresponding SQL
+conversion, including numeric overflow. Casts to arrays, maps, and rows wrap
+conversion failures as `INVALID_CAST_ARGUMENT`, with context about the failed
+collection cast. Invalid JSON shapes also produce `INVALID_CAST_ARGUMENT`.
+
+Casting to `DATE` or `TIME` requires the JSON value to be a string holding a
+valid date or time, or a JSON value that already carries a date or a time. Any
+other JSON value, including a number, is rejected:
+
+```
+SELECT CAST(JSON '"2001-01-31"' AS DATE);      --> DATE '2001-01-31'
+SELECT CAST(JSON '"01:23:45.678"' AS TIME(3)); --> TIME '01:23:45.678'
+SELECT CAST(JSON 'null' AS DATE);              --> NULL
+SELECT CAST(JSON '42' AS DATE);
+--> failure: "Cannot cast JSON value to date; expected a JSON string or a JSON date"
+```
+
 Behaviors of the casts are shown with the examples below:
 
 ```
@@ -1829,6 +2118,29 @@ SELECT is_json_scalar('[1, 2, 3]'); -- false
 ```
 :::
 
+:::{function} json_scalar(x) -> json
+Wrap a SQL value as a JSON scalar value. Supports `boolean`, all integral
+and floating-point types, `decimal`, `number`, `varchar`/`char`, `date`,
+`time(p)`/`time(p) with time zone`, `timestamp(p)`/`timestamp(p) with time zone`.
+
+The JSON value keeps the SQL value and type it was built from, except that `CHAR`
+values become `VARCHAR` scalars with their declared padding. Direct casts back
+to datetime types are supported for `DATE` and `TIME(p)`. For `TIME WITH TIME ZONE`,
+`TIMESTAMP`, and `TIMESTAMP WITH TIME ZONE`, use `JSON_VALUE` with a matching
+`RETURNING` type to extract the typed value. JSON text has no datetime type, so
+serializing a datetime renders the canonical SQL literal as a JSON string.
+A SQL `NULL` input yields SQL `NULL`, not the JSON `null` value.
+
+```
+SELECT json_scalar(1);                    -- JSON '1'
+SELECT json_scalar('abc');                -- JSON '"abc"'
+SELECT json_scalar(CAST('a' AS CHAR(3)));  -- JSON '"a  "'
+SELECT json_scalar(DATE '2024-01-02');    -- JSON '"2024-01-02"'
+SELECT CAST(json_scalar(DATE '2024-01-02') AS DATE); -- DATE '2024-01-02'
+SELECT json_scalar(CAST(NULL AS bigint)); -- NULL
+```
+:::
+
 :::{function} json_array_contains(json, value) -> boolean
 Determine if `value` exists in `json` (a string containing a JSON array):
 
@@ -1837,26 +2149,13 @@ SELECT json_array_contains('[1, 2, 3]', 2); -- true
 ```
 :::
 
-::::{function} json_array_get(json_array, index) -> json
-
-:::{warning}
-The semantics of this function are broken. If the extracted element
-is a string, it will be converted into an invalid `JSON` value that
-is not properly quoted (the value will not be surrounded by quotes
-and any interior quotes will not be escaped).
-
-We recommend against using this function. It cannot be fixed without
-impacting existing usages and may be removed in a future release.
-
-Use {ref}`json_query<json-query>` instead with JSONPath array indexing
-syntax, e.g., `json_query(json_array, 'lax $[0]')`.
-:::
+:::{function} json_array_get(json_array, index) -> json
 
 Returns the element at the specified index into the `json_array`.
 The index is zero-based:
 
 ```
-SELECT json_array_get('["a", [3, 9], "c"]', 0); -- JSON 'a' (invalid JSON)
+SELECT json_array_get('["a", [3, 9], "c"]', 0); -- JSON '"a"'
 SELECT json_array_get('["a", [3, 9], "c"]', 1); -- JSON '[3,9]'
 ```
 
@@ -1864,7 +2163,7 @@ This function also supports negative indexes for fetching element indexed
 from the end of an array:
 
 ```
-SELECT json_array_get('["c", [3, 9], "a"]', -1); -- JSON 'a' (invalid JSON)
+SELECT json_array_get('["c", [3, 9], "a"]', -1); -- JSON '"a"'
 SELECT json_array_get('["c", [3, 9], "a"]', -2); -- JSON '[3,9]'
 ```
 
@@ -1875,7 +2174,7 @@ SELECT json_array_get('[]', 0);                -- NULL
 SELECT json_array_get('["a", "b", "c"]', 10);  -- NULL
 SELECT json_array_get('["c", "b", "a"]', -10); -- NULL
 ```
-::::
+:::
 
 :::{function} json_array_length(json) -> bigint
 Returns the array length of `json` (a string containing a JSON array):
@@ -1969,6 +2268,15 @@ different semantics.
 the JSON value deserialized from the JSON text.
 The JSON value can be a JSON object, a JSON array, a JSON string, a JSON number,
 `true`, `false` or `null`.
+
+Character input is UTF-8; a byte-order mark or bytes resembling another encoding
+do not change that encoding. JSON strings and member names must contain Unicode
+scalar values, so lone surrogate escapes are rejected. Valid surrogate pairs
+represent supplementary characters.
+
+Exponent-form numbers use `DOUBLE` semantics. Overflow is rejected, while very
+small values can underflow to zero. Exact numbers without an exponent retain
+their precision within the supported numeric representation limits.
 
 ```
 SELECT json_parse('not_json');         -- ERROR!

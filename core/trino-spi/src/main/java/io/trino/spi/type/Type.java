@@ -34,12 +34,15 @@ public interface Type
      * Gets the name of this type which must be case insensitive globally unique.
      * The name of a user defined type must be a legal identifier in Trino.
      */
-    TypeSignature getTypeSignature();
+    TypeDescriptor getTypeDescriptor();
 
+    /// The serialized identity of this type, used for intra-cluster serialization (connector handles,
+    /// predicates, block encoding, symbol keys). This is the SQL spelling, so it round-trips through
+    /// [TypeManager#getType(TypeId)] via [TypeManager#fromPersistedSqlType(String)].
     @JsonValue
     default TypeId getTypeId()
     {
-        return TypeId.of(getTypeSignature().toString());
+        return TypeId.of(TypeSyntax.toSql(getTypeDescriptor()));
     }
 
     /**
@@ -48,7 +51,7 @@ public interface Type
      */
     default String getBaseName()
     {
-        return getTypeSignature().getBase();
+        return getTypeDescriptor().getBase();
     }
 
     /**

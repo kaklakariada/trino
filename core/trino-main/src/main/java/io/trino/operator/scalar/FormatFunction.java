@@ -65,7 +65,7 @@ import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
 import static io.trino.spi.type.Timestamps.roundDiv;
 import static io.trino.spi.type.TinyintType.TINYINT;
-import static io.trino.spi.type.TypeSignature.typeVariable;
+import static io.trino.spi.type.TypeTemplates.typeVariable;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.DateTimes.toLocalDateTime;
 import static io.trino.type.DateTimes.toZonedDateTime;
@@ -78,7 +78,7 @@ import static java.lang.String.format;
 public final class FormatFunction
         extends SqlScalarFunction
 {
-    public static final String NAME = "$format";
+    public static final String FORMAT_FUNCTION_NAME = "$format";
 
     public static final FormatFunction FORMAT_FUNCTION = new FormatFunction();
     private static final MethodHandle METHOD_HANDLE = methodHandle(FormatFunction.class, "sqlFormat", List.class, ConnectorSession.class, Slice.class, SqlRow.class);
@@ -87,12 +87,12 @@ public final class FormatFunction
 
     private FormatFunction()
     {
-        super(FunctionMetadata.scalarBuilder(NAME)
+        super(FunctionMetadata.scalarBuilder(FORMAT_FUNCTION_NAME)
                 .signature(Signature.builder()
                         .rowTypeParameter("T")
-                        .argumentType(VARCHAR.getTypeSignature())
+                        .argumentType(VARCHAR.getTypeDescriptor())
                         .argumentType(typeVariable("T"))
-                        .returnType(VARCHAR.getTypeSignature())
+                        .returnType(VARCHAR.getTypeDescriptor())
                         .build())
                 .hidden()
                 .description("formats the input arguments using a format string")
@@ -221,7 +221,9 @@ public final class FormatFunction
         // TODO: support TIME WITH TIME ZONE by https://github.com/trinodb/trino/issues/191 + mapping to java.time.OffsetTime
         if (type.equals(JSON)) {
             MethodHandle handle = functionDependencies.getScalarFunctionImplementation(JSON_FORMAT_NAME, ImmutableList.of(JSON), simpleConvention(FAIL_ON_NULL, NEVER_NULL)).getMethodHandle();
-            return (block, position) -> convertToString(handle, type.getSlice(block, position));
+            // json_format takes a Json, so read the value with getObject — which leaves a
+            // raw-text-bearing block to parse lazily rather than eagerly.
+            return (block, position) -> convertToString(handle, type.getObject(block, position));
         }
         if (type instanceof DecimalType decimalType) {
             int scale = decimalType.getScale();

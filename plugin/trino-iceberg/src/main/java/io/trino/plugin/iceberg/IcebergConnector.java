@@ -22,7 +22,6 @@ import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hive.HiveTransactionHandle;
-import io.trino.spi.TrinoException;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorCapabilities;
@@ -40,7 +39,6 @@ import io.trino.spi.function.table.ConnectorTableFunction;
 import io.trino.spi.procedure.Procedure;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
-import org.apache.iceberg.exceptions.RESTException;
 
 import java.util.List;
 import java.util.Optional;
@@ -48,7 +46,6 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Sets.immutableEnumSet;
-import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_CATALOG_ERROR;
 import static io.trino.spi.connector.ConnectorCapabilities.DEFAULT_COLUMN_VALUE;
 import static io.trino.spi.connector.ConnectorCapabilities.MATERIALIZED_VIEW_GRACE_PERIOD;
 import static io.trino.spi.connector.ConnectorCapabilities.MATERIALIZED_VIEW_WHEN_STALE_BEHAVIOR;
@@ -70,6 +67,7 @@ public class IcebergConnector
     private final List<PropertyMetadata<?>> sessionProperties;
     private final List<PropertyMetadata<?>> schemaProperties;
     private final List<PropertyMetadata<?>> tableProperties;
+    private final List<PropertyMetadata<?>> viewProperties;
     private final List<PropertyMetadata<?>> materializedViewProperties;
     private final List<PropertyMetadata<?>> analyzeProperties;
     private final Optional<ConnectorAccessControl> accessControl;
@@ -91,6 +89,7 @@ public class IcebergConnector
             Set<SessionPropertiesProvider> sessionPropertiesProviders,
             IcebergSchemaProperties schemaProperties,
             IcebergTableProperties tableProperties,
+            IcebergViewProperties viewProperties,
             IcebergMaterializedViewProperties materializedViewProperties,
             IcebergAnalyzeProperties analyzeProperties,
             Optional<ConnectorAccessControl> accessControl,
@@ -112,6 +111,7 @@ public class IcebergConnector
                 .collect(toImmutableList());
         this.schemaProperties = ImmutableList.copyOf(requireNonNull(schemaProperties, "schemaProperties is null").getSchemaProperties());
         this.tableProperties = ImmutableList.copyOf(requireNonNull(tableProperties, "tableProperties is null").getTableProperties());
+        this.viewProperties = ImmutableList.copyOf(requireNonNull(viewProperties, "viewProperties is null").getViewProperties());
         this.materializedViewProperties = ImmutableList.copyOf(requireNonNull(materializedViewProperties, "materializedViewProperties is null").getMaterializedViewProperties());
         this.analyzeProperties = ImmutableList.copyOf(requireNonNull(analyzeProperties, "analyzeProperties is null").getAnalyzeProperties());
         this.accessControl = requireNonNull(accessControl, "accessControl is null");
@@ -135,13 +135,8 @@ public class IcebergConnector
     @Override
     public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transaction)
     {
-        try {
-            ConnectorMetadata metadata = transactionManager.get(transaction, session.getIdentity());
-            return new ClassLoaderSafeConnectorMetadata(metadata, getClass().getClassLoader());
-        }
-        catch (RESTException e) {
-            throw new TrinoException(ICEBERG_CATALOG_ERROR, "Cannot obtain metadata", e);
-        }
+        ConnectorMetadata metadata = transactionManager.get(transaction, session.getIdentity());
+        return new ClassLoaderSafeConnectorMetadata(metadata, getClass().getClassLoader());
     }
 
     @Override
@@ -214,6 +209,12 @@ public class IcebergConnector
     public List<PropertyMetadata<?>> getTableProperties()
     {
         return tableProperties;
+    }
+
+    @Override
+    public List<PropertyMetadata<?>> getViewProperties()
+    {
+        return viewProperties;
     }
 
     @Override

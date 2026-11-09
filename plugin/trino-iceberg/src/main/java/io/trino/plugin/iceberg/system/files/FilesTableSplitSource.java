@@ -16,8 +16,10 @@ package io.trino.plugin.iceberg.system.files;
 import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
+import io.trino.spi.connector.DynamicFilterSnapshot;
 import io.trino.spi.type.Type;
 import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.io.FileIO;
@@ -31,6 +33,7 @@ import java.util.concurrent.CompletableFuture;
 
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static org.apache.iceberg.TableProperties.ENCRYPTION_TABLE_KEY;
 
 public final class FilesTableSplitSource
         implements ConnectorSplitSource
@@ -63,26 +66,31 @@ public final class FilesTableSplitSource
     }
 
     @Override
-    public CompletableFuture<ConnectorSplitBatch> getNextBatch(int maxSize)
+    public CompletableFuture<List<ConnectorSplit>> getNextBatch(int maxSize, DynamicFilterSnapshot dynamicFilterSnapshot)
     {
         TableScan scan = icebergTable.newScan();
         snapshotId.ifPresent(scan::useSnapshot);
         List<ConnectorSplit> splits = new ArrayList<>();
 
-        try (FileIO fileIO = icebergTable.io()) {
-            for (ManifestFile manifestFile : scan.snapshot().allManifests(fileIO)) {
-                splits.add(new FilesTableSplit(
-                        TrinoManifestFile.from(manifestFile),
-                        schemaJson,
-                        metadataSchemaJson,
-                        partitionSpecsByIdJson,
-                        partitionColumnType,
-                        boundsColumnType));
+        // A table with no snapshot has no manifests to scan
+        Snapshot snapshot = scan.snapshot();
+        if (snapshot != null) {
+            try (FileIO fileIO = icebergTable.io()) {
+                for (ManifestFile manifestFile : snapshot.allManifests(fileIO)) {
+                    splits.add(new FilesTableSplit(
+                            TrinoManifestFile.from(manifestFile),
+                            schemaJson,
+                            metadataSchemaJson,
+                            partitionSpecsByIdJson,
+                            partitionColumnType,
+                            boundsColumnType,
+                            Optional.ofNullable(icebergTable.properties().get(ENCRYPTION_TABLE_KEY))));
+                }
             }
         }
 
         finished = true;
-        return completedFuture(new ConnectorSplitBatch(splits, true));
+        return completedFuture(splits);
     }
 
     @Override

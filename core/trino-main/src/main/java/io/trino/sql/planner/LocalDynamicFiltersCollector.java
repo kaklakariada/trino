@@ -20,11 +20,13 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.Session;
+import io.trino.metadata.FunctionPreimages;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
+import io.trino.sql.DynamicFilters.Descriptor;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.plan.DynamicFilterId;
 
@@ -41,7 +43,7 @@ import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.addSuccessCallback;
 import static io.airlift.concurrent.MoreFutures.unmodifiableFuture;
-import static io.trino.sql.DynamicFilters.Descriptor;
+import static io.trino.SystemSessionProperties.isFunctionPreimagesEnabled;
 import static io.trino.sql.DynamicFilters.extractSourceSymbols;
 import static io.trino.sql.planner.DomainCoercer.applySaturatedCasts;
 import static java.lang.String.format;
@@ -98,6 +100,10 @@ public class LocalDynamicFiltersCollector
         // Iterate over dynamic filters that are collected (correspond to one of the futures), and required for filtering (correspond to one of the descriptors).
         // It is possible that some dynamic filters are collected in a different stage - and will not available here.
         // It is also possible that not all local dynamic filters are needed for this specific table scan.
+        FunctionPreimages preimages = new FunctionPreimages(
+                plannerContext.getMetadata(),
+                plannerContext.getFunctionManager(),
+                plannerContext.getTypeManager());
         List<ListenableFuture<TupleDomain<ColumnHandle>>> predicateFutures = descriptorMap.keySet().stream()
                 .filter(futures.keySet()::contains)
                 .map(filterId -> {
@@ -117,6 +123,9 @@ public class LocalDynamicFiltersCollector
                                                         Type targetType = symbol.type();
                                                         Domain updatedDomain = descriptor.applyComparison(domain);
                                                         if (!updatedDomain.getType().equals(targetType)) {
+                                                            if (isFunctionPreimagesEnabled(session)) {
+                                                                return preimages.castPreimage(session, updatedDomain, targetType);
+                                                            }
                                                             return applySaturatedCasts(
                                                                     plannerContext.getMetadata(),
                                                                     plannerContext.getFunctionManager(),

@@ -32,14 +32,27 @@ support:
   - Enable cross region access. Defaults to `false`.
 * - `s3.path-style-access`
   - Use path-style access for all requests to S3
+* - `s3.expect-continue-enabled`
+  - Enable the HTTP expect-continue handshake for S3 PUT requests. Defaults to
+    `true`. Set to `false` for S3-compatible storage systems that reject
+    requests using this handshake.
+* - `s3.chunked-encoding-enabled`
+  - Enable [chunked encoding](https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-streaming.html)
+    for upload requests. Defaults to `true`. Set to `false` for S3-compatible
+    storage systems that do not support `aws-chunked` content encoding.
 * - `s3.storage-class`
   - S3 storage class to use while writing data. Defaults to `STANDARD`. Other allowed
     values are: `STANDARD_IA`, `INTELLIGENT_TIERING`, `REDUCED_REDUNDANCY`, `ONEZONE_IA`,
     `GLACIER`, `DEEP_ARCHIVE`, `OUTPOSTS`, `GLACIER_IR`, `SNOW`, `EXPRESS_ONEZONE`.
 * - `s3.signer-type`
   - AWS signing protocol to use for authenticating S3 requests. Supported values are: 
-    `AwsS3V4Signer`, `Aws4Signer`, `AsyncAws4Signer`, `Aws4UnsignedPayloadSigner`, 
-    `EventStreamAws4Signer`.
+    `AwsS3V4Signer`, `Aws4Signer`, `AsyncAws4Signer`, `Aws4UnsignedPayloadSigner`,
+    `Aws4SignedPayloadSigner`, `EventStreamAws4Signer`.
+    `Aws4SignedPayloadSigner` signs the request payload. With the default
+    `s3.chunked-encoding-enabled=true` each chunk is signed and
+    `x-amz-content-sha256` is `STREAMING-AWS4-HMAC-SHA256-PAYLOAD`. Set
+    `s3.chunked-encoding-enabled=false` to send the SHA-256 of the whole
+    payload instead.
 * - `s3.canned-acl`
   - [Canned ACL](https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl)
     to use when uploading files to S3. Defaults to `NONE`, which has the same
@@ -47,6 +60,12 @@ support:
     by a different AWS user, the canned ACL may be set to one of the following:
     `PRIVATE`, `PUBLIC_READ`, `PUBLIC_READ_WRITE`, `AUTHENTICATED_READ`,
     `BUCKET_OWNER_READ`, or `BUCKET_OWNER_FULL_CONTROL`.
+* - `s3.checksum-algorithm`
+  - [Checksum algorithm](https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html)
+    to use for data integrity checks when uploading and deleting files.
+    Defaults to `DEFAULT`, which keeps the AWS SDK default behavior. Set to
+    `CRC32`, `CRC32C`, `SHA1`, or `SHA256` to enforce the specified algorithm
+    for all upload and delete requests.
 * - `s3.sse.type`
   - Set the type of S3 server-side encryption (SSE) to use. Defaults to `NONE`
     for no encryption. Other valid values are `S3` for encryption by S3 managed
@@ -104,12 +123,6 @@ support:
 * - `s3.max-error-retries`
   - Specifies maximum number of retries the client will make on errors.
     Defaults to `20`.
-* - `s3.use-web-identity-token-credentials-provider`
-  - Set to `true` to only use the web identity token credentials provider,
-    instead of the default providers chain. This can be useful when running
-    Trino on Amazon EKS and using [IAM roles for service accounts
-    (IRSA)](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html)
-    Defaults to `false`.
 * - `s3.application-id`
   - Specify the application identifier appended to the `User-Agent` header 
     for all requests sent to S3. Defaults to `Trino`.
@@ -118,7 +131,10 @@ support:
 ## Authentication
 
 Use the following properties to configure the authentication to S3 with access
-and secret keys, STS, or an IAM role:
+and secret keys, STS, or an IAM role. The access key, secret key, STS, and
+external ID properties are only used by the `DEFAULT` and `IAM_ROLE`
+authentication modes; setting any of them for `ANONYMOUS` or `WEB_IDENTITY`
+fails at startup.
 
 :::{list-table}
 :widths: 40, 60
@@ -136,12 +152,24 @@ and secret keys, STS, or an IAM role:
 * - `s3.sts.region`
   - AWS region of the STS service.
 * - `s3.iam-role`
-  - ARN of an IAM role to assume when connecting to S3.
+  - ARN of an IAM role to assume when connecting to S3. Requires
+    `s3.auth-type=IAM_ROLE`.
 * - `s3.role-session-name`
   - Role session name to use when connecting to S3. Defaults to
     `trino-filesystem`.
 * - `s3.external-id`
   - External ID for the IAM role trust policy when connecting to S3.
+* - `s3.auth-type`
+  - Authentication mode for accessing S3, one of:
+
+    - `ANONYMOUS`: sends no credentials, for reading public buckets.
+    - `DEFAULT` (default): uses the static access keys when set, otherwise the
+      AWS default credentials chain. Security mapping roles are still honored.
+    - `IAM_ROLE`: assumes the IAM role configured in `s3.iam-role`.
+    - `WEB_IDENTITY`: uses the web identity token file credentials provider
+      instead of the default credentials chain. Useful when running Trino on
+      Amazon EKS with [IAM roles for service accounts
+      (IRSA)](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html).
 :::
 
 ## Security mapping

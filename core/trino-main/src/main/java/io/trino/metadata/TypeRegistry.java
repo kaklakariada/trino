@@ -26,11 +26,10 @@ import io.trino.cache.NonEvictableCache;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.ParametricType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeId;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeNotFoundException;
 import io.trino.spi.type.TypeOperators;
-import io.trino.spi.type.TypeSignature;
 import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.type.CharParametricType;
@@ -86,16 +85,16 @@ import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VariantType.VARIANT;
-import static io.trino.sql.analyzer.TypeSignatureTranslator.toTypeSignature;
+import static io.trino.sql.analyzer.TypeDescriptorTranslator.toPersistedTypeDescriptor;
+import static io.trino.sql.analyzer.TypeDescriptorTranslator.toTypeDescriptor;
 import static io.trino.type.ArrayParametricType.ARRAY;
 import static io.trino.type.CodePointsType.CODE_POINTS;
 import static io.trino.type.ColorType.COLOR;
 import static io.trino.type.FunctionParametricType.FUNCTION;
-import static io.trino.type.IntervalDayTimeType.INTERVAL_DAY_TIME;
-import static io.trino.type.IntervalYearMonthType.INTERVAL_YEAR_MONTH;
+import static io.trino.type.IntervalDayTimeParametricType.INTERVAL_DAY_TIME_PARAMETRIC;
+import static io.trino.type.IntervalYearMonthParametricType.INTERVAL_YEAR_MONTH_PARAMETRIC;
 import static io.trino.type.IpAddressType.IPADDRESS;
 import static io.trino.type.JoniRegexpType.JONI_REGEXP;
-import static io.trino.type.Json2016Type.JSON_2016;
 import static io.trino.type.JsonPathType.JSON_PATH;
 import static io.trino.type.JsonType.JSON;
 import static io.trino.type.LikePatternType.LIKE_PATTERN;
@@ -112,11 +111,12 @@ public final class TypeRegistry
 {
     private static final SqlParser SQL_PARSER = new SqlParser();
 
-    private final ConcurrentMap<TypeSignature, Type> types = new ConcurrentHashMap<>();
+    private final ConcurrentMap<TypeDescriptor, Type> types = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ParametricType> parametricTypes = new ConcurrentHashMap<>();
 
-    private final NonEvictableCache<TypeSignature, Type> parametricTypeCache;
+    private final NonEvictableCache<TypeDescriptor, Type> parametricTypeCache;
     private final NonEvictableCache<String, Type> sqlTypeCache;
+    private final NonEvictableCache<String, Type> persistedSqlTypeCache;
     private final TypeManager typeManager;
     private final TypeOperators typeOperators;
 
@@ -127,7 +127,7 @@ public final class TypeRegistry
         requireNonNull(featuresConfig, "featuresConfig is null");
 
         // Manually register UNKNOWN type without a verifyTypeClass call since it is a special type that cannot be used by functions
-        this.types.put(UNKNOWN.getTypeSignature(), UNKNOWN);
+        this.types.put(UNKNOWN.getTypeDescriptor(), UNKNOWN);
 
         // always add the built-in types; Trino will not function without these
         addType(BOOLEAN);
@@ -141,8 +141,6 @@ public final class TypeRegistry
         addType(NUMBER);
         addType(VARBINARY);
         addType(DATE);
-        addType(INTERVAL_YEAR_MONTH);
-        addType(INTERVAL_DAY_TIME);
         addType(HYPER_LOG_LOG);
         addType(SET_DIGEST);
         addType(P4_HYPER_LOG_LOG);
@@ -150,7 +148,6 @@ public final class TypeRegistry
         addType(new Re2JRegexpType(featuresConfig.getRe2JDfaStatesLimit(), featuresConfig.getRe2JDfaRetries()));
         addType(LIKE_PATTERN);
         addType(JSON_PATH);
-        addType(JSON_2016);
         addType(COLOR);
         addType(JSON);
         addType(VARIANT);
@@ -161,6 +158,8 @@ public final class TypeRegistry
         addParametricType(VarcharParametricType.VARCHAR);
         addParametricType(CharParametricType.CHAR);
         addParametricType(DecimalParametricType.DECIMAL);
+        addParametricType(INTERVAL_YEAR_MONTH_PARAMETRIC);
+        addParametricType(INTERVAL_DAY_TIME_PARAMETRIC);
         addParametricType(ROW);
         addParametricType(ARRAY);
         addParametricType(MAP);
@@ -173,18 +172,19 @@ public final class TypeRegistry
 
         parametricTypeCache = buildNonEvictableCache(CacheBuilder.newBuilder().maximumSize(1000));
         sqlTypeCache = buildNonEvictableCache(CacheBuilder.newBuilder().maximumSize(1000));
+        persistedSqlTypeCache = buildNonEvictableCache(CacheBuilder.newBuilder().maximumSize(1000));
 
         typeManager = new InternalTypeManager(this, typeOperators);
 
         verifyTypes();
     }
 
-    public Type getType(TypeSignature signature)
+    public Type getType(TypeDescriptor descriptor)
     {
-        Type type = types.get(signature);
+        Type type = types.get(descriptor);
         if (type == null) {
             try {
-                return uncheckedCacheGet(parametricTypeCache, signature, () -> instantiateParametricType(signature));
+                return uncheckedCacheGet(parametricTypeCache, descriptor, () -> instantiateParametricType(descriptor));
             }
             catch (UncheckedExecutionException e) {
                 throwIfUnchecked(e.getCause());
@@ -194,16 +194,10 @@ public final class TypeRegistry
         return type;
     }
 
-    public Type getType(TypeId id)
-    {
-        // TODO: ID should be encoded in a more canonical form than SQL
-        return fromSqlType(id.getId());
-    }
-
     public Type fromSqlType(String sqlType)
     {
         try {
-            return sqlTypeCache.get(sqlType, () -> getType(toTypeSignature(SQL_PARSER.createType(sqlType))));
+            return sqlTypeCache.get(sqlType, () -> getType(toTypeDescriptor(SQL_PARSER.createType(sqlType))));
         }
         catch (ParsingException e) {
             throw new TypeNotFoundException(sqlType, e);
@@ -216,30 +210,46 @@ public final class TypeRegistry
         }
     }
 
-    private Type instantiateParametricType(TypeSignature signature)
+    public Type fromPersistedSqlType(String sqlType)
     {
-        ParametricType parametricType = parametricTypes.get(signature.getBase().toLowerCase(Locale.ENGLISH));
+        try {
+            return persistedSqlTypeCache.get(sqlType, () -> getType(toPersistedTypeDescriptor(SQL_PARSER.createType(sqlType))));
+        }
+        catch (ParsingException e) {
+            throw new TypeNotFoundException(sqlType, e);
+        }
+        catch (ExecutionException e) {
+            if (e.getCause() instanceof ParsingException parsingException) {
+                throw new TypeNotFoundException(sqlType, parsingException);
+            }
+            throw new RuntimeException("Could not get type from cache", e);
+        }
+    }
+
+    private Type instantiateParametricType(TypeDescriptor descriptor)
+    {
+        ParametricType parametricType = parametricTypes.get(descriptor.getBase().toLowerCase(Locale.ENGLISH));
         if (parametricType == null) {
-            throw new TypeNotFoundException(signature.toString());
+            throw new TypeNotFoundException(descriptor.toString());
         }
 
         Type instantiatedType;
         try {
-            instantiatedType = parametricType.createType(typeManager, signature.getParameters());
+            instantiatedType = parametricType.createType(typeManager, descriptor.getParameters());
         }
         catch (IllegalArgumentException e) {
-            throw new TypeNotFoundException(signature.toString(), e);
+            throw new TypeNotFoundException(descriptor.toString(), e);
         }
 
         // TODO: reimplement this check? Currently "varchar(Integer.MAX_VALUE)" fails with "varchar"
-        // checkState(instantiatedType.equalsSignature(signature), "Instantiated parametric type name (%s) does not match expected name (%s)", instantiatedType, signature);
+        // checkState(instantiatedType.equalsSignature(descriptor), "Instantiated parametric type name (%s) does not match expected name (%s)", instantiatedType, descriptor);
         return instantiatedType;
     }
 
     public boolean isTypeRegistered(String name)
     {
         String key = name.toLowerCase(Locale.ENGLISH);
-        return types.containsKey(new TypeSignature(key)) || parametricTypes.containsKey(key);
+        return types.containsKey(new TypeDescriptor(key)) || parametricTypes.containsKey(key);
     }
 
     public Collection<Type> getTypes()
@@ -255,7 +265,7 @@ public final class TypeRegistry
     public void addType(Type type)
     {
         requireNonNull(type, "type is null");
-        Type existingType = types.putIfAbsent(type.getTypeSignature(), type);
+        Type existingType = types.putIfAbsent(type.getTypeDescriptor(), type);
         checkState(existingType == null || existingType.equals(type), "Type %s is already registered", type);
     }
 
@@ -264,7 +274,7 @@ public final class TypeRegistry
         requireNonNull(alias, "alias is null");
         requireNonNull(type, "type is null");
 
-        Type existingType = types.putIfAbsent(new TypeSignature(alias), type);
+        Type existingType = types.putIfAbsent(new TypeDescriptor(alias), type);
         checkState(existingType == null || existingType.equals(type), "Alias %s is already mapped to %s", alias, type);
     }
 
@@ -414,7 +424,7 @@ public final class TypeRegistry
     private boolean hasLessThanMethod(Type type)
     {
         try {
-            typeOperators.getLessThanOperator(type, simpleConvention(FAIL_ON_NULL, NEVER_NULL, NEVER_NULL));
+            typeOperators.getLessThanOperator(type, simpleConvention(NULLABLE_RETURN, NEVER_NULL, NEVER_NULL));
             return true;
         }
         catch (UnsupportedOperationException e) {
@@ -425,7 +435,7 @@ public final class TypeRegistry
     private boolean hasLessThanOrEqualMethod(Type type)
     {
         try {
-            typeOperators.getLessThanOrEqualOperator(type, simpleConvention(FAIL_ON_NULL, NEVER_NULL, NEVER_NULL));
+            typeOperators.getLessThanOrEqualOperator(type, simpleConvention(NULLABLE_RETURN, NEVER_NULL, NEVER_NULL));
             return true;
         }
         catch (UnsupportedOperationException e) {
@@ -447,9 +457,9 @@ public final class TypeRegistry
         }
 
         @Override
-        public Type getType(TypeSignature signature)
+        public Type getType(TypeDescriptor descriptor)
         {
-            return typeRegistry.getType(signature);
+            return typeRegistry.getType(descriptor);
         }
 
         @Override
@@ -459,9 +469,9 @@ public final class TypeRegistry
         }
 
         @Override
-        public Type getType(TypeId id)
+        public Type fromPersistedSqlType(String type)
         {
-            return typeRegistry.getType(id);
+            return typeRegistry.fromPersistedSqlType(type);
         }
 
         @Override

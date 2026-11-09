@@ -27,10 +27,11 @@ import io.trino.sql.tree.AutoGroupBy;
 import io.trino.sql.tree.BetweenPredicate;
 import io.trino.sql.tree.BinaryLiteral;
 import io.trino.sql.tree.BooleanLiteral;
+import io.trino.sql.tree.BooleanTestPredicate;
 import io.trino.sql.tree.CallArgument;
 import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.CoalesceExpression;
-import io.trino.sql.tree.ComparisonExpression;
+import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.CompositeIntervalQualifier;
 import io.trino.sql.tree.CurrentCatalog;
 import io.trino.sql.tree.CurrentDate;
@@ -39,9 +40,11 @@ import io.trino.sql.tree.CurrentSchema;
 import io.trino.sql.tree.CurrentTime;
 import io.trino.sql.tree.CurrentTimestamp;
 import io.trino.sql.tree.CurrentUser;
+import io.trino.sql.tree.DataTypeParameter;
 import io.trino.sql.tree.DateTimeDataType;
 import io.trino.sql.tree.DecimalLiteral;
 import io.trino.sql.tree.DereferenceExpression;
+import io.trino.sql.tree.DistinctFromPredicate;
 import io.trino.sql.tree.DoubleLiteral;
 import io.trino.sql.tree.ExistsPredicate;
 import io.trino.sql.tree.Expression;
@@ -62,14 +65,16 @@ import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.IntervalDataType;
 import io.trino.sql.tree.IntervalField;
 import io.trino.sql.tree.IntervalLiteral;
-import io.trino.sql.tree.IsNotNullPredicate;
+import io.trino.sql.tree.IntervalValueExpression;
 import io.trino.sql.tree.IsNullPredicate;
 import io.trino.sql.tree.JsonArray;
+import io.trino.sql.tree.JsonConstructor;
 import io.trino.sql.tree.JsonExists;
 import io.trino.sql.tree.JsonObject;
 import io.trino.sql.tree.JsonPathInvocation;
 import io.trino.sql.tree.JsonPathParameter;
 import io.trino.sql.tree.JsonQuery;
+import io.trino.sql.tree.JsonSerialize;
 import io.trino.sql.tree.JsonValue;
 import io.trino.sql.tree.LambdaArgumentDeclaration;
 import io.trino.sql.tree.LambdaExpression;
@@ -79,6 +84,7 @@ import io.trino.sql.tree.LocalTime;
 import io.trino.sql.tree.LocalTimestamp;
 import io.trino.sql.tree.LogicalExpression;
 import io.trino.sql.tree.LongLiteral;
+import io.trino.sql.tree.MatchPredicate;
 import io.trino.sql.tree.MethodCall;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.NotExpression;
@@ -86,9 +92,12 @@ import io.trino.sql.tree.NullIfExpression;
 import io.trino.sql.tree.NullLiteral;
 import io.trino.sql.tree.NumericParameter;
 import io.trino.sql.tree.OrderBy;
+import io.trino.sql.tree.OverlapsPredicate;
+import io.trino.sql.tree.Overlay;
 import io.trino.sql.tree.Parameter;
+import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.QualifiedName;
-import io.trino.sql.tree.QuantifiedComparisonExpression;
+import io.trino.sql.tree.QuantifiedComparisonPredicate;
 import io.trino.sql.tree.Row;
 import io.trino.sql.tree.RowDataType;
 import io.trino.sql.tree.SearchedCaseExpression;
@@ -104,6 +113,7 @@ import io.trino.sql.tree.SubscriptExpression;
 import io.trino.sql.tree.Trim;
 import io.trino.sql.tree.TryExpression;
 import io.trino.sql.tree.TypeParameter;
+import io.trino.sql.tree.UniquePredicate;
 import io.trino.sql.tree.WhenClause;
 import io.trino.sql.tree.Window;
 import io.trino.sql.tree.WindowFrame;
@@ -117,7 +127,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -231,6 +240,19 @@ public final class ExpressionFormatter
             }
 
             return "trim(%s %s FROM %s)".formatted(node.getSpecification(), process(node.getTrimCharacter().get(), context), process(node.getTrimSource(), context));
+        }
+
+        @Override
+        protected String visitOverlay(Overlay node, Void context)
+        {
+            String formatted = "OVERLAY(%s PLACING %s FROM %s".formatted(
+                    process(node.getValue(), context),
+                    process(node.getReplacement(), context),
+                    process(node.getStart(), context));
+            if (node.getLength().isPresent()) {
+                formatted += " FOR " + process(node.getLength().get(), context);
+            }
+            return formatted + ")";
         }
 
         @Override
@@ -402,12 +424,12 @@ public final class ExpressionFormatter
         @Override
         protected String visitSimpleIntervalQualifier(SimpleIntervalQualifier node, Void context)
         {
-            if (node.getField() instanceof IntervalField.Second(OptionalInt fractionalPrecision) && fractionalPrecision.isPresent()) {
+            if (node.getField() instanceof IntervalField.Second(Optional<DataTypeParameter> fractionalPrecision) && fractionalPrecision.isPresent()) {
                 checkArgument(node.getPrecision().isPresent(), "Leading precision is required when fractional precision is specified");
-                return "SECOND(" + node.getPrecision().getAsInt() + ", " + fractionalPrecision.getAsInt() + ")";
+                return "SECOND(" + node.getPrecision().get() + ", " + fractionalPrecision.get() + ")";
             }
 
-            return node.getField().name() + (node.getPrecision().isPresent() ? "(" + node.getPrecision().getAsInt() + ")" : "");
+            return node.getField().name() + node.getPrecision().map(precision -> "(" + precision + ")").orElse("");
         }
 
         @Override
@@ -416,12 +438,12 @@ public final class ExpressionFormatter
             StringBuilder result = new StringBuilder();
             result.append(node.getFrom().name());
             if (node.getPrecision().isPresent()) {
-                result.append("(").append(node.getPrecision().getAsInt()).append(")");
+                result.append("(").append(node.getPrecision().get()).append(")");
             }
             result.append(" TO ");
             result.append(node.getTo().name());
-            if (node.getTo() instanceof IntervalField.Second(OptionalInt fractionalPrecision) && fractionalPrecision.isPresent()) {
-                result.append("(").append(fractionalPrecision.getAsInt()).append(")");
+            if (node.getTo() instanceof IntervalField.Second(Optional<DataTypeParameter> fractionalPrecision) && fractionalPrecision.isPresent()) {
+                result.append("(").append(fractionalPrecision.get()).append(")");
             }
             return result.toString();
         }
@@ -439,10 +461,16 @@ public final class ExpressionFormatter
         }
 
         @Override
+        protected String visitUniquePredicate(UniquePredicate node, Void context)
+        {
+            return "(UNIQUE " + formatSql(node.getSubquery()) + ")";
+        }
+
+        @Override
         protected String visitIdentifier(Identifier node, Void context)
         {
             if (node.isDelimited() || reserved(node.getValue())) {
-                return '"' + node.getValue().replace("\"", "\"\"") + '"';
+                return quoteIdentifier(node.getValue());
             }
             return node.getValue();
         }
@@ -529,13 +557,26 @@ public final class ExpressionFormatter
         @Override
         protected String visitStaticMethodCall(StaticMethodCall node, Void context)
         {
-            return formatName(node.getType()) + "::" + formatExpression(node.getMethod()) + "(" + joinExpressions(node.getArguments()) + ")";
+            return formatName(node.getType()) + "::" + formatMethodName(node.getMethod()) + "(" + joinCallArguments(node.getArguments()) + ")";
         }
 
         @Override
         protected String visitMethodCall(MethodCall node, Void context)
         {
-            return "(" + formatExpression(node.getReceiver()) + ")." + formatExpression(node.getMethod()) + "(" + joinExpressions(node.getArguments()) + ")";
+            return "(" + formatExpression(node.getReceiver()) + ")." + formatMethodName(node.getMethod()) + "(" + joinCallArguments(node.getArguments()) + ")";
+        }
+
+        private static String formatMethodName(Identifier name)
+        {
+            if (name.isDelimited()) {
+                return quoteIdentifier(name.getValue());
+            }
+            return name.getValue();
+        }
+
+        private static String quoteIdentifier(String value)
+        {
+            return '"' + value.replace("\"", "\"\"") + '"';
         }
 
         @Override
@@ -573,21 +614,76 @@ public final class ExpressionFormatter
         }
 
         @Override
-        protected String visitComparisonExpression(ComparisonExpression node, Void context)
+        protected String visitPredicated(Predicated node, Void context)
         {
-            return formatBinaryExpression(node.getOperator().getValue(), node.getLeft(), node.getRight());
+            return "(" + process(node.getValue(), context) + " " + process(node.getPredicate(), context) + ")";
+        }
+
+        @Override
+        protected String visitBetweenPredicate(BetweenPredicate node, Void context)
+        {
+            return (node.isNegated() ? "NOT BETWEEN " : "BETWEEN ") + node.getSymmetry().map(symmetry -> symmetry + " ").orElse("") + process(node.getMin(), context) + " AND " + process(node.getMax(), context);
+        }
+
+        @Override
+        protected String visitComparisonPredicate(ComparisonPredicate node, Void context)
+        {
+            return node.getOperator().getValue() + " " + process(node.getRight(), context);
+        }
+
+        @Override
+        protected String visitDistinctFromPredicate(DistinctFromPredicate node, Void context)
+        {
+            return (node.isNegated() ? "IS NOT DISTINCT FROM " : "IS DISTINCT FROM ") + process(node.getRight(), context);
+        }
+
+        @Override
+        protected String visitInPredicate(InPredicate node, Void context)
+        {
+            return (node.isNegated() ? "NOT IN " : "IN ") + process(node.getValueList(), context);
         }
 
         @Override
         protected String visitIsNullPredicate(IsNullPredicate node, Void context)
         {
-            return "(" + process(node.getValue(), context) + " IS NULL)";
+            return node.isNegated() ? "IS NOT NULL" : "IS NULL";
         }
 
         @Override
-        protected String visitIsNotNullPredicate(IsNotNullPredicate node, Void context)
+        protected String visitBooleanTestPredicate(BooleanTestPredicate node, Void context)
         {
-            return "(" + process(node.getValue(), context) + " IS NOT NULL)";
+            return (node.isNegated() ? "IS NOT " : "IS ") + node.getTruthValue();
+        }
+
+        @Override
+        protected String visitLikePredicate(LikePredicate node, Void context)
+        {
+            return (node.isNegated() ? "NOT LIKE " : "LIKE ") + process(node.getPattern(), context)
+                    + node.getEscape().map(escape -> " ESCAPE " + process(escape, context)).orElse("");
+        }
+
+        @Override
+        protected String visitMatchPredicate(MatchPredicate node, Void context)
+        {
+            StringBuilder builder = new StringBuilder("MATCH");
+            if (node.isUnique()) {
+                builder.append(" UNIQUE");
+            }
+            builder.append(' ').append(node.getType());
+            builder.append(' ').append(process(node.getSubquery(), context));
+            return builder.toString();
+        }
+
+        @Override
+        protected String visitOverlapsPredicate(OverlapsPredicate node, Void context)
+        {
+            return "OVERLAPS " + process(node.getRight(), context);
+        }
+
+        @Override
+        protected String visitQuantifiedComparisonPredicate(QuantifiedComparisonPredicate node, Void context)
+        {
+            return node.getOperator().getValue() + " " + node.getQuantifier() + " " + process(node.getSubquery(), context);
         }
 
         @Override
@@ -644,24 +740,6 @@ public final class ExpressionFormatter
         }
 
         @Override
-        protected String visitLikePredicate(LikePredicate node, Void context)
-        {
-            StringBuilder builder = new StringBuilder();
-
-            builder.append('(')
-                    .append(process(node.getValue(), context))
-                    .append(" LIKE ")
-                    .append(process(node.getPattern(), context));
-
-            node.getEscape().ifPresent(escape -> builder.append(" ESCAPE ")
-                    .append(process(escape, context)));
-
-            builder.append(')');
-
-            return builder.toString();
-        }
-
-        @Override
         protected String visitAllColumns(AllColumns node, Void context)
         {
             StringBuilder builder = new StringBuilder();
@@ -682,6 +760,12 @@ public final class ExpressionFormatter
             }
 
             return builder.toString();
+        }
+
+        @Override
+        protected String visitIntervalValueExpression(IntervalValueExpression node, Void context)
+        {
+            return "((" + process(node.getLeft(), context) + " - " + process(node.getRight(), context) + ") " + process(node.getType().qualifier(), context) + ")";
         }
 
         @Override
@@ -731,20 +815,11 @@ public final class ExpressionFormatter
         @Override
         protected String visitWhenClause(WhenClause node, Void context)
         {
-            return "WHEN " + process(node.getOperand(), context) + " THEN " + process(node.getResult(), context);
-        }
-
-        @Override
-        protected String visitBetweenPredicate(BetweenPredicate node, Void context)
-        {
-            return "(" + process(node.getValue(), context) + " BETWEEN " +
-                    process(node.getMin(), context) + " AND " + process(node.getMax(), context) + ")";
-        }
-
-        @Override
-        protected String visitInPredicate(InPredicate node, Void context)
-        {
-            return "(" + process(node.getValue(), context) + " IN " + process(node.getValueList(), context) + ")";
+            String match = switch (node.getMatch()) {
+                case WhenClause.Operand operand -> process(operand.expression(), context);
+                case WhenClause.Partial partial -> process(partial.predicate(), context);
+            };
+            return "WHEN " + match + " THEN " + process(node.getResult(), context);
         }
 
         @Override
@@ -756,16 +831,6 @@ public final class ExpressionFormatter
         private String visitFilter(Expression node, Void context)
         {
             return "(WHERE " + process(node, context) + ')';
-        }
-
-        @Override
-        protected String visitQuantifiedComparisonExpression(QuantifiedComparisonExpression node, Void context)
-        {
-            return "(%s %s %s %s)".formatted(
-                    process(node.getValue(), context),
-                    node.getOperator().getValue(),
-                    node.getQuantifier(),
-                    process(node.getSubquery(), context));
         }
 
         @Override
@@ -890,6 +955,12 @@ public final class ExpressionFormatter
         }
 
         @Override
+        protected String visitJsonConstructor(JsonConstructor node, Void context)
+        {
+            return "JSON(" + formatJsonExpression(node.getExpression(), Optional.of(node.getFormat())) + ")";
+        }
+
+        @Override
         protected String visitJsonQuery(JsonQuery node, Void context)
         {
             StringBuilder builder = new StringBuilder();
@@ -923,6 +994,30 @@ public final class ExpressionFormatter
                     .append(" ON ERROR")
                     .append(")");
 
+            return builder.toString();
+        }
+
+        @Override
+        protected String visitJsonSerialize(JsonSerialize node, Void context)
+        {
+            StringBuilder builder = new StringBuilder();
+
+            builder.append("JSON_SERIALIZE(")
+                    .append(formatJsonExpression(node.getExpression(), Optional.of(node.getInputFormat())));
+
+            if (node.getReturnedType().isPresent()) {
+                builder.append(" RETURNING ")
+                        .append(process(node.getReturnedType().get()))
+                        .append(node.getOutputFormat().map(value -> " FORMAT " + value).orElse(""));
+            }
+
+            // Emit ON ERROR only when it differs from the default (ERROR), so unchanged
+            // expressions round-trip to their original SQL.
+            if (node.getErrorBehavior() != JsonSerialize.OnErrorBehavior.ERROR) {
+                builder.append(" ").append(node.getErrorBehavior()).append(" ON ERROR");
+            }
+
+            builder.append(")");
             return builder.toString();
         }
 
@@ -986,6 +1081,13 @@ public final class ExpressionFormatter
         {
             return expressions.stream()
                     .map(e -> process(e, null))
+                    .collect(joining(", "));
+        }
+
+        private String joinCallArguments(List<CallArgument> arguments)
+        {
+            return arguments.stream()
+                    .map(argument -> process(argument, null))
                     .collect(joining(", "));
         }
 
@@ -1125,6 +1227,13 @@ public final class ExpressionFormatter
         }
         else {
             builder.append(formatFrameBound(windowFrame.getStart()));
+        }
+
+        switch (windowFrame.getExclusion()) {
+            case CURRENT_ROW -> builder.append(" EXCLUDE CURRENT ROW");
+            case GROUP -> builder.append(" EXCLUDE GROUP");
+            case TIES -> builder.append(" EXCLUDE TIES");
+            case NO_OTHERS -> {} // the default; an absent clause parses back to NO_OTHERS, so leave it unprinted
         }
 
         windowFrame.getAfterMatchSkipTo().ifPresent(skipTo ->

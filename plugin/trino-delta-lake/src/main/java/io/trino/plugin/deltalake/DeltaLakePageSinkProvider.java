@@ -38,6 +38,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.type.TypeManager;
 import org.joda.time.DateTimeZone;
 
@@ -48,7 +49,6 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static io.trino.plugin.deltalake.DeltaLakeCdfPageSink.CHANGE_DATA_FOLDER_NAME;
 import static io.trino.plugin.deltalake.DeltaLakeCdfPageSink.CHANGE_TYPE_COLUMN_NAME;
 import static io.trino.plugin.deltalake.DeltaLakeColumnType.PARTITION_KEY;
 import static io.trino.plugin.deltalake.DeltaLakeColumnType.REGULAR;
@@ -57,6 +57,7 @@ import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.ch
 import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.extractSchema;
 import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.getRandomPrefixLength;
 import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.isDeletionVectorEnabled;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.isRandomizeFilePrefixesEnabled;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.util.Objects.requireNonNull;
 
@@ -121,7 +122,6 @@ public class DeltaLakePageSinkProvider
                 tableHandle.columnMappingMode(),
                 tableHandle.partitionedBy());
         return new DeltaLakePageSink(
-                typeManager.getTypeOperators(),
                 tableHandle.inputColumns(),
                 tableHandle.partitionedBy(),
                 pageIndexerFactory,
@@ -129,7 +129,8 @@ public class DeltaLakePageSinkProvider
                 maxPartitionsPerWriter,
                 dataFileInfoCodec,
                 Location.of(tableHandle.location()),
-                tableHandle.toCredentialsHandle(),
+                tableCredentials.map(DeltaLakeTableCredentials.class::cast),
+                tableHandle.objectStoreLayoutEnabled(),
                 session,
                 stats,
                 trinoVersion,
@@ -149,7 +150,6 @@ public class DeltaLakePageSinkProvider
         MetadataEntry metadataEntry = tableHandle.metadataEntry();
         DeltaLakeParquetSchemaMapping parquetSchemaMapping = createParquetSchemaMapping(metadataEntry, tableHandle.protocolEntry(), typeManager);
         return new DeltaLakePageSink(
-                typeManager.getTypeOperators(),
                 tableHandle.inputColumns(),
                 tableHandle.metadataEntry().getOriginalPartitionColumns(),
                 pageIndexerFactory,
@@ -157,7 +157,8 @@ public class DeltaLakePageSinkProvider
                 maxPartitionsPerWriter,
                 dataFileInfoCodec,
                 Location.of(tableHandle.location()),
-                tableHandle.credentialsHandle(),
+                tableCredentials.map(DeltaLakeTableCredentials.class::cast),
+                isRandomizeFilePrefixesEnabled(metadataEntry),
                 session,
                 stats,
                 trinoVersion,
@@ -179,7 +180,6 @@ public class DeltaLakePageSinkProvider
                 DeltaTableOptimizeHandle optimizeHandle = (DeltaTableOptimizeHandle) executeHandle.procedureHandle();
                 DeltaLakeParquetSchemaMapping parquetSchemaMapping = createParquetSchemaMapping(optimizeHandle.getMetadataEntry(), optimizeHandle.getProtocolEntry(), typeManager);
                 yield new DeltaLakePageSink(
-                        typeManager.getTypeOperators(),
                         optimizeHandle.getTableColumns(),
                         optimizeHandle.getOriginalPartitionColumns(),
                         pageIndexerFactory,
@@ -187,7 +187,8 @@ public class DeltaLakePageSinkProvider
                         maxPartitionsPerWriter,
                         dataFileInfoCodec,
                         Location.of(executeHandle.tableLocation()),
-                        optimizeHandle.getCredentialsHandle(),
+                        tableCredentials.map(DeltaLakeTableCredentials.class::cast),
+                        isRandomizeFilePrefixesEnabled(optimizeHandle.getMetadataEntry()),
                         session,
                         stats,
                         trinoVersion,
@@ -204,15 +205,16 @@ public class DeltaLakePageSinkProvider
             ConnectorSession session,
             ConnectorMergeTableHandle mergeHandle,
             Optional<ConnectorTableCredentials> tableCredentials,
-            ConnectorPageSinkId pageSinkId)
+            ConnectorPageSinkId pageSinkId,
+            MemoryContext memoryContext)
     {
         DeltaLakeMergeTableHandle merge = (DeltaLakeMergeTableHandle) mergeHandle;
         DeltaLakeInsertTableHandle tableHandle = merge.insertTableHandle();
         ConnectorPageSink pageSink = createPageSink(transactionHandle, session, tableHandle, tableCredentials, pageSinkId);
         DeltaLakeParquetSchemaMapping parquetSchemaMapping = createParquetSchemaMapping(tableHandle.metadataEntry(), tableHandle.protocolEntry(), typeManager);
 
+        Optional<DeltaLakeTableCredentials> deltaTableCredentials = tableCredentials.map(DeltaLakeTableCredentials.class::cast);
         return new DeltaLakeMergeSink(
-                typeManager.getTypeOperators(),
                 fileSystemFactory,
                 session,
                 parquetDateTimeZone,
@@ -221,11 +223,12 @@ public class DeltaLakePageSinkProvider
                 mergeResultJsonCodec,
                 stats,
                 Location.of(tableHandle.location()),
-                tableHandle.credentialsHandle(),
+                deltaTableCredentials,
                 pageSink,
                 tableHandle.inputColumns(),
+                tableHandle.metadataEntry().getOriginalPartitionColumns(),
                 domainCompactionThreshold,
-                () -> createCdfPageSink(merge, session),
+                () -> createCdfPageSink(merge, session, deltaTableCredentials),
                 changeDataFeedEnabled(tableHandle.metadataEntry(), tableHandle.protocolEntry()).orElse(false),
                 parquetSchemaMapping,
                 parquetReaderOptions,
@@ -233,13 +236,16 @@ public class DeltaLakePageSinkProvider
                 isDeletionVectorEnabled(tableHandle.metadataEntry(), tableHandle.protocolEntry()),
                 merge.deletionVectors(),
                 getRandomPrefixLength(tableHandle.metadataEntry()),
+                isRandomizeFilePrefixesEnabled(tableHandle.metadataEntry()),
                 merge.shallowCloneSourceTableLocation(),
-                useDeltaLengthByteArrayEncoding);
+                useDeltaLengthByteArrayEncoding,
+                memoryContext);
     }
 
     private DeltaLakeCdfPageSink createCdfPageSink(
             DeltaLakeMergeTableHandle mergeTableHandle,
-            ConnectorSession session)
+            ConnectorSession session,
+            Optional<DeltaLakeTableCredentials> tableCredentials)
     {
         MetadataEntry metadataEntry = mergeTableHandle.tableHandle().getMetadataEntry();
         ProtocolEntry protocolEntry = mergeTableHandle.tableHandle().getProtocolEntry();
@@ -270,7 +276,6 @@ public class DeltaLakePageSinkProvider
         DeltaLakeParquetSchemaMapping parquetSchemaMapping = createParquetSchemaMapping(metadataEntry, protocolEntry, typeManager, true);
 
         return new DeltaLakeCdfPageSink(
-                typeManager.getTypeOperators(),
                 allColumns,
                 metadataEntry.getOriginalPartitionColumns(),
                 pageIndexerFactory,
@@ -278,8 +283,8 @@ public class DeltaLakePageSinkProvider
                 maxPartitionsPerWriter,
                 dataFileInfoCodec,
                 tableLocation,
-                mergeTableHandle.tableHandle().toCredentialsHandle(),
-                tableLocation.appendPath(CHANGE_DATA_FOLDER_NAME),
+                tableCredentials,
+                isRandomizeFilePrefixesEnabled(metadataEntry),
                 session,
                 stats,
                 trinoVersion,

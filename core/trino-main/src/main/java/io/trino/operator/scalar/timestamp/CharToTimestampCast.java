@@ -25,6 +25,7 @@ import static io.trino.operator.scalar.StringFunctions.trim;
 import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.trino.spi.function.OperatorType.CAST;
 
+// fallible
 @ScalarOperator(CAST)
 public final class CharToTimestampCast
 {
@@ -32,10 +33,10 @@ public final class CharToTimestampCast
 
     @LiteralParameters({"x", "p"})
     @SqlType("timestamp(p)")
-    public static long castToShort(@LiteralParameter("p") long precision, @SqlType("char(x)") Slice value)
+    public static long castToShort(@LiteralParameter("p") int precision, @SqlType("char(x)") Slice value)
     {
         try {
-            return VarcharToTimestampCast.castToShortTimestamp((int) precision, trim(value).toStringUtf8());
+            return VarcharToTimestampCast.castToShortTimestamp(precision, trim(value));
         }
         catch (IllegalArgumentException e) {
             throw new TrinoException(INVALID_CAST_ARGUMENT, "Value cannot be cast to timestamp: " + value.toStringUtf8(), e);
@@ -44,10 +45,10 @@ public final class CharToTimestampCast
 
     @LiteralParameters({"x", "p"})
     @SqlType("timestamp(p)")
-    public static LongTimestamp castToLong(@LiteralParameter("p") long precision, @SqlType("char(x)") Slice value)
+    public static LongTimestamp castToLong(@LiteralParameter("p") int precision, @SqlType("char(x)") Slice value)
     {
         try {
-            return VarcharToTimestampCast.castToLongTimestamp((int) precision, trim(value).toStringUtf8());
+            return VarcharToTimestampCast.castToLongTimestamp(precision, trim(value));
         }
         catch (IllegalArgumentException e) {
             throw new TrinoException(INVALID_CAST_ARGUMENT, "Value cannot be cast to timestamp: " + value.toStringUtf8(), e);

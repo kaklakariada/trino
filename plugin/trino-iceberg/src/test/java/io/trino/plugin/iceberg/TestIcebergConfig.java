@@ -68,6 +68,7 @@ public class TestIcebergConfig
                 .setDeleteSchemaLocationsFallback(false)
                 .setTargetMaxFileSize(DataSize.of(1, GIGABYTE))
                 .setIdleWriterMinFileSize(DataSize.of(16, MEGABYTE))
+                .setMaxSplitSize(null)
                 .setMinimumAssignedSplitWeight(0.05)
                 .setHideMaterializedViewStorageTable(true)
                 .setMaterializedViewsStorageSchema(null)
@@ -88,9 +89,11 @@ public class TestIcebergConfig
                 .setMaterializedViewRefreshSnapshotRetentionPeriod(new Duration(4, HOURS))
                 .setObjectStoreLayoutEnabled(false)
                 .setMetadataParallelism(8)
+                .setMetadataVirtualThreadsEnabled(true)
                 .setBucketExecutionEnabled(true)
                 .setParquetFooterCacheType(NONE)
-                .setParquetFooterCacheMemoryMaxSize(DataSize.of(10, MEGABYTE)));
+                .setParquetFooterCacheMemoryMaxSize(DataSize.of(10, MEGABYTE))
+                .setDomainCompactionThreshold(1000));
     }
 
     @Test
@@ -117,6 +120,7 @@ public class TestIcebergConfig
                 .put("iceberg.delete-schema-locations-fallback", "true")
                 .put("iceberg.target-max-file-size", "1MB")
                 .put("iceberg.idle-writer-min-file-size", "1MB")
+                .put("iceberg.max-split-size", "256MB")
                 .put("iceberg.minimum-assigned-split-weight", "0.01")
                 .put("iceberg.materialized-views.hide-storage-table", "false")
                 .put("iceberg.materialized-views.storage-schema", "mv_storage_schema")
@@ -136,9 +140,11 @@ public class TestIcebergConfig
                 .put("iceberg.metadata-cache.enabled", "false")
                 .put("iceberg.object-store-layout.enabled", "true")
                 .put("iceberg.metadata.parallelism", "10")
+                .put("iceberg.metadata.virtual-threads-enabled", "false")
                 .put("iceberg.bucket-execution", "false")
                 .put("iceberg.parquet-footer-cache.type", "MEMORY")
                 .put("iceberg.parquet-footer-cache.memory.max-size", "42MB")
+                .put("iceberg.domain-compaction-threshold", "10000")
                 .buildOrThrow();
 
         IcebergConfig expected = new IcebergConfig()
@@ -162,6 +168,7 @@ public class TestIcebergConfig
                 .setDeleteSchemaLocationsFallback(true)
                 .setTargetMaxFileSize(DataSize.of(1, MEGABYTE))
                 .setIdleWriterMinFileSize(DataSize.of(1, MEGABYTE))
+                .setMaxSplitSize(DataSize.of(256, MEGABYTE))
                 .setMinimumAssignedSplitWeight(0.01)
                 .setHideMaterializedViewStorageTable(false)
                 .setMaterializedViewsStorageSchema("mv_storage_schema")
@@ -182,9 +189,11 @@ public class TestIcebergConfig
                 .setMaterializedViewRefreshSnapshotRetentionPeriod(new Duration(1, HOURS))
                 .setObjectStoreLayoutEnabled(true)
                 .setMetadataParallelism(10)
+                .setMetadataVirtualThreadsEnabled(false)
                 .setBucketExecutionEnabled(false)
                 .setParquetFooterCacheType(MEMORY)
-                .setParquetFooterCacheMemoryMaxSize(DataSize.of(42, MEGABYTE));
+                .setParquetFooterCacheMemoryMaxSize(DataSize.of(42, MEGABYTE))
+                .setDomainCompactionThreshold(10000);
 
         assertFullMapping(properties, expected);
     }

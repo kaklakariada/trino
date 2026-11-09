@@ -24,6 +24,14 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
+    protected Void visitIntervalValueExpression(IntervalValueExpression node, C context)
+    {
+        process(node.getLeft(), context);
+        process(node.getRight(), context);
+        return null;
+    }
+
+    @Override
     protected Void visitCast(Cast node, C context)
     {
         process(node.getExpression(), context);
@@ -35,16 +43,6 @@ public abstract class DefaultTraversalVisitor<C>
     {
         process(node.getLeft(), context);
         process(node.getRight(), context);
-
-        return null;
-    }
-
-    @Override
-    protected Void visitBetweenPredicate(BetweenPredicate node, C context)
-    {
-        process(node.getValue(), context);
-        process(node.getMin(), context);
-        process(node.getMax(), context);
 
         return null;
     }
@@ -96,19 +94,21 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
-    protected Void visitComparisonExpression(ComparisonExpression node, C context)
+    protected Void visitTrim(Trim node, C context)
     {
-        process(node.getLeft(), context);
-        process(node.getRight(), context);
+        process(node.getTrimSource(), context);
+        node.getTrimCharacter().ifPresent(trimChar -> process(trimChar, context));
 
         return null;
     }
 
     @Override
-    protected Void visitTrim(Trim node, C context)
+    protected Void visitOverlay(Overlay node, C context)
     {
-        process(node.getTrimSource(), context);
-        node.getTrimCharacter().ifPresent(trimChar -> process(trimChar, context));
+        process(node.getValue(), context);
+        process(node.getReplacement(), context);
+        process(node.getStart(), context);
+        node.getLength().ifPresent(length -> process(length, context));
 
         return null;
     }
@@ -194,17 +194,8 @@ public abstract class DefaultTraversalVisitor<C>
     @Override
     protected Void visitWhenClause(WhenClause node, C context)
     {
-        process(node.getOperand(), context);
+        process(node.getMatch().node(), context);
         process(node.getResult(), context);
-
-        return null;
-    }
-
-    @Override
-    protected Void visitInPredicate(InPredicate node, C context)
-    {
-        process(node.getValue(), context);
-        process(node.getValueList(), context);
 
         return null;
     }
@@ -234,8 +225,8 @@ public abstract class DefaultTraversalVisitor<C>
     @Override
     protected Void visitStaticMethodCall(StaticMethodCall node, C context)
     {
-        for (Expression argument : node.getArguments()) {
-            process(argument, context);
+        for (CallArgument argument : node.getArguments()) {
+            process(argument.getValue(), context);
         }
         return null;
     }
@@ -244,8 +235,8 @@ public abstract class DefaultTraversalVisitor<C>
     protected Void visitMethodCall(MethodCall node, C context)
     {
         process(node.getReceiver(), context);
-        for (Expression argument : node.getArguments()) {
-            process(argument, context);
+        for (CallArgument argument : node.getArguments()) {
+            process(argument.getValue(), context);
         }
         return null;
     }
@@ -475,26 +466,68 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
+    protected Void visitPredicated(Predicated node, C context)
+    {
+        process(node.getValue(), context);
+        process(node.getPredicate(), context);
+        return null;
+    }
+
+    @Override
+    protected Void visitBetweenPredicate(BetweenPredicate node, C context)
+    {
+        process(node.getMin(), context);
+        process(node.getMax(), context);
+        return null;
+    }
+
+    @Override
+    protected Void visitComparisonPredicate(ComparisonPredicate node, C context)
+    {
+        process(node.getRight(), context);
+        return null;
+    }
+
+    @Override
+    protected Void visitDistinctFromPredicate(DistinctFromPredicate node, C context)
+    {
+        process(node.getRight(), context);
+        return null;
+    }
+
+    @Override
+    protected Void visitInPredicate(InPredicate node, C context)
+    {
+        process(node.getValueList(), context);
+        return null;
+    }
+
+    @Override
     protected Void visitLikePredicate(LikePredicate node, C context)
     {
-        process(node.getValue(), context);
         process(node.getPattern(), context);
-        node.getEscape().ifPresent(value -> process(value, context));
-
+        node.getEscape().ifPresent(escape -> process(escape, context));
         return null;
     }
 
     @Override
-    protected Void visitIsNotNullPredicate(IsNotNullPredicate node, C context)
+    protected Void visitMatchPredicate(MatchPredicate node, C context)
     {
-        process(node.getValue(), context);
+        process(node.getSubquery(), context);
         return null;
     }
 
     @Override
-    protected Void visitIsNullPredicate(IsNullPredicate node, C context)
+    protected Void visitOverlapsPredicate(OverlapsPredicate node, C context)
     {
-        process(node.getValue(), context);
+        process(node.getRight(), context);
+        return null;
+    }
+
+    @Override
+    protected Void visitQuantifiedComparisonPredicate(QuantifiedComparisonPredicate node, C context)
+    {
+        process(node.getSubquery(), context);
         return null;
     }
 
@@ -884,16 +917,15 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
-    protected Void visitQuantifiedComparisonExpression(QuantifiedComparisonExpression node, C context)
+    protected Void visitExists(ExistsPredicate node, C context)
     {
-        process(node.getValue(), context);
         process(node.getSubquery(), context);
 
         return null;
     }
 
     @Override
-    protected Void visitExists(ExistsPredicate node, C context)
+    protected Void visitUniquePredicate(UniquePredicate node, C context)
     {
         process(node.getSubquery(), context);
 
@@ -989,9 +1021,25 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
+    protected Void visitJsonConstructor(JsonConstructor node, C context)
+    {
+        process(node.getExpression(), context);
+
+        return null;
+    }
+
+    @Override
     protected Void visitJsonQuery(JsonQuery node, C context)
     {
         process(node.getJsonPathInvocation(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonSerialize(JsonSerialize node, C context)
+    {
+        process(node.getExpression(), context);
 
         return null;
     }
@@ -1079,6 +1127,42 @@ public abstract class DefaultTraversalVisitor<C>
     {
         for (JsonTableColumnDefinition column : node.getColumns()) {
             process(column, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitPivot(Pivot node, C context)
+    {
+        process(node.getInput(), context);
+        for (PivotAggregation aggregation : node.getAggregations()) {
+            process(aggregation, context);
+        }
+        for (Expression pivotColumn : node.getPivotColumns()) {
+            process(pivotColumn, context);
+        }
+        for (PivotValueGroup valueGroup : node.getValueGroups()) {
+            process(valueGroup, context);
+        }
+        node.getGroupBy().ifPresent(groupBy -> process(groupBy, context));
+
+        return null;
+    }
+
+    @Override
+    protected Void visitPivotAggregation(PivotAggregation node, C context)
+    {
+        process(node.getExpression(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitPivotValueGroup(PivotValueGroup node, C context)
+    {
+        for (Expression value : node.getValues()) {
+            process(value, context);
         }
 
         return null;

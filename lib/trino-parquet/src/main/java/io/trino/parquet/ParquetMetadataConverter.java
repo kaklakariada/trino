@@ -47,15 +47,33 @@ import org.apache.parquet.format.TimeUnit;
 import org.apache.parquet.format.TimestampType;
 import org.apache.parquet.format.Type;
 import org.apache.parquet.format.UUIDType;
+import org.apache.parquet.format.VariantType;
 import org.apache.parquet.internal.column.columnindex.BinaryTruncator;
 import org.apache.parquet.internal.column.columnindex.ColumnIndexBuilder;
 import org.apache.parquet.internal.column.columnindex.OffsetIndexBuilder;
 import org.apache.parquet.io.api.Binary;
+import org.apache.parquet.schema.ColumnOrder;
 import org.apache.parquet.schema.ColumnOrder.ColumnOrderName;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.BsonLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.DateLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.EnumLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.IntLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.IntervalLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.JsonLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.ListLogicalTypeAnnotation;
 import org.apache.parquet.schema.LogicalTypeAnnotation.LogicalTypeAnnotationVisitor;
+import org.apache.parquet.schema.LogicalTypeAnnotation.MapKeyValueTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.MapLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.StringLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.TimeLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.TimestampLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.UUIDLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.VariantLogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
+import org.apache.parquet.schema.Types;
 
 import java.util.Arrays;
 import java.util.List;
@@ -63,20 +81,6 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNullElse;
 import static org.apache.parquet.CorruptStatistics.shouldIgnoreStatistics;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.BsonLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.DateLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.EnumLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.IntLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.IntervalLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.JsonLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.ListLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.MapKeyValueTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.MapLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.StringLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.TimestampLogicalTypeAnnotation;
-import static org.apache.parquet.schema.LogicalTypeAnnotation.UUIDLogicalTypeAnnotation;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.bsonType;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.dateType;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.decimalType;
@@ -239,13 +243,18 @@ public final class ParquetMetadataConverter
         if (!isMinMaxStatsSupported(type)) {
             return null;
         }
+        // Without nan counts, parquet 1.18+ conservatively keeps all pages when filtering
+        // floating point columns, so forward them for files that carry them
         return ColumnIndexBuilder.build(
                 type,
                 fromParquetBoundaryOrder(parquetColumnIndex.getBoundary_order()),
                 parquetColumnIndex.getNull_pages(),
                 parquetColumnIndex.getNull_counts(),
+                parquetColumnIndex.getNan_counts(),
                 parquetColumnIndex.getMin_values(),
-                parquetColumnIndex.getMax_values());
+                parquetColumnIndex.getMax_values(),
+                null,
+                null);
     }
 
     public static org.apache.parquet.internal.column.columnindex.OffsetIndex fromParquetOffsetIndex(OffsetIndex parquetOffsetIndex)
@@ -262,7 +271,9 @@ public final class ParquetMetadataConverter
         if (isGeospatialLogicalType(type.getLogicalTypeAnnotation())) {
             return false;
         }
-        return type.columnOrder().getColumnOrderName() == ColumnOrderName.TYPE_DEFINED_ORDER;
+        // IEEE 754 total order is the parquet 1.18+ default for floating point columns, see toTypeDefinedOrder
+        return type.columnOrder().getColumnOrderName() == ColumnOrderName.TYPE_DEFINED_ORDER
+                || type.columnOrder().getColumnOrderName() == ColumnOrderName.IEEE_754_TOTAL_ORDER;
     }
 
     public static Statistics toParquetStatistics(org.apache.parquet.column.statistics.Statistics<?> stats, int truncateLength)
@@ -270,7 +281,10 @@ public final class ParquetMetadataConverter
         Statistics formatStats = new Statistics();
         if (!stats.isEmpty() && withinLimit(stats, truncateLength)) {
             formatStats.setNull_count(stats.getNumNulls());
-            if (stats.hasNonNullValue()) {
+            if (stats.isNanCountSet()) {
+                formatStats.setNan_count(stats.getNanCount());
+            }
+            if (stats.hasNonNullValue() && !mayContainNaN(stats)) {
                 byte[] min;
                 byte[] max;
                 boolean isMinValueExact = true;
@@ -299,7 +313,7 @@ public final class ParquetMetadataConverter
                 // Fill the former min-max statistics only if the comparison logic is
                 // signed so the logic of V1 and V2 stats are the same (which is
                 // trivially true for equal min-max values)
-                if (sortOrder(stats.type()) == SortOrder.SIGNED || Arrays.equals(min, max)) {
+                if (sortOrder(stats.type()) == SortOrder.SIGNED || minMaxStatsAreExactSingleValue(stats.type(), min, max)) {
                     if (min != null) {
                         formatStats.setMin(min);
                     }
@@ -308,7 +322,7 @@ public final class ParquetMetadataConverter
                     }
                 }
 
-                if (isMinMaxStatsSupported(stats.type()) || Arrays.equals(min, max)) {
+                if (isMinMaxStatsSupported(stats.type()) || minMaxStatsAreExactSingleValue(stats.type(), min, max)) {
                     if (min != null) {
                         formatStats.setMin_value(min);
                         formatStats.setIs_min_value_exact(isMinValueExact);
@@ -323,22 +337,67 @@ public final class ParquetMetadataConverter
         return formatStats;
     }
 
+    /// Floating point min/max is omitted from footers when the column may contain NaN, see [#toTypeDefinedOrder(PrimitiveType)]
+    private static boolean mayContainNaN(org.apache.parquet.column.statistics.Statistics<?> stats)
+    {
+        return isFloatingPointType(stats.type()) && (!stats.isNanCountSet() || stats.getNanCount() > 0);
+    }
+
+    private static boolean isFloatingPointType(PrimitiveType type)
+    {
+        PrimitiveTypeName typeName = type.getPrimitiveTypeName();
+        return typeName == PrimitiveTypeName.DOUBLE || typeName == PrimitiveTypeName.FLOAT;
+    }
+
+    /// Returns the given type with the type-defined column order for floating point types.
+    ///
+    /// Parquet 1.18+ defaults floating point columns to the IEEE 754 total order, which changes how
+    /// statistics are computed and interpreted: NaN values are included in min/max (with NaN presence
+    /// conveyed through the new nan_count field) instead of invalidating the statistics, and
+    /// -0.0/+0.0 are not normalized. Parquet 1.17 writers instead let NaN poison the max value,
+    /// which made readers discard the statistics, so NaN presence implied no usable bounds.
+    ///
+    /// Trino and the table formats it writes to (Delta Lake, Iceberg) treat NaN as larger than any
+    /// other value, so NaN-excluding bounds would cause incorrect pruning in readers unaware of
+    /// nan_count. Trino also does not declare column orders in file footers, and its consumers
+    /// (e.g. the Delta Lake writer) rely on the legacy behavior where NaN min/max values mark the
+    /// statistics as invalid. Both writing and interpreting statistics must therefore keep using
+    /// the type-defined order, and footers must omit floating point min/max whenever the column
+    /// may contain NaN.
+    public static PrimitiveType toTypeDefinedOrder(PrimitiveType type)
+    {
+        if (!isFloatingPointType(type) || type.columnOrder().getColumnOrderName() == ColumnOrderName.TYPE_DEFINED_ORDER) {
+            return type;
+        }
+        Types.PrimitiveBuilder<PrimitiveType> builder = Types.primitive(type.getPrimitiveTypeName(), type.getRepetition())
+                .columnOrder(ColumnOrder.typeDefined());
+        if (type.getLogicalTypeAnnotation() != null) {
+            builder = builder.as(type.getLogicalTypeAnnotation());
+        }
+        if (type.getId() != null) {
+            builder = builder.id(type.getId().intValue());
+        }
+        return builder.named(type.getName());
+    }
+
     public static org.apache.parquet.column.statistics.Statistics<?> fromParquetStatistics(String createdBy, Statistics statistics, PrimitiveType type)
     {
         org.apache.parquet.column.statistics.Statistics.Builder statsBuilder =
-                org.apache.parquet.column.statistics.Statistics.getBuilderForReading(type);
+                org.apache.parquet.column.statistics.Statistics.getBuilderForReading(toTypeDefinedOrder(type));
         if (statistics != null) {
             if (statistics.isSetMin_value() && statistics.isSetMax_value()) {
                 byte[] min = statistics.min_value.array();
                 byte[] max = statistics.max_value.array();
-                if (isMinMaxStatsSupported(type) || Arrays.equals(min, max)) {
+                // NaN-excluding bounds cannot be used for pruning, see toTypeDefinedOrder
+                boolean containsNaN = isFloatingPointType(type) && statistics.isSetNan_count() && statistics.getNan_count() > 0;
+                if (!containsNaN && (isMinMaxStatsSupported(type) || minMaxStatsAreExactSingleValue(type, min, max))) {
                     statsBuilder.withMin(min);
                     statsBuilder.withMax(max);
                 }
             }
             else {
                 boolean isSet = statistics.isSetMax() && statistics.isSetMin();
-                boolean maxEqualsMin = isSet && Arrays.equals(statistics.getMin(), statistics.getMax());
+                boolean maxEqualsMin = isSet && minMaxStatsAreExactSingleValue(type, statistics.getMin(), statistics.getMax());
                 boolean sortOrdersMatch = SortOrder.SIGNED == sortOrder(type);
                 if (isSet && !shouldIgnoreStatistics(createdBy, type.getPrimitiveTypeName()) && (sortOrdersMatch || maxEqualsMin)) {
                     statsBuilder.withMin(statistics.min.array());
@@ -384,6 +443,11 @@ public final class ParquetMetadataConverter
         }
         return annotation.accept(new SortOrderVisitor())
                 .orElse(defaultSortOrder(primitive.getPrimitiveTypeName()));
+    }
+
+    private static boolean minMaxStatsAreExactSingleValue(PrimitiveType type, byte[] min, byte[] max)
+    {
+        return !isGeospatialLogicalType(type.getLogicalTypeAnnotation()) && Arrays.equals(min, max);
     }
 
     private static SortOrder defaultSortOrder(PrimitiveTypeName primitive)
@@ -458,6 +522,14 @@ public final class ParquetMetadataConverter
         public Optional<LogicalType> visit(ListLogicalTypeAnnotation type)
         {
             return Optional.of(LogicalType.LIST(new ListType()));
+        }
+
+        @Override
+        public Optional<LogicalType> visit(VariantLogicalTypeAnnotation type)
+        {
+            VariantType variant = new VariantType();
+            variant.setSpecification_version(type.getSpecVersion());
+            return Optional.of(LogicalType.VARIANT(variant));
         }
 
         @Override

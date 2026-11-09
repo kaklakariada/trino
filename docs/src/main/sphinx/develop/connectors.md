@@ -160,7 +160,7 @@ WHERE url = 'https://github.com/trinodb/trino.git'
 (connector-metadata)=
 ## ConnectorMetadata
 
-The connector metadata interface allows Trino to get a lists of schemas,
+The connector metadata interface allows Trino to get a list of schemas,
 tables, columns, and other metadata about a particular data source.
 
 A basic read-only connector should implement the following methods:
@@ -323,8 +323,9 @@ constraint has already been applied.
 A constraint contains the following elements:
 
 - A `TupleDomain` defining the mapping between columns and their domains.
-  A `Domain` is either a list of possible values, or a list of ranges, and
-  also contains information about nullability.
+  A `Domain` contains a typed value set and its null allowance. See
+  [](value-domains) for representations, NaN membership, and the connector
+  compatibility boundary.
 - Expression for pushing down function calls.
 - Map of assignments from variables in the expression to columns.
 - (optional) Predicate which tests a map of columns and their values;
@@ -768,9 +769,9 @@ The following example creates a SqlMap object for a `map(varchar, varchar)` colu
 ```java
 private SqlMap encodeMap(Map<String, ?> map)
 {
-    MapType mapType = typeManager.getType(TypeSignature.mapType(
-                            VARCHAR.getTypeSignature(),
-                            VARCHAR.getTypeSignature()));
+    MapType mapType = typeManager.getType(TypeDescriptor.mapType(
+                            VARCHAR.getTypeDescriptor(),
+                            VARCHAR.getTypeDescriptor()));
     MapBlockBuilder values = mapType.createBlockBuilder(null, map != null ? map.size() : 0);
     if (map == null) {
         values.appendNull();

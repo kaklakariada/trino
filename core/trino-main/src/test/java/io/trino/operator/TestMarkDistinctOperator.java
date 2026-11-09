@@ -14,7 +14,6 @@
 package io.trino.operator;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.primitives.Ints;
 import io.trino.RowPagesBuilder;
 import io.trino.operator.MarkDistinctOperator.MarkDistinctOperatorFactory;
 import io.trino.spi.Page;
@@ -70,7 +69,7 @@ public class TestMarkDistinctOperator
     public void testMarkDistinct()
     {
         DriverContext driverContext = newDriverContext();
-        RowPagesBuilder rowPagesBuilder = rowPagesBuilder(Ints.asList(0), BIGINT);
+        RowPagesBuilder rowPagesBuilder = rowPagesBuilder(BIGINT);
         List<Page> input = rowPagesBuilder
                 .addSequencePage(100, 0)
                 .addSequencePage(100, 0)
@@ -83,7 +82,7 @@ public class TestMarkDistinctOperator
                 ImmutableList.of(0),
                 hashStrategyCompiler);
 
-        MaterializedResult.Builder expected = resultBuilder(driverContext.getSession(), BIGINT, BOOLEAN);
+        MaterializedResult.Builder expected = resultBuilder(BIGINT, BOOLEAN);
         for (long i = 0; i < 100; i++) {
             expected.row(i, true);
             expected.row(i, false);
@@ -96,7 +95,7 @@ public class TestMarkDistinctOperator
     public void testRleDistinctMask()
     {
         DriverContext driverContext = newDriverContext();
-        RowPagesBuilder rowPagesBuilder = rowPagesBuilder(Ints.asList(0), BIGINT);
+        RowPagesBuilder rowPagesBuilder = rowPagesBuilder(BIGINT);
         List<Page> inputs = rowPagesBuilder
                 .addSequencePage(100, 0)
                 .addSequencePage(100, 50)
@@ -158,12 +157,14 @@ public class TestMarkDistinctOperator
 
     @Test
     public void testMemoryReservationYield()
+            throws Exception
     {
         testMemoryReservationYield(BIGINT);
         testMemoryReservationYield(VARCHAR);
     }
 
     private void testMemoryReservationYield(Type type)
+            throws Exception
     {
         List<Page> input = createPages(type, 6_000, 600);
 

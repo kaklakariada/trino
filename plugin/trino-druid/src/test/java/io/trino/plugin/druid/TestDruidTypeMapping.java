@@ -71,7 +71,7 @@ public class TestDruidTypeMapping
     {
         SqlDataTypeTest.create()
                 .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                .addRoundTrip("col_0", "long", "NULL", BIGINT, "BIGINT '0'")
+                .addRoundTrip("col_0", "long", "NULL", BIGINT, "CAST(NULL AS bigint)")
                 .addRoundTrip("col_1", "long", "0", BIGINT, "BIGINT '0'")
                 .addRoundTrip("col_2", "long", "-9223372036854775808", BIGINT, "-9223372036854775808") // min value in Trino
                 .addRoundTrip("col_3", "long", "123456789012", BIGINT, "123456789012")
@@ -84,45 +84,12 @@ public class TestDruidTypeMapping
     {
         SqlDataTypeTest.create()
                 .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                .addRoundTrip("col_0", "double", "NULL", DOUBLE, "DOUBLE '0.0'")
+                .addRoundTrip("col_0", "double", "NULL", DOUBLE, "CAST(NULL AS double)")
                 .addRoundTrip("col_1", "double", "0.0", DOUBLE, "DOUBLE '0.0'")
                 .addRoundTrip("col_2", "double", "1.0E100", DOUBLE, "1.0E100")
                 .addRoundTrip("col_3", "double", "123.456E10", DOUBLE, "123.456E10")
-                .addRoundTrip("col_4", "double", "Invalid String", DOUBLE, "DOUBLE '0.0'")
+                .addRoundTrip("col_4", "double", "Invalid String", DOUBLE, "CAST(NULL AS double)")
                 .execute(getQueryRunner(), druidCreateAndInsert("test_double"));
-    }
-
-    @Test
-    public void testDoubleNaN()
-    {
-        assertThatThrownBy(() ->
-                SqlDataTypeTest.create()
-                        .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                        .addRoundTrip("col_0", "double", "NaN", DOUBLE, "nan()")
-                        .execute(getQueryRunner(), druidCreateAndInsert("test_double_with_nan")))
-                .hasMessageMatching(".*class java.lang.String cannot be cast to class java.lang.Number.*");
-    }
-
-    @Test
-    public void testDoubleInfinity()
-    {
-        assertThatThrownBy(() ->
-                SqlDataTypeTest.create()
-                        .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                        .addRoundTrip("col_0", "double", "Infinity", DOUBLE, "+infinity()")
-                        .execute(getQueryRunner(), druidCreateAndInsert("test_double_with_positive_infinity")))
-                .hasMessageMatching(".*class java.lang.String cannot be cast to class java.lang.Number.*");
-    }
-
-    @Test
-    public void testDoubleNegativeInfinity()
-    {
-        assertThatThrownBy(() ->
-                SqlDataTypeTest.create()
-                        .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                        .addRoundTrip("col_0", "double", "-Infinity", DOUBLE, "-infinity()")
-                        .execute(getQueryRunner(), druidCreateAndInsert("test_double_with_negative_infinity")))
-                .hasMessageMatching(".*class java.lang.String cannot be cast to class java.lang.Number.*");
     }
 
     @Test
@@ -130,45 +97,44 @@ public class TestDruidTypeMapping
     {
         SqlDataTypeTest.create()
                 .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                .addRoundTrip("col_0", "float", "NULL", REAL, "REAL '0.0'")
+                .addRoundTrip("col_0", "float", "NULL", REAL, "CAST(NULL AS real)")
                 .addRoundTrip("col_1", "float", "0.0", REAL, "REAL '0.0'")
                 .addRoundTrip("col_2", "float", "3.14", REAL, "REAL '3.14'")
                 .addRoundTrip("col_3", "float", "3.1415927", REAL, "REAL '3.1415927'")
-                .addRoundTrip("col_4", "float", "Invalid String", REAL, "REAL '0.0'")
+                .addRoundTrip("col_4", "float", "Invalid String", REAL, "CAST(NULL AS real)")
                 .execute(getQueryRunner(), druidCreateAndInsert("test_float"));
     }
 
     @Test
-    public void testFloatNaN()
+    public void testNonFiniteValues()
+            throws Exception
     {
-        assertThatThrownBy(() ->
-                SqlDataTypeTest.create()
-                        .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                        .addRoundTrip("col_0", "float", "NaN", REAL, "CAST(nan() AS real)")
-                        .execute(getQueryRunner(), druidCreateAndInsert("test_float_with_nan")))
-                .hasMessageMatching(".*class java.lang.String cannot be cast to class java.lang.Number.*");
-    }
+        try (DruidTable testTable = new DruidTable("test_non_finite")) {
+            String dataFilePath = format("%s/%s.tsv", druidServer.getHostWorkingDirectory(), testTable.getName());
+            Files.writeString(Path.of(dataFilePath), "2020-01-01 00:00:00.000\tNaN\tInfinity\t-Infinity\tNaN\tInfinity\t-Infinity", UTF_8);
+            IndexTaskBuilder builder = new IndexTaskBuilder()
+                    .setDatasource(testTable.getName())
+                    .setTimestampSpec(new TimestampSpec("dummy_druid_ts", "auto"))
+                    .addColumn("double_nan", "double")
+                    .addColumn("double_positive_infinity", "double")
+                    .addColumn("double_negative_infinity", "double")
+                    .addColumn("float_nan", "float")
+                    .addColumn("float_positive_infinity", "float")
+                    .addColumn("float_negative_infinity", "float");
+            druidServer.ingestData(testTable.getName(), Optional.empty(), builder.build(), dataFilePath);
 
-    @Test
-    public void testFloatInfinity()
-    {
-        assertThatThrownBy(() ->
-                SqlDataTypeTest.create()
-                        .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                        .addRoundTrip("col_0", "float", "Infinity", REAL, "+infinity()")
-                        .execute(getQueryRunner(), druidCreateAndInsert("test_float_with_positive_infinity")))
-                .hasMessageMatching(".*class java.lang.String cannot be cast to class java.lang.Number.*");
-    }
-
-    @Test
-    public void testFloatNegativeInfinity()
-    {
-        assertThatThrownBy(() ->
-                SqlDataTypeTest.create()
-                        .addRoundTrip("__time", "timestamp", "2020-01-01 00:00:00.000", TIMESTAMP_MILLIS, "TIMESTAMP '2020-01-01 00:00:00.000'")
-                        .addRoundTrip("col_0", "float", "-Infinity", REAL, "-infinity()")
-                        .execute(getQueryRunner(), druidCreateAndInsert("test_float_with_negative_infinity")))
-                .hasMessageMatching(".*class java.lang.String cannot be cast to class java.lang.Number.*");
+            for (String column : ImmutableList.of(
+                    "double_nan",
+                    "double_positive_infinity",
+                    "double_negative_infinity",
+                    "float_nan",
+                    "float_positive_infinity",
+                    "float_negative_infinity")) {
+                assertThatThrownBy(() -> getQueryRunner().execute("SELECT __time, " + column + " FROM " + testTable.getName()))
+                        .as("column %s", column)
+                        .hasMessageMatching(".*class java.lang.String cannot be cast to class java.lang.Number.*");
+            }
+        }
     }
 
     @Test

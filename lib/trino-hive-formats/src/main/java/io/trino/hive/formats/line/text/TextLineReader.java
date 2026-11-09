@@ -15,6 +15,8 @@ package io.trino.hive.formats.line.text;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.CountingInputStream;
+import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.trino.hive.formats.compression.Codec;
 import io.trino.hive.formats.line.LineBuffer;
 import io.trino.hive.formats.line.LineReader;
@@ -38,6 +40,8 @@ public final class TextLineReader
 
     private final InputStream in;
     private final byte[] buffer;
+    // view over the valid portion of the buffer [0, bufferEnd); refreshed on every fill
+    private Slice bufferSlice;
     private final OptionalLong inputEnd;
     private final LongSupplier rawInputPositionSupplier;
     private final long initialRawInputPosition;
@@ -84,6 +88,7 @@ public final class TextLineReader
 
         this.in = in;
         this.buffer = new byte[bufferSize];
+        this.bufferSlice = Slices.EMPTY_SLICE;
         this.inputEnd = splitLength.stream().map(length -> addExact(splitStart, length)).findAny();
         this.rawInputPositionSupplier = rawInputPositionSupplier;
         // the initial skip is not included in the physical read size
@@ -224,20 +229,20 @@ public final class TextLineReader
     {
         if (inputEnd.isPresent()) {
             long currentPosition = getCurrentPosition();
-            return currentPosition > inputEnd.getAsLong();
+            return currentPosition > inputEnd.orElseThrow();
         }
         return false;
     }
 
     private boolean seekToStartOfLineTerminator()
     {
-        while (bufferPosition < bufferEnd) {
-            if (isEndOfLineCharacter(buffer[bufferPosition])) {
-                return true;
-            }
-            bufferPosition++;
+        int terminator = bufferSlice.indexOfAnyByte((byte) '\n', (byte) '\r', bufferPosition);
+        if (terminator < 0) {
+            bufferPosition = bufferEnd;
+            return false;
         }
-        return false;
+        bufferPosition = terminator;
+        return true;
     }
 
     private static boolean isEndOfLineCharacter(byte currentByte)
@@ -286,6 +291,7 @@ public final class TextLineReader
         try {
             // fill as much of the buffer as possible
             bufferEnd = in.readNBytes(buffer, 0, buffer.length);
+            bufferSlice = Slices.wrappedBuffer(buffer, 0, bufferEnd);
         }
         finally {
             long duration = System.nanoTime() - start;

@@ -18,7 +18,6 @@ import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -44,6 +43,7 @@ import io.trino.operator.OperatorStats;
 import io.trino.security.AccessControl;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.BasicQueryStats;
+import io.trino.server.DynamicFilterService.DynamicFiltersStats;
 import io.trino.server.ResultQueryInfo;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.NodeVersion;
@@ -94,6 +94,7 @@ import java.util.function.Supplier;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.nullToEmpty;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.units.DataSize.succinctBytes;
 import static io.trino.SystemSessionProperties.getRetryPolicy;
@@ -112,7 +113,6 @@ import static io.trino.execution.QueryState.TERMINAL_QUERY_STATES;
 import static io.trino.execution.QueryState.WAITING_FOR_RESOURCES;
 import static io.trino.execution.StagesInfo.getAllStages;
 import static io.trino.operator.RetryPolicy.TASK;
-import static io.trino.server.DynamicFilterService.DynamicFiltersStats;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.TRANSACTION_ALREADY_ABORTED;
 import static io.trino.spi.StandardErrorCode.TRANSACTION_ALREADY_COMMITED;
@@ -126,7 +126,6 @@ import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static java.util.stream.Collectors.toMap;
 
 @ThreadSafe
 public class QueryStateMachine
@@ -169,15 +168,15 @@ public class QueryStateMachine
 
     private final AtomicReference<String> setAuthorizationUser = new AtomicReference<>();
     private final AtomicBoolean resetAuthorizationUser = new AtomicBoolean();
-    private final Set<SelectedRole> setOriginalRoles = Sets.newConcurrentHashSet();
+    private final Set<SelectedRole> setOriginalRoles = ConcurrentHashMap.newKeySet();
 
     private final Map<String, String> setSessionProperties = new ConcurrentHashMap<>();
-    private final Set<String> resetSessionProperties = Sets.newConcurrentHashSet();
+    private final Set<String> resetSessionProperties = ConcurrentHashMap.newKeySet();
 
     private final Map<String, SelectedRole> setRoles = new ConcurrentHashMap<>();
 
     private final Map<String, String> addedPreparedStatements = new ConcurrentHashMap<>();
-    private final Set<String> deallocatedPreparedStatements = Sets.newConcurrentHashSet();
+    private final Set<String> deallocatedPreparedStatements = ConcurrentHashMap.newKeySet();
 
     private final AtomicReference<TransactionId> startedTransactionId = new AtomicReference<>();
     private final AtomicBoolean clearTransactionId = new AtomicBoolean();
@@ -193,6 +192,7 @@ public class QueryStateMachine
     private final AtomicReference<List<RoutineInfo>> routines = new AtomicReference<>(ImmutableList.of());
     private final AtomicReference<Map<String, Metrics>> catalogMetadataMetrics = new AtomicReference<>(ImmutableMap.of());
     private final AtomicReference<Map<String, Metrics>> exchangeMetrics = new AtomicReference<>(ImmutableMap.of());
+    private final AtomicReference<Map<String, Long>> callResult = new AtomicReference<>();
     private final StateMachine<Optional<QueryInfo>> finalQueryInfo;
 
     private final WarningCollector warningCollector;
@@ -239,7 +239,7 @@ public class QueryStateMachine
         this.planOptimizersStatsCollector = requireNonNull(queryStatsCollector, "queryStatsCollector is null");
         this.exchangeMetricsCollector = requireNonNull(exchangeMetricsCollector, "exchangeMetricsCollector is null");
 
-        this.queryState = new StateMachine<>("query " + query, stateMachineExecutor, QUEUED, TERMINAL_QUERY_STATES);
+        this.queryState = new StateMachine<>("query-" + queryId, stateMachineExecutor, QUEUED, TERMINAL_QUERY_STATES);
         this.finalQueryInfo = new StateMachine<>("finalQueryInfo-" + queryId, stateMachineExecutor, Optional.empty());
         this.outputManager = new QueryOutputManager(stateMachineExecutor);
         this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
@@ -445,7 +445,7 @@ public class QueryStateMachine
             Map<ExchangeId, Metrics> metrics = exchangeMetricsCollector.collectMetrics(queryId);
             this.exchangeMetrics.set(
                     metrics.entrySet().stream()
-                            .collect(toMap(entry -> entry.getKey().getId(), Map.Entry::getValue)));
+                            .collect(toImmutableMap(entry -> entry.getKey().getId(), Map.Entry::getValue)));
         }
         catch (RuntimeException e) {
             QUERY_STATE_LOG.error(e, "Error collecting query exchange metrics: %s", queryId);
@@ -575,10 +575,8 @@ public class QueryStateMachine
     }
 
     @VisibleForTesting
-    ResultQueryInfo getResultQueryInfo(Optional<BasicStagesInfo> stagesInfo)
+    ResultQueryInfo getResultQueryInfo(QueryState state, Optional<BasicStagesInfo> stagesInfo)
     {
-        QueryState state = queryState.get();
-
         ErrorCode errorCode = null;
         if (state == FAILED) {
             ExecutionFailureInfo failureCause = this.failureCause.get();
@@ -907,7 +905,7 @@ public class QueryStateMachine
                     StageInfo stage = queue.poll();
                     StageStats stageStats = stage.stageStats();
                     totalStages++;
-                    if (stage.state().isScheduled()) {
+                    if (stage.state().isScheduled() && stageStats.getTotalDrivers() != 0) {
                         completedPercentageSum += 100.0 * stageStats.getCompletedDrivers() / stageStats.getTotalDrivers();
                         runningPercentageSum += 100.0 * stageStats.getRunningDrivers() / stageStats.getTotalDrivers();
                     }
@@ -1082,6 +1080,16 @@ public class QueryStateMachine
     {
         requireNonNull(routines, "routines is null");
         this.routines.set(ImmutableList.copyOf(routines));
+    }
+
+    public void setCallResult(Map<String, Long> metrics)
+    {
+        callResult.set(ImmutableMap.copyOf(metrics));
+    }
+
+    public Optional<Map<String, Long>> callResult()
+    {
+        return Optional.ofNullable(callResult.get());
     }
 
     private DynamicFiltersStats getDynamicFiltersStats()
@@ -1489,9 +1497,17 @@ public class QueryStateMachine
         return queryInfo;
     }
 
-    public ResultQueryInfo updateResultQueryInfo(Optional<BasicStagesInfo> stages, Supplier<Optional<StagesInfo>> stagesInfoProvider)
+    public void updateFinalQueryInfo(Supplier<Optional<StagesInfo>> stagesInfoProvider)
     {
-        ResultQueryInfo queryInfo = getResultQueryInfo(stages);
+        // query info is final only once the query is done
+        if (isDone()) {
+            updateQueryInfo(stagesInfoProvider.get());
+        }
+    }
+
+    public ResultQueryInfo updateResultQueryInfo(QueryState state, Optional<BasicStagesInfo> stages, Supplier<Optional<StagesInfo>> stagesInfoProvider)
+    {
+        ResultQueryInfo queryInfo = getResultQueryInfo(state, stages);
         if (queryInfo.finalQueryInfo()) {
             QueryInfo fullQueryInfo = getQueryInfo(stagesInfoProvider.get());
             finalQueryInfo.compareAndSet(Optional.empty(), Optional.of(fullQueryInfo));

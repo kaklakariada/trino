@@ -13,25 +13,37 @@
  */
 package io.trino.filesystem.s3;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.instrumentation.awssdk.v2_2.AwsSdkTelemetry;
 import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.s3.S3Context.S3SseContext;
+import io.trino.filesystem.s3.S3FileSystemConfig.S3AuthType;
+import io.trino.filesystem.s3.S3FileSystemConfig.SignerType;
+import io.trino.spi.security.ConnectorIdentity;
 import jakarta.annotation.PreDestroy;
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider;
 import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.http.SdkHttpClient;
-import software.amazon.awssdk.http.apache.ApacheHttpClient;
-import software.amazon.awssdk.http.apache.ProxyConfiguration;
+import software.amazon.awssdk.http.apache5.Apache5HttpClient;
+import software.amazon.awssdk.http.apache5.ProxyConfiguration;
+import software.amazon.awssdk.http.auth.aws.scheme.AwsV4AuthScheme;
+import software.amazon.awssdk.http.auth.aws.signer.AwsV4HttpSigner;
+import software.amazon.awssdk.http.auth.spi.scheme.AuthSchemeOption;
+import software.amazon.awssdk.http.auth.spi.signer.SignerProperty;
 import software.amazon.awssdk.metrics.MetricPublisher;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.LegacyMd5Plugin;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3ClientBuilder;
+import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.auth.scheme.S3AuthSchemeProvider;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider;
 
@@ -42,8 +54,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.filesystem.s3.S3FileSystemConfig.RetryMode.getRetryStrategy;
 import static io.trino.filesystem.s3.S3FileSystemUtils.createS3PreSigner;
@@ -53,7 +67,6 @@ import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static software.amazon.awssdk.core.checksums.ResponseChecksumValidation.WHEN_REQUIRED;
-import static software.amazon.awssdk.core.client.config.SdkAdvancedClientOption.SIGNER;
 
 final class S3FileSystemLoader
         implements Function<Location, TrinoFileSystemFactory>
@@ -61,9 +74,10 @@ final class S3FileSystemLoader
     private final Optional<S3SecurityMappingProvider> mappingProvider;
     private final SdkHttpClient httpClient;
     private final S3ClientFactory clientFactory;
-    private final S3FileSystemConfig config;
+    private final S3PresignerSettings presignerSettings;
     private final S3Context context;
     private final ExecutorService uploadExecutor = newCachedThreadPool(daemonThreadsNamed("s3-upload-%s"));
+    private final ExecutorService dnsRefreshExecutor = newCachedThreadPool(daemonThreadsNamed("s3-dns-refresh-%s"));
     private final Map<Optional<S3SecurityMappingResult>, S3Client> clients = new ConcurrentHashMap<>();
     private final Map<Optional<S3SecurityMappingResult>, S3Presigner> preSigners = new ConcurrentHashMap<>();
 
@@ -81,13 +95,13 @@ final class S3FileSystemLoader
     private S3FileSystemLoader(Optional<S3SecurityMappingProvider> mappingProvider, OpenTelemetry openTelemetry, S3FileSystemConfig config, S3FileSystemStats stats)
     {
         this.mappingProvider = requireNonNull(mappingProvider, "mappingProvider is null");
-        this.httpClient = createHttpClient(config);
+        this.httpClient = createHttpClient(config, dnsRefreshExecutor);
 
         requireNonNull(stats, "stats is null");
 
         MetricPublisher metricPublisher = stats.newMetricPublisher();
         this.clientFactory = s3ClientFactory(httpClient, openTelemetry, config, metricPublisher);
-        this.config = requireNonNull(config, "config is null");
+        this.presignerSettings = new S3PresignerSettings(config);
         this.context = new S3Context(
                 toIntExact(config.getStreamingPartSize().toBytes()),
                 config.isRequesterPays(),
@@ -97,30 +111,47 @@ final class S3FileSystemLoader
                         config.getSseCustomerKey()),
                 Optional.empty(),
                 config.getStorageClass(),
-                config.getCannedAcl());
+                config.getCannedAcl(),
+                config.getChecksumAlgorithm());
     }
 
     @Override
     public TrinoFileSystemFactory apply(Location location)
     {
-        return identity -> {
-            Optional<S3SecurityMappingResult> mapping = mappingProvider.orElseThrow().getMapping(identity, location);
-
-            S3Client client = clients.computeIfAbsent(mapping, _ -> clientFactory.create(mapping));
-            S3Presigner preSigner = preSigners.computeIfAbsent(mapping, _ -> createS3PreSigner(config, client));
-            S3Context context = this.context.withCredentials(identity);
-
-            if (mapping.isPresent() && mapping.get().kmsKeyId().isPresent()) {
-                checkState(mapping.get().sseCustomerKey().isEmpty(), "Both SSE-C and KMS-managed keys cannot be used at the same time");
-                context = context.withKmsKeyId(mapping.get().kmsKeyId().get());
+        return new TrinoFileSystemFactory()
+        {
+            @Override
+            public TrinoFileSystem create(ConnectorIdentity identity)
+            {
+                return createFileSystem(location, identity, context.withCredentials(identity));
             }
 
-            if (mapping.isPresent() && mapping.get().sseCustomerKey().isPresent()) {
-                context = context.withSseCustomerKey(mapping.get().sseCustomerKey().get());
+            @Override
+            public TrinoFileSystem create(Supplier<ConnectorIdentity> identitySupplier)
+            {
+                ConnectorIdentity identity = identitySupplier.get();
+                return createFileSystem(location, identity, context.withCredentials(identity, identitySupplier));
             }
-
-            return new S3FileSystem(uploadExecutor, client, preSigner, context);
         };
+    }
+
+    private TrinoFileSystem createFileSystem(Location location, ConnectorIdentity identity, S3Context s3Context)
+    {
+        Optional<S3SecurityMappingResult> mapping = mappingProvider.orElseThrow().getMapping(identity, location);
+
+        S3Client client = clients.computeIfAbsent(mapping, _ -> clientFactory.create(mapping));
+        S3Presigner preSigner = preSigners.computeIfAbsent(mapping, _ -> createS3PreSigner(presignerSettings, client));
+
+        if (mapping.isPresent() && mapping.get().kmsKeyId().isPresent()) {
+            checkState(mapping.get().sseCustomerKey().isEmpty(), "Both SSE-C and KMS-managed keys cannot be used at the same time");
+            s3Context = s3Context.withKmsKeyId(mapping.get().kmsKeyId().get());
+        }
+
+        if (mapping.isPresent() && mapping.get().sseCustomerKey().isPresent()) {
+            s3Context = s3Context.withSseCustomerKey(mapping.get().sseCustomerKey().get());
+        }
+
+        return new S3FileSystem(uploadExecutor, client, preSigner, s3Context);
     }
 
     @PreDestroy
@@ -128,6 +159,9 @@ final class S3FileSystemLoader
     {
         try (httpClient) {
             uploadExecutor.shutdownNow();
+        }
+        finally {
+            dnsRefreshExecutor.shutdownNow();
         }
     }
 
@@ -154,10 +188,17 @@ final class S3FileSystemLoader
         Optional<String> staticRegion = Optional.ofNullable(config.getRegion());
         Optional<String> staticEndpoint = Optional.ofNullable(config.getEndpoint());
         boolean pathStyleAccess = config.isPathStyleAccess();
-        boolean useWebIdentityTokenCredentialsProvider = config.isUseWebIdentityTokenCredentialsProvider();
+        boolean crossRegionAccessEnabled = config.isCrossRegionAccessEnabled();
+        S3Configuration serviceConfiguration = S3Configuration.builder()
+                .chunkedEncodingEnabled(config.isChunkedEncodingEnabled())
+                .build();
+        S3AuthType authType = config.getAuthType();
         Optional<String> staticIamRole = Optional.ofNullable(config.getIamRole());
         String staticRoleSessionName = config.getRoleSessionName();
         String externalId = config.getExternalId();
+        Optional<String> stsEndpoint = Optional.ofNullable(config.getStsEndpoint());
+        Optional<String> stsRegion = Optional.ofNullable(config.getStsRegion()).or(() -> staticRegion);
+        Optional<S3AuthSchemeProvider> authSchemeProvider = config.getSignerType().map(S3FileSystemLoader::createAuthSchemeProvider);
 
         return mapping -> {
             Optional<AwsCredentialsProvider> credentialsProvider = mapping
@@ -172,43 +213,48 @@ final class S3FileSystemLoader
 
             S3ClientBuilder s3 = S3Client.builder();
             s3.overrideConfiguration(overrideConfiguration);
-            s3.crossRegionAccessEnabled(config.isCrossRegionAccessEnabled());
+            s3.crossRegionAccessEnabled(crossRegionAccessEnabled);
             s3.httpClient(httpClient);
             s3.responseChecksumValidation(WHEN_REQUIRED);
             s3.requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED);
             s3.addPlugin(LegacyMd5Plugin.create());
+            s3.serviceConfiguration(serviceConfiguration);
+            authSchemeProvider.ifPresent(s3::authSchemeProvider);
 
             region.map(Region::of).ifPresent(s3::region);
             endpoint.map(URI::create).ifPresent(s3::endpointOverride);
             s3.forcePathStyle(pathStyleAccess);
 
-            if (useWebIdentityTokenCredentialsProvider) {
-                s3.credentialsProvider(WebIdentityTokenFileCredentialsProvider.builder()
+            switch (authType) {
+                case ANONYMOUS -> s3.credentialsProvider(AnonymousCredentialsProvider.create());
+                case WEB_IDENTITY -> s3.credentialsProvider(WebIdentityTokenFileCredentialsProvider.builder()
                         .asyncCredentialUpdateEnabled(true)
                         .build());
-            }
-            else if (iamRole.isPresent()) {
-                s3.credentialsProvider(StsAssumeRoleCredentialsProvider.builder()
-                        .refreshRequest(request -> request
-                                .roleArn(iamRole.get())
-                                .roleSessionName(roleSessionName)
-                                .externalId(externalId))
-                        .stsClient(createStsClient(config, credentialsProvider))
-                        .asyncCredentialUpdateEnabled(true)
-                        .build());
-            }
-            else {
-                credentialsProvider.ifPresent(s3::credentialsProvider);
+                case IAM_ROLE, DEFAULT -> {
+                    // A security mapping may supply a per-request IAM role even when the static auth type is DEFAULT.
+                    if (iamRole.isPresent()) {
+                        s3.credentialsProvider(StsAssumeRoleCredentialsProvider.builder()
+                                .refreshRequest(request -> request
+                                        .roleArn(iamRole.get())
+                                        .roleSessionName(roleSessionName)
+                                        .externalId(externalId))
+                                .stsClient(createStsClient(stsEndpoint, stsRegion, credentialsProvider))
+                                .asyncCredentialUpdateEnabled(true)
+                                .build());
+                    }
+                    else {
+                        credentialsProvider.ifPresent(s3::credentialsProvider);
+                    }
+                }
             }
 
             return s3.build();
         };
     }
 
-    @SuppressWarnings("deprecation")
     private static ClientOverrideConfiguration createOverrideConfiguration(OpenTelemetry openTelemetry, S3FileSystemConfig config, MetricPublisher metricPublisher)
     {
-        ClientOverrideConfiguration.Builder builder = ClientOverrideConfiguration.builder()
+        return ClientOverrideConfiguration.builder()
                 .addExecutionInterceptor(AwsSdkTelemetry.builder(openTelemetry)
                         .setCaptureExperimentalSpanAttributes(true)
                         .setRecordIndividualHttpError(true)
@@ -217,17 +263,57 @@ final class S3FileSystemLoader
                         .maxAttempts(config.getMaxErrorRetries())
                         .build())
                 .appId(config.getApplicationId())
-                .addMetricPublisher(metricPublisher);
-        config.getSignerType().ifPresent(signer -> builder.putAdvancedOption(SIGNER, signer.create()));
+                .addMetricPublisher(metricPublisher)
+                .build();
+    }
+
+    static S3AuthSchemeProvider createAuthSchemeProvider(SignerType signerType)
+    {
+        Map<SignerProperty<?>, Object> signerProperties = switch (signerType) {
+            case AwsS3V4Signer -> ImmutableMap.of();
+            case Aws4Signer, AsyncAws4Signer, EventStreamAws4Signer -> ImmutableMap.of(
+                    AwsV4HttpSigner.DOUBLE_URL_ENCODE, true,
+                    AwsV4HttpSigner.NORMALIZE_PATH, true);
+            case Aws4UnsignedPayloadSigner -> ImmutableMap.of(
+                    AwsV4HttpSigner.DOUBLE_URL_ENCODE, true,
+                    AwsV4HttpSigner.NORMALIZE_PATH, true,
+                    AwsV4HttpSigner.PAYLOAD_SIGNING_ENABLED, false);
+            case Aws4SignedPayloadSigner -> ImmutableMap.of(
+                    AwsV4HttpSigner.DOUBLE_URL_ENCODE, true,
+                    AwsV4HttpSigner.NORMALIZE_PATH, true,
+                    AwsV4HttpSigner.PAYLOAD_SIGNING_ENABLED, true);
+        };
+
+        S3AuthSchemeProvider delegate = S3AuthSchemeProvider.defaultProvider();
+        return params -> delegate.resolveAuthScheme(params).stream()
+                .map(option -> applySignerProperties(option, signerProperties))
+                .collect(toImmutableList());
+    }
+
+    private static AuthSchemeOption applySignerProperties(AuthSchemeOption option, Map<SignerProperty<?>, Object> signerProperties)
+    {
+        if (signerProperties.isEmpty() || !option.schemeId().equals(AwsV4AuthScheme.SCHEME_ID)) {
+            return option;
+        }
+        AuthSchemeOption.Builder builder = option.toBuilder();
+        signerProperties.forEach((property, value) -> putSignerProperty(builder, property, value));
         return builder.build();
     }
 
-    private static SdkHttpClient createHttpClient(S3FileSystemConfig config)
+    @SuppressWarnings("unchecked")
+    private static <T> void putSignerProperty(AuthSchemeOption.Builder builder, SignerProperty<?> property, Object value)
     {
-        ApacheHttpClient.Builder client = ApacheHttpClient.builder()
-                .maxConnections(config.getMaxConnections())
-                .tcpKeepAlive(config.getTcpKeepAlive());
+        builder.putSignerProperty((SignerProperty<T>) property, (T) value);
+    }
 
+    private static SdkHttpClient createHttpClient(S3FileSystemConfig config, Executor dnsRefreshExecutor)
+    {
+        Apache5HttpClient.Builder client = Apache5HttpClient.builder()
+                .maxConnections(config.getMaxConnections())
+                .tcpKeepAlive(config.getTcpKeepAlive())
+                .expectContinueEnabled(config.isExpectContinueEnabled());
+
+        CachingDnsResolver.create(dnsRefreshExecutor).ifPresent(client::dnsResolver);
         config.getConnectionTtl().ifPresent(ttl -> client.connectionTimeToLive(ttl.toJavaTime()));
         config.getConnectionMaxIdleTime().ifPresent(time -> client.connectionMaxIdleTime(time.toJavaTime()));
         config.getSocketConnectTimeout().ifPresent(timeout -> client.connectionTimeout(timeout.toJavaTime()));

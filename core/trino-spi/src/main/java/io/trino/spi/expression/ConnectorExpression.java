@@ -13,12 +13,24 @@
  */
 package io.trino.spi.expression;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import io.trino.spi.type.Type;
 
 import java.util.List;
 
 import static java.util.Objects.requireNonNull;
 
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "@type")
+@JsonSubTypes({
+        @JsonSubTypes.Type(value = Constant.class, name = "constant"),
+        @JsonSubTypes.Type(value = Variable.class, name = "variable"),
+        @JsonSubTypes.Type(value = Call.class, name = "call"),
+        @JsonSubTypes.Type(value = FieldDereference.class, name = "field_dereference"),
+        @JsonSubTypes.Type(value = Lambda.class, name = "lambda"),
+})
 public abstract class ConnectorExpression
 {
     private final Type type;
@@ -28,11 +40,13 @@ public abstract class ConnectorExpression
         this.type = requireNonNull(type, "type is null");
     }
 
+    @JsonProperty("type")
     public Type getType()
     {
         return type;
     }
 
+    @JsonIgnore
     public abstract List<? extends ConnectorExpression> getChildren();
 
     @Override

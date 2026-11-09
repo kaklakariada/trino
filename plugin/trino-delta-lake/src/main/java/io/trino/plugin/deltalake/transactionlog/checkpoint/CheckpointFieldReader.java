@@ -16,7 +16,7 @@ package io.trino.plugin.deltalake.transactionlog.checkpoint;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.block.ArrayBlock;
-import io.trino.spi.block.ByteArrayBlock;
+import io.trino.spi.block.Block;
 import io.trino.spi.block.IntArrayBlock;
 import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.MapBlock;
@@ -37,6 +37,7 @@ import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static java.util.Objects.requireNonNull;
 
 public class CheckpointFieldReader
@@ -60,8 +61,22 @@ public class CheckpointFieldReader
     public boolean getBoolean(String fieldName)
     {
         int field = requireField(fieldName);
-        ByteArrayBlock valueBlock = (ByteArrayBlock) row.getUnderlyingFieldBlock(field);
-        return valueBlock.getByte(row.getUnderlyingFieldPosition(field)) != 0;
+        return BOOLEAN.getBoolean(row.getUnderlyingFieldBlock(field), row.getUnderlyingFieldPosition(field));
+    }
+
+    public Optional<Boolean> getOptionalBoolean(String fieldName)
+    {
+        OptionalInt index = findField(fieldName);
+        if (index.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Block valueBlock = row.getUnderlyingFieldBlock(index.orElseThrow());
+        int position = row.getUnderlyingFieldPosition(index.orElseThrow());
+        if (valueBlock.isNull(position)) {
+            return Optional.empty();
+        }
+        return Optional.of(BOOLEAN.getBoolean(valueBlock, position));
     }
 
     public int getInt(String fieldName)
@@ -78,8 +93,8 @@ public class CheckpointFieldReader
             return OptionalInt.empty();
         }
 
-        IntArrayBlock valueBlock = (IntArrayBlock) row.getUnderlyingFieldBlock(index.getAsInt());
-        int position = row.getUnderlyingFieldPosition(index.getAsInt());
+        IntArrayBlock valueBlock = (IntArrayBlock) row.getUnderlyingFieldBlock(index.orElseThrow());
+        int position = row.getUnderlyingFieldPosition(index.orElseThrow());
         if (valueBlock.isNull(position)) {
             return OptionalInt.empty();
         }
@@ -120,8 +135,8 @@ public class CheckpointFieldReader
         if (index.isEmpty()) {
             return Optional.empty();
         }
-        ArrayBlock valueBlock = (ArrayBlock) row.getUnderlyingFieldBlock(index.getAsInt());
-        int position = row.getUnderlyingFieldPosition(index.getAsInt());
+        ArrayBlock valueBlock = (ArrayBlock) row.getUnderlyingFieldBlock(index.orElseThrow());
+        int position = row.getUnderlyingFieldPosition(index.orElseThrow());
         if (valueBlock.isNull(position)) {
             return Optional.empty();
         }
@@ -144,8 +159,8 @@ public class CheckpointFieldReader
         if (index.isEmpty()) {
             return null;
         }
-        RowBlock valueBlock = (RowBlock) row.getUnderlyingFieldBlock(index.getAsInt());
-        int position = row.getUnderlyingFieldPosition(index.getAsInt());
+        RowBlock valueBlock = (RowBlock) row.getUnderlyingFieldBlock(index.orElseThrow());
+        int position = row.getUnderlyingFieldPosition(index.orElseThrow());
         if (valueBlock.isNull(position)) {
             return null;
         }
