@@ -23,6 +23,7 @@ import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SourcePage;
 import org.slf4j.Logger;
@@ -50,10 +51,11 @@ public class ExasolParallelPageSource
     private final Connection mainConnection;
     private final PreparedStatement mainStatement;
     private final ResultSet mainResultSet;
+    private final List<Connection> unusedSubConnections;
     private volatile List<? extends Future<?>> readerTasks = List.of();
     private volatile boolean closed;
 
-    private ExasolParallelPageSource(List<ExasolResultHandlePageSource> subConnectionPageSources, ExecutorService executor, Connection mainConnection, PreparedStatement mainStatement, ResultSet mainResultSet)
+    ExasolParallelPageSource(List<ExasolResultHandlePageSource> subConnectionPageSources, ExecutorService executor, Connection mainConnection, PreparedStatement mainStatement, ResultSet mainResultSet, List<Connection> unusedSubConnections)
     {
         this.subConnectionPageSources = subConnectionPageSources;
         this.executor = executor;
@@ -61,6 +63,7 @@ public class ExasolParallelPageSource
         this.mainConnection = mainConnection;
         this.mainStatement = mainStatement;
         this.mainResultSet = mainResultSet;
+        this.unusedSubConnections = unusedSubConnections;
     }
 
     public static ConnectorPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles, MemoryContext memoryContext)
@@ -72,7 +75,7 @@ public class ExasolParallelPageSource
         return createParallelConnectionPageSource(jdbcClient, executor, parallelConnectionFactory, session, jdbcSplit, table, columnHandles);
     }
 
-    private static ExasolParallelPageSource createParallelConnectionPageSource(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles)
+    private static ConnectorPageSource createParallelConnectionPageSource(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles)
     {
         Connection mainConnection = null;
         PreparedStatement mainStatement = null;
@@ -83,11 +86,25 @@ public class ExasolParallelPageSource
             subConnections = parallelConnectionFactory.createConnections(session, mainConnection);
             mainStatement = prepareStatement(jdbcClient, session, mainConnection, table, jdbcSplit, columnHandles);
             mainResultSet = mainStatement.executeQuery();
-            int resultSetHandle = mainResultSet.unwrap(EXAResultSet.class).GetHandle();
+            EXAResultSet exaResultSet = mainResultSet.unwrap(EXAResultSet.class);
+            if (exaResultSet.getNumberOfRows() == 0) {
+                log.trace("Query returned no rows; skipping parallel result reading");
+                closeResources(mainConnection, mainStatement, mainResultSet, subConnections);
+                return new EmptyPageSource();
+            }
+            int resultSetHandle = exaResultSet.GetHandle();
+            if (resultSetHandle < 0) {
+                log.trace("Result set handle {} is unavailable for {} rows; reading from the main connection", resultSetHandle, exaResultSet.getNumberOfRows());
+                ResultSet directResultSet = mainResultSet;
+                ExasolResultHandlePageSource directSource = new ExasolResultHandlePageSource(jdbcClient, executor, session, mainConnection, resultSetHandle, columnHandles, () -> directResultSet);
+                ExasolParallelPageSource pageSource = new ExasolParallelPageSource(List.of(directSource), executor, mainConnection, mainStatement, mainResultSet, subConnections);
+                pageSource.startReading();
+                return pageSource;
+            }
             List<ExasolResultHandlePageSource> subConnectionPageSources = subConnections.stream()
                     .map(subConnection -> new ExasolResultHandlePageSource(jdbcClient, executor, session, subConnection, resultSetHandle, columnHandles))
                     .toList();
-            ExasolParallelPageSource pageSource = new ExasolParallelPageSource(subConnectionPageSources, executor, mainConnection, mainStatement, mainResultSet);
+            ExasolParallelPageSource pageSource = new ExasolParallelPageSource(subConnectionPageSources, executor, mainConnection, mainStatement, mainResultSet, List.of());
             pageSource.startReading();
             return pageSource;
         }
@@ -126,7 +143,7 @@ public class ExasolParallelPageSource
         }
     }
 
-    private void startReading()
+    void startReading()
     {
         readerTasks = IntStream.range(0, subConnectionPageSources.size())
                 .mapToObj(producerId -> executor.submit(() -> consumePageSource(producerId, subConnectionPageSources.get(producerId))))
@@ -263,6 +280,14 @@ public class ExasolParallelPageSource
         // When main connection is still open, closing of subconnections will block.
         log.debug("Closing {} subconnection page sources of {}...", subConnectionPageSources.size(), this);
         subConnectionPageSources.forEach(ExasolResultHandlePageSource::close);
+        for (Connection connection : unusedSubConnections) {
+            try {
+                connection.close();
+            }
+            catch (SQLException e) {
+                log.debug("Failed to close unused subconnection", e);
+            }
+        }
 
         closed = true;
         log.debug("Closed page source {} successfully", this);

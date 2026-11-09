@@ -40,4 +40,22 @@ public class TestParallelConnections
     {
         assertQuery("SELECT count(*) FROM nation", "SELECT 25");
     }
+
+    @Test
+    void testEmptyResult()
+    {
+        assertQuery("SELECT count(*) FROM nation WHERE nationkey = -1", "SELECT 0");
+    }
+
+    @Test
+    void testSmallResult()
+    {
+        assertQuery("SELECT name FROM nation WHERE nationkey = 1", "VALUES 'ARGENTINA'");
+    }
+
+    @Test
+    void testSeveralRowsInSmallResult()
+    {
+        assertQuery("SELECT name FROM nation WHERE nationkey < 3", "VALUES 'ALGERIA', 'ARGENTINA', 'BRAZIL'");
+    }
 }
