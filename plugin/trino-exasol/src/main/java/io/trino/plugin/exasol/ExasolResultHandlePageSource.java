@@ -240,12 +240,6 @@ public final class ExasolResultHandlePageSource
     }
 
     @Override
-    public long getMemoryUsage()
-    {
-        return pageBuilder.getRetainedSizeInBytes();
-    }
-
-    @Override
     public long getCompletedBytes()
     {
         return 0;

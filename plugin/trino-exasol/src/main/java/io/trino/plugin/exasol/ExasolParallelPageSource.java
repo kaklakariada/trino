@@ -23,6 +23,7 @@ import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SourcePage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,11 +63,11 @@ public class ExasolParallelPageSource
         this.mainResultSet = mainResultSet;
     }
 
-    public static ConnectorPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles)
+    public static ConnectorPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles, MemoryContext memoryContext)
     {
         int parallelImportWorkerCount = ExasolSessionProperties.getParallelImportWorkerCount(session);
         if (parallelImportWorkerCount == 0) {
-            return new JdbcPageSource(jdbcClient, executor, session, jdbcSplit, table, columnHandles);
+            return new JdbcPageSource(jdbcClient, executor, session, jdbcSplit, table, columnHandles, memoryContext);
         }
         return createParallelConnectionPageSource(jdbcClient, executor, parallelConnectionFactory, session, jdbcSplit, table, columnHandles);
     }
@@ -223,12 +224,6 @@ public class ExasolParallelPageSource
     public boolean isFinished()
     {
         return pageQueue.isFinished();
-    }
-
-    @Override
-    public long getMemoryUsage()
-    {
-        return subConnectionPageSources.stream().mapToLong(ConnectorPageSource::getMemoryUsage).sum();
     }
 
     @Override
