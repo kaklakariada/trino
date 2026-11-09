@@ -71,17 +71,11 @@ You can override the setting for an Exasol catalog using session property
 set session catalog.parallel_connections_worker_count = 4;
 ```
 
-:::{important}
-There is a known issue with the Exasol JDBC driver when loading small
-result sets using parallel connections. This operation may block forever
-when the query result only contains few rows (around 25 rows per connection),
-i.e. when at least one subconnection returns an empty result set.
-
-When this happens you need to restart the Trino cluster.
-
-We recommend using parallel connections only with large result sets
-containing more than 25 rows per connection.
-:::
+When Exasol returns an empty result, the connector skips parallel reading.
+When the JDBC driver has already closed the result set handle because the
+complete result was returned in the initial response, the connector reads
+the rows from the main connection instead. These queries do not benefit from
+parallel connections.
 
 :::{note}
 * Even with parallel connections, Trino will read the query result only
