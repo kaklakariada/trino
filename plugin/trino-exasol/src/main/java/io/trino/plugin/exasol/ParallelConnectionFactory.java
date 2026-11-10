@@ -15,8 +15,11 @@ package io.trino.plugin.exasol;
 
 import com.exasol.jdbc.EXAConnection;
 import com.exasol.jdbc.EXADriver;
+import com.exasol.jdbc.EXAURLParser;
+import com.exasol.jdbc.ParserResult;
 import com.google.inject.Inject;
 import io.opentelemetry.api.OpenTelemetry;
+import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.spi.connector.ConnectorSession;
@@ -42,13 +45,15 @@ public class ParallelConnectionFactory
     private final CredentialProvider credentialProvider;
     private final ExasolTlsCertificateFingerprintProvider tlsCertificateFingerprintProvider;
     private final OpenTelemetry openTelemetry;
+    private final Properties jdbcLoggingProperties;
 
     @Inject
-    public ParallelConnectionFactory(CredentialProvider credentialProvider, ExasolTlsCertificateFingerprintProvider tlsCertificateFingerprintProvider, OpenTelemetry openTelemetry)
+    public ParallelConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, ExasolTlsCertificateFingerprintProvider tlsCertificateFingerprintProvider, OpenTelemetry openTelemetry)
     {
         this.credentialProvider = requireNonNull(credentialProvider);
         this.tlsCertificateFingerprintProvider = requireNonNull(tlsCertificateFingerprintProvider);
         this.openTelemetry = requireNonNull(openTelemetry);
+        this.jdbcLoggingProperties = parseJdbcLoggingProperties(requireNonNull(config).getConnectionUrl());
     }
 
     public List<Connection> createConnections(ConnectorSession session, Connection connection)
@@ -123,14 +128,41 @@ public class ParallelConnectionFactory
 
     private Properties buildConnectionProperties(WorkerConnectionInfo connectionInfo)
     {
+        return buildConnectionProperties(connectionInfo.token(), connectionInfo.sessionId(), tlsCertificateFingerprintProvider.getCertificateFingerprint(), jdbcLoggingProperties);
+    }
+
+    static Properties buildConnectionProperties(long token, long sessionId, String fingerprint, Properties jdbcLoggingProperties)
+    {
         Properties connectionProperties = new Properties();
-        connectionProperties.setProperty("workertoken", String.valueOf(connectionInfo.token()));
-        connectionProperties.setProperty("sessionid", String.valueOf(connectionInfo.sessionId()));
+        connectionProperties.setProperty("workertoken", String.valueOf(token));
+        connectionProperties.setProperty("sessionid", String.valueOf(sessionId));
         connectionProperties.setProperty("autocommit", "0");
-        connectionProperties.setProperty("fingerprint", tlsCertificateFingerprintProvider.getCertificateFingerprint());
+        connectionProperties.setProperty("fingerprint", fingerprint);
         connectionProperties.setProperty("validateservercertificate", "1");
+        connectionProperties.putAll(jdbcLoggingProperties);
 
         return connectionProperties;
+    }
+
+    static Properties parseJdbcLoggingProperties(String jdbcUrl)
+    {
+        ParserResult parsedUrl;
+        try {
+            parsedUrl = new EXAURLParser().URLParser(jdbcUrl);
+        }
+        catch (SQLException e) {
+            throw new IllegalArgumentException("Invalid Exasol JDBC URL", e);
+        }
+
+        Properties loggingProperties = new Properties();
+        if (parsedUrl != null && "1".equals(parsedUrl.params.getProperty("debug"))) {
+            loggingProperties.setProperty("debug", "1");
+            String logdir = parsedUrl.params.getProperty("logdir");
+            if (logdir != null) {
+                loggingProperties.setProperty("logdir", logdir);
+            }
+        }
+        return loggingProperties;
     }
 
     private void closeConnections(List<CompletableFuture<Connection>> connectionFutures)

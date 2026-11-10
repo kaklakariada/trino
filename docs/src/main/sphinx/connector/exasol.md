@@ -77,6 +77,33 @@ complete result was returned in the initial response, the connector reads
 the rows from the main connection instead. These queries do not benefit from
 parallel connections.
 
+#### JDBC debug logging
+
+To collect JDBC driver logs for both the main connection and parallel worker
+connections, add `debug=1` and `logdir` to the catalog's `connection-url`:
+
+```text
+connection-url=jdbc:exa:exasol.example.com:8563;debug=1;logdir=/var/log/trino/exasol-jdbc
+```
+
+The connector passes these logging options to each worker connection. Create
+the log directory on every Trino node that runs queries and make it writable
+by the Trino process. The JDBC driver writes separate `jdbc_*.log` files in
+that directory. If `debug=1` is set without `logdir`, the driver writes logs
+in the process's current directory.
+
+For a controlled reproduction, record the Trino query ID and time window.
+Collect the JDBC log files from every involved Trino node, together with the
+Trino logs for that interval. Add the following entry to `etc/log.properties`
+to correlate worker lifecycle messages with the query ID and Exasol session ID:
+
+```text
+io.trino.plugin.exasol=DEBUG
+```
+
+See {doc}`/admin/logging` for Trino logging configuration. Remove `debug=1`
+after collecting the logs; driver debug logging can produce large files.
+
 :::{note}
 * Even with parallel connections, Trino will read the query result only
   on a single Trino node, but in multiple threads.
