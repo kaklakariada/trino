@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.exasol;
 
+import com.exasol.jdbc.EXAConnection;
 import com.exasol.jdbc.EXAResultSet;
 import io.trino.plugin.jdbc.BaseJdbcConnectorTableHandle;
 import io.trino.plugin.jdbc.JdbcClient;
@@ -52,10 +53,12 @@ public class ExasolParallelPageSource
     private final PreparedStatement mainStatement;
     private final ResultSet mainResultSet;
     private final List<Connection> unusedSubConnections;
+    private final String queryId;
+    private final long sessionId;
     private volatile List<? extends Future<?>> readerTasks = List.of();
     private volatile boolean closed;
 
-    ExasolParallelPageSource(List<ExasolResultHandlePageSource> subConnectionPageSources, ExecutorService executor, Connection mainConnection, PreparedStatement mainStatement, ResultSet mainResultSet, List<Connection> unusedSubConnections)
+    ExasolParallelPageSource(List<ExasolResultHandlePageSource> subConnectionPageSources, ExecutorService executor, Connection mainConnection, PreparedStatement mainStatement, ResultSet mainResultSet, List<Connection> unusedSubConnections, String queryId, long sessionId)
     {
         this.subConnectionPageSources = subConnectionPageSources;
         this.executor = executor;
@@ -64,6 +67,8 @@ public class ExasolParallelPageSource
         this.mainStatement = mainStatement;
         this.mainResultSet = mainResultSet;
         this.unusedSubConnections = unusedSubConnections;
+        this.queryId = queryId;
+        this.sessionId = sessionId;
     }
 
     public static ConnectorPageSource create(JdbcClient jdbcClient, ExecutorService executor, ParallelConnectionFactory parallelConnectionFactory, ConnectorSession session, JdbcSplit jdbcSplit, BaseJdbcConnectorTableHandle table, List<JdbcColumnHandle> columnHandles, MemoryContext memoryContext)
@@ -81,42 +86,50 @@ public class ExasolParallelPageSource
         PreparedStatement mainStatement = null;
         ResultSet mainResultSet = null;
         List<Connection> subConnections = List.of();
+        long sessionId = -1;
         try {
             mainConnection = createExaConnection(jdbcClient, session, table);
+            sessionId = mainConnection.unwrap(EXAConnection.class).getSessionID();
+            log.debug("Starting Exasol parallel read: queryId={}, sessionId={}, requestedWorkers={}", session.getQueryId(), sessionId, ExasolSessionProperties.getParallelImportWorkerCount(session));
             subConnections = parallelConnectionFactory.createConnections(session, mainConnection);
+            log.debug("Connected Exasol parallel workers: queryId={}, sessionId={}, workers={}", session.getQueryId(), sessionId, subConnections.size());
             mainStatement = prepareStatement(jdbcClient, session, mainConnection, table, jdbcSplit, columnHandles);
             mainResultSet = mainStatement.executeQuery();
             EXAResultSet exaResultSet = mainResultSet.unwrap(EXAResultSet.class);
             if (exaResultSet.getNumberOfRows() == 0) {
                 log.trace("Query returned no rows; skipping parallel result reading");
-                closeResources(mainConnection, mainStatement, mainResultSet, subConnections);
+                log.debug("Closing empty Exasol parallel read: queryId={}, sessionId={}, workers={}", session.getQueryId(), sessionId, subConnections.size());
+                closeResources(session.getQueryId(), sessionId, mainConnection, mainStatement, mainResultSet, subConnections);
                 return new EmptyPageSource();
             }
             int resultSetHandle = exaResultSet.GetHandle();
+            log.debug("Executed Exasol parallel read: queryId={}, sessionId={}, rows={}, resultSetHandle={}", session.getQueryId(), sessionId, exaResultSet.getNumberOfRows(), resultSetHandle);
             if (resultSetHandle < 0) {
                 log.trace("Result set handle {} is unavailable for {} rows; reading from the main connection", resultSetHandle, exaResultSet.getNumberOfRows());
                 ResultSet directResultSet = mainResultSet;
                 ExasolResultHandlePageSource directSource = new ExasolResultHandlePageSource(jdbcClient, executor, session, mainConnection, resultSetHandle, columnHandles, () -> directResultSet);
-                ExasolParallelPageSource pageSource = new ExasolParallelPageSource(List.of(directSource), executor, mainConnection, mainStatement, mainResultSet, subConnections);
+                ExasolParallelPageSource pageSource = new ExasolParallelPageSource(List.of(directSource), executor, mainConnection, mainStatement, mainResultSet, subConnections, session.getQueryId(), sessionId);
                 pageSource.startReading();
                 return pageSource;
             }
             List<ExasolResultHandlePageSource> subConnectionPageSources = subConnections.stream()
                     .map(subConnection -> new ExasolResultHandlePageSource(jdbcClient, executor, session, subConnection, resultSetHandle, columnHandles))
                     .toList();
-            ExasolParallelPageSource pageSource = new ExasolParallelPageSource(subConnectionPageSources, executor, mainConnection, mainStatement, mainResultSet, List.of());
+            ExasolParallelPageSource pageSource = new ExasolParallelPageSource(subConnectionPageSources, executor, mainConnection, mainStatement, mainResultSet, List.of(), session.getQueryId(), sessionId);
             pageSource.startReading();
             return pageSource;
         }
         catch (SQLException | RuntimeException e) {
-            closeResources(mainConnection, mainStatement, mainResultSet, subConnections);
-            log.error("Error creating parallel connection page source: {}", e.getMessage(), e);
+            log.debug("Closing failed Exasol parallel read: queryId={}, sessionId={}, workers={}", session.getQueryId(), sessionId, subConnections.size());
+            closeResources(session.getQueryId(), sessionId, mainConnection, mainStatement, mainResultSet, subConnections);
+            log.error("Error creating Exasol parallel page source: queryId={}, sessionId={}, error={}", session.getQueryId(), sessionId, e.getMessage(), e);
             throw new RuntimeException("Error creating parallel connection page source: " + e.getMessage(), e);
         }
     }
 
-    private static void closeResources(Connection mainConnection, PreparedStatement mainStatement, ResultSet mainResultSet, List<Connection> subConnections)
+    private static void closeResources(String queryId, long sessionId, Connection mainConnection, PreparedStatement mainStatement, ResultSet mainResultSet, List<Connection> subConnections)
     {
+        log.debug("Closing Exasol main connection during setup cleanup: queryId={}, sessionId={}", queryId, sessionId);
         try (Connection _ = mainConnection;
                 Statement statement = mainStatement;
                 ResultSet _ = mainResultSet) {
@@ -130,17 +143,19 @@ public class ExasolParallelPageSource
             }
         }
         catch (SQLException | RuntimeException e) {
-            log.debug("Closing failed during cleanup", e);
+            log.debug("Exasol main connection setup cleanup failed: queryId={}, sessionId={}", queryId, sessionId, e);
         }
 
-        for (Connection subConnection : subConnections) {
+        log.debug("Closing Exasol workers during setup cleanup: queryId={}, sessionId={}, workers={}", queryId, sessionId, subConnections.size());
+        for (int workerId = 0; workerId < subConnections.size(); workerId++) {
             try {
-                subConnection.close();
+                subConnections.get(workerId).close();
             }
             catch (SQLException e) {
-                log.debug("Failed to close subconnection during cleanup", e);
+                log.debug("Failed to close Exasol worker during setup cleanup: queryId={}, sessionId={}, worker={}", queryId, sessionId, workerId, e);
             }
         }
+        log.debug("Finished Exasol parallel setup cleanup: queryId={}, sessionId={}", queryId, sessionId);
     }
 
     void startReading()
@@ -152,27 +167,31 @@ public class ExasolParallelPageSource
 
     private void consumePageSource(int producerId, ExasolResultHandlePageSource source)
     {
+        String outcome = "completed";
         try {
-            log.info("Reading all pages from {}...", source);
+            log.debug("Starting Exasol worker read: queryId={}, sessionId={}, worker={}", queryId, sessionId, producerId);
             while (!source.isFinished()) {
                 SourcePage page = source.getNextSourcePage();
                 if (page != null) {
                     pageQueue.add(page);
-                    log.debug("Found page {} with {} rows from source {}, queue size: {}", page, page.getPositionCount(), source, pageQueue.size());
+                    log.trace("Found page {} with {} rows from source {}, queue size: {}", page, page.getPositionCount(), source, pageQueue.size());
                 }
             }
         }
         catch (InterruptedException e) {
+            outcome = "interrupted";
             Thread.currentThread().interrupt();
-            log.debug("Reading interrupted for source {}", source, e);
+            log.debug("Exasol worker read interrupted: queryId={}, sessionId={}, worker={}", queryId, sessionId, producerId, e);
         }
         catch (Throwable e) {
-            log.error("Error reading from source {}: {}", source, e.getMessage(), e);
+            outcome = "failed";
+            log.error("Exasol worker read failed: queryId={}, sessionId={}, worker={}, error={}", queryId, sessionId, producerId, e.getMessage(), e);
             pageQueue.fail(producerId, e);
         }
         finally {
             source.closeResultSet();
             pageQueue.finish(producerId);
+            log.debug("Finished Exasol worker read: queryId={}, sessionId={}, worker={}, outcome={}, rows={}", queryId, sessionId, producerId, outcome, source.getCompletedPositions().orElse(0));
         }
     }
 
@@ -206,7 +225,7 @@ public class ExasolParallelPageSource
             throw new RuntimeException("Sub connection failure: " + throwable.getMessage(), throwable);
         }
         SourcePage page = pageQueue.poll();
-        log.debug("Got next source page {}, remaining queue size: {}", page, pageQueue.size());
+        log.trace("Got next source page {}, remaining queue size: {}", page, pageQueue.size());
         return page;
     }
 
@@ -248,48 +267,54 @@ public class ExasolParallelPageSource
     public void close()
     {
         if (closed) {
-            log.debug("Page sources already closed");
+            log.debug("Exasol parallel page source already closed: queryId={}, sessionId={}", queryId, sessionId);
             return;
         }
+        log.debug("Closing Exasol parallel page source: queryId={}, sessionId={}, finished={}, workerFailure={}, activeWorkers={}, queuedPages={}", queryId, sessionId, pageQueue.isFinished(), pageQueue.getFailure() != null, pageQueue.activeProducerCount(), pageQueue.size());
         readerTasks.forEach(task -> task.cancel(true));
         subConnectionPageSources.forEach(ExasolResultHandlePageSource::closeResultSet);
 
-        log.debug("Closing main connection...");
+        log.debug("Closing Exasol main connection: queryId={}, sessionId={}", queryId, sessionId);
         // use try with resources to close everything properly
         try (Connection _ = this.mainConnection;
                 Statement statement = this.mainStatement;
                 ResultSet _ = this.mainResultSet) {
             if (statement != null) {
                 try {
-                    log.debug("Cancelling statement...");
+                    log.debug("Cancelling Exasol main statement: queryId={}, sessionId={}", queryId, sessionId);
                     // Trying to cancel running statement as close() may not do it
                     statement.cancel();
                 }
                 catch (SQLException e) {
-                    log.debug("Cancel failed", e);
+                    log.debug("Exasol main statement cancel failed: queryId={}, sessionId={}", queryId, sessionId, e);
                     // statement already closed or cancel is not supported
                 }
             }
         }
         catch (SQLException | RuntimeException e) {
             // ignore exception from close
-            log.debug("Closing failed", e);
+            log.debug("Exasol main connection cleanup failed: queryId={}, sessionId={}", queryId, sessionId, e);
         }
+        log.debug("Finished Exasol main connection cleanup: queryId={}, sessionId={}", queryId, sessionId);
 
         // Subconnections must be closed after the main connection.
         // When main connection is still open, closing of subconnections will block.
-        log.debug("Closing {} subconnection page sources of {}...", subConnectionPageSources.size(), this);
-        subConnectionPageSources.forEach(ExasolResultHandlePageSource::close);
+        log.debug("Closing Exasol worker connections: queryId={}, sessionId={}, workers={}, unusedWorkers={}", queryId, sessionId, subConnectionPageSources.size(), unusedSubConnections.size());
+        for (int workerId = 0; workerId < subConnectionPageSources.size(); workerId++) {
+            log.debug("Closing Exasol worker connection: queryId={}, sessionId={}, worker={}", queryId, sessionId, workerId);
+            subConnectionPageSources.get(workerId).close();
+            log.debug("Finished Exasol worker connection cleanup: queryId={}, sessionId={}, worker={}", queryId, sessionId, workerId);
+        }
         for (Connection connection : unusedSubConnections) {
             try {
                 connection.close();
             }
             catch (SQLException e) {
-                log.debug("Failed to close unused subconnection", e);
+                log.debug("Failed to close unused Exasol subconnection: queryId={}, sessionId={}", queryId, sessionId, e);
             }
         }
 
         closed = true;
-        log.debug("Closed page source {} successfully", this);
+        log.debug("Closed Exasol parallel page source: queryId={}, sessionId={}", queryId, sessionId);
     }
 }

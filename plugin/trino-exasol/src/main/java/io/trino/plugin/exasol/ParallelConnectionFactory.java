@@ -96,14 +96,16 @@ public class ParallelConnectionFactory
 
     private Connection createSubConnection(WorkerConnectionInfo connectionInfo)
     {
-        log.info("Creating subconnection #{} to host {}...", connectionInfo.workerId(), connectionInfo.host());
+        log.debug("Connecting Exasol worker: queryId={}, sessionId={}, worker={}, host={}", connectionInfo.session().getQueryId(), connectionInfo.sessionId(), connectionInfo.workerId(), connectionInfo.host());
         try {
             try (DriverConnectionFactory connectionFactory = buildConnectionFactory(connectionInfo)) {
-                return connectionFactory.openConnection(connectionInfo.session());
+                Connection connection = connectionFactory.openConnection(connectionInfo.session());
+                log.debug("Connected Exasol worker: queryId={}, sessionId={}, worker={}", connectionInfo.session().getQueryId(), connectionInfo.sessionId(), connectionInfo.workerId());
+                return connection;
             }
         }
         catch (SQLException e) {
-            log.error("Failed to create subconnection #{} to {}: {}", connectionInfo.workerId(), connectionInfo.host(), e.getMessage(), e);
+            log.error("Failed to connect Exasol worker: queryId={}, sessionId={}, worker={}, host={}, error={}", connectionInfo.session().getQueryId(), connectionInfo.sessionId(), connectionInfo.workerId(), connectionInfo.host(), e.getMessage(), e);
             throw new RuntimeException("Failed connecting to %s: %s".formatted(connectionInfo.host(), e.getMessage()), e);
         }
     }

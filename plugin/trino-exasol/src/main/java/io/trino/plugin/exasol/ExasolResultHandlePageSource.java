@@ -242,7 +242,7 @@ public final class ExasolResultHandlePageSource
         try {
             log.debug("Getting result set for handle %d...", resultSetHandle);
             ResultSet rs = resultSetSupplier.get();
-            log.debug("Got result set for handle: %s", rs);
+            log.debug("Got result set %s for handle %d", rs, resultSetHandle);
             if (!future.complete(rs)) {
                 closeResultSetQuietly(rs);
             }

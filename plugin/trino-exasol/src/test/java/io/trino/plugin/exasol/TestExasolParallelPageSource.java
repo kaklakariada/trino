@@ -52,7 +52,9 @@ final class TestExasolParallelPageSource
                         }
                         return null;
                     }),
-                    List.of(connection(events, "worker 1"), connection(events, "worker 2")));
+                    List.of(connection(events, "worker 1"), connection(events, "worker 2")),
+                    "test-query",
+                    1);
 
             source.close();
             source.close();
@@ -80,7 +82,9 @@ final class TestExasolParallelPageSource
                     connection(events, "main connection"),
                     proxy(PreparedStatement.class, (_, _, _) -> null),
                     resultSet(() -> false),
-                    List.of());
+                    List.of(),
+                    "test-query",
+                    1);
             try {
                 source.startReading();
                 int positions = 0;

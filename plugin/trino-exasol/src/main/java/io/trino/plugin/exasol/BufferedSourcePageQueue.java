@@ -80,6 +80,13 @@ final class BufferedSourcePageQueue
         return queue.size();
     }
 
+    int activeProducerCount()
+    {
+        return (int) producerStates.values().stream()
+                .filter(state -> !state.isTerminal())
+                .count();
+    }
+
     boolean isEmpty()
     {
         return queue.isEmpty();
